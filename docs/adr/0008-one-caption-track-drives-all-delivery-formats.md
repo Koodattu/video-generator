@@ -1,0 +1,3 @@
+# One Caption Track drives all delivery formats
+
+Captions are enabled by default and originate from one normalized, word-timed Caption Track. Every captioned Run emits an SRT sidecar and embeds a selectable `mov_text` track in the primary MP4; an optional second MP4 may render animated ASS captions into the video pixels using FFmpeg and libass. Cloud TTS timing is normalized into the same artifact as timing produced by a local alignment Backend. This produces an additional file when animation is requested and accepts that selectable-caption styling varies by player, but it prevents timing drift between formats and keeps accessibility independent of visual presentation.

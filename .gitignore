@@ -209,6 +209,13 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Video Generator local state and private inputs
+/.cache/
+/runs/
+/private/
+/config.toml
+/brief.toml
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

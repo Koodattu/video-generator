@@ -1,0 +1,3 @@
+# Track Usage Purpose and voice authorization
+
+The initial Usage Purpose is private, personal, and noncommercial research, education, and entertainment, so Backends with compatible noncommercial or research terms may be selected. Model IDs, revisions, and license metadata will still be captured and checked against the declared Usage Purpose so restricted artifacts cannot later be mistaken for commercially reusable outputs. Voice cloning is limited to the user's own voice; reference recordings are private inputs and must remain outside version control and ordinary diagnostic logs. This permits stronger research-only models where useful without discarding provenance or privacy safeguards.

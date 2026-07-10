@@ -1,0 +1,3 @@
+# Orchestrate bounded Workflow Tasks
+
+The harness will execute a fixed, inspectable sequence of typed Workflow Tasks rather than open-ended autonomous agent loops. Each task has versioned instructions, validated inputs and outputs, a configured Backend, and explicit attempt and completion limits; its artifacts can be resumed or rerun independently. The research task may use a bounded tool-call loop because source discovery is iterative, but all other creative and review roles operate as finite transformations and evaluations. This gives up some unconstrained agent autonomy in exchange for predictable cost, provider-independent behavior, debuggable state, and reliable completion.

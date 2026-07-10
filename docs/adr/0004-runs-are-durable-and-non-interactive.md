@@ -1,0 +1,3 @@
+# Runs are durable and non-interactive
+
+The default CLI command will execute the complete workflow without interactive prompts, persisting a frozen configuration and typed artifacts as it progresses. A Run can be resumed after failure, and explicit checkpoint options can intentionally stop it after a named stage, but partial execution is never the default. Reusable artifacts will be validated against their inputs and schema, prompt, and Backend versions before resumption. This durable model adds state-management and storage complexity, but avoids repeating expensive generation and supports both unattended automation and deliberate review.
