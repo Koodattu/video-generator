@@ -15,6 +15,7 @@ quality = "draft"
 content_mode = "fiction"
 audience = "family_safe_general"
 
+# Built-in starting style. You may use another stable style ID and describe it below.
 style = "ms_paint_stick"
 style_description = ""
 motion_style = "static_cuts"
@@ -43,18 +44,19 @@ animated_captions = false
 
 [voice]
 name = "my_voice"
+authorization = "self"
 # Keep these files under private/, which is excluded from version control.
 reference_audio = "private/voice/me.wav"
 reference_transcript = "private/voice/me.txt"
 # Used by profiles that route narration to ElevenLabs.
 elevenlabs_voice_id = ""
 
-# Advanced per-task overrides remain explicit and opt-in. The exact Backend names will be
-# frozen when implementation begins; ordinary Runs should use a curated profile.
+# Advanced per-task overrides remain explicit and opt-in. Ordinary Runs should use a curated profile;
+# the resolved Backend descriptors and local runner manifests are frozen into each Run Bundle.
 [task_overrides]
 # search = "brave:web"
-# research = "local:qwen3.6-27b-q4"
-# script_draft = "openai:gpt-5.5"
-# image_prompt_compile = "local:qwen3.6-27b-q4"
+# research = "local:llama-server"
+# script_draft = "openai:gpt-5.6-terra"
+# image_prompt_compile = "local:llama-server"
 # image_generate = "local:flux.2-klein-4b"
 # narration_synthesis = "elevenlabs:eleven_multilingual_v2"

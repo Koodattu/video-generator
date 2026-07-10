@@ -20,6 +20,10 @@ _Avoid_: Engine, module
 A named assignment of Backends and generation settings to Workflow Tasks for one Run.
 _Avoid_: Mode, stack, preset
 
+**Local LLM Profile**:
+One audited local Structured Text evaluation variant: exact GGUF and optional drafter, full source and llama.cpp commits, hashes, license, context tier, and speculative setting. It is a Backend runtime input rather than a workflow.
+_Avoid_: Model zoo, automatic winner, LLM mode
+
 **Content Mode**:
 The declared relationship between a video's narrative and real-world evidence. `fiction` is an invented story for which research is creative input only; `factual` contains claims intended to be supported by captured sources.
 _Avoid_: Genre, hybrid

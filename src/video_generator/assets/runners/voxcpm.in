@@ -1,0 +1,5 @@
+torch==2.13.0
+voxcpm==2.0.3
+huggingface-hub>=0.36,<1
+soundfile>=0.13,<1
+

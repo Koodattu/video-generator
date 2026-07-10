@@ -1,0 +1,814 @@
+from __future__ import annotations
+
+import json
+import os
+import queue
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, IO, Literal, Mapping
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from .contracts import ProbeItem, ProbeReport
+from .errors import BackendError, ErrorKind
+from .profiles import EXPECTED_LOCAL_MODEL_REVISIONS
+from .util import atomic_write_json, read_json, sha256_file
+
+
+def runner_slug(backend_id: str) -> str:
+    return backend_id.replace(":", "--").replace("/", "-")
+
+
+def decode_wsl_output(value: bytes) -> str:
+    """Decode wsl.exe management output, which is UTF-16LE when redirected on Windows."""
+
+    if value.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return value.decode("utf-16", errors="replace").lstrip("\ufeff")
+    if value and value.count(b"\x00") >= max(1, len(value) // 4):
+        return value.decode("utf-16-le", errors="replace").lstrip("\ufeff")
+    return value.decode("utf-8-sig", errors="replace")
+
+
+class RunnerSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    protocol_version: Literal[1] = 1
+    backend_id: str
+    platform: str = Field(pattern="^(native|wsl)$")
+    command: list[str] = Field(min_length=1)
+    model_family: str
+    requires_cuda: bool = True
+    timeout_seconds: float = Field(default=600, gt=0, le=7200)
+    startup_timeout_seconds: float = Field(default=180, gt=0, le=1800)
+    wsl_distribution: str = ""
+    environment: dict[str, str] = Field(default_factory=dict)
+    model_paths: list[str] = Field(min_length=1)
+    asset_manifests: dict[str, str] = Field(min_length=1)
+    runtime_files: dict[str, str] = Field(min_length=1)
+    runtime_revision: str
+    model_revision: str
+    setup_source_revision: str
+    license_name: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def windows_to_wsl(path: Path) -> str:
+    path = path.resolve()
+    drive = path.drive.rstrip(":").lower()
+    if not drive or not path.is_absolute():
+        raise ValueError(f"cannot map non-drive Windows path into WSL: {path}")
+    tail = path.as_posix().split(":", 1)[1]
+    return f"/mnt/{drive}{tail}"
+
+
+class GpuLease:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._handle: IO[bytes] | None = None
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        handle.seek(0)
+        if handle.read(1) == b"":
+            handle.seek(0)
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise BackendError(
+                "another local model process holds the exclusive GPU lease",
+                kind=ErrorKind.NOT_READY,
+                action="Wait for the other Run to finish or terminate its local runner cleanly.",
+            ) from exc
+        self._handle = handle
+
+    def release(self) -> None:
+        if self._handle is None:
+            return
+        try:
+            self._handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+            self._handle = None
+
+
+@dataclass
+class _RunnerProcess:
+    spec: RunnerSpec
+    process: subprocess.Popen[str]
+    responses: queue.Queue[dict[str, Any]]
+    reader: threading.Thread
+    stderr_handle: IO[str]
+    started_at: float = field(default_factory=time.monotonic)
+
+
+class RunnerManager:
+    def __init__(
+        self,
+        *,
+        project_root: Path,
+        run_root: Path,
+        cache_root: Path | None = None,
+    ) -> None:
+        self.project_root = project_root.resolve()
+        self.run_root = run_root.resolve()
+        self.cache_root = (cache_root or self.project_root / ".cache").resolve()
+        self.manifest_root = self.cache_root / "runners"
+        self.model_root = self.cache_root / "models"
+        self.lease = GpuLease(self.cache_root / "locks" / "gpu.lock")
+        self.current: _RunnerProcess | None = None
+        self._lease_held = False
+        self._request_lock = threading.Lock()
+        self.last_cleanup: dict[str, dict[str, Any]] = {}
+        self._cleanup_sequence = 0
+
+    def manifest_path(self, backend_id: str) -> Path:
+        return self.manifest_root / runner_slug(backend_id) / "runner.json"
+
+    def load_spec(self, backend_id: str) -> RunnerSpec:
+        path = self.manifest_path(backend_id)
+        try:
+            spec = RunnerSpec.model_validate(read_json(path))
+            if spec.backend_id != backend_id:
+                raise ValueError(f"runner manifest declares {spec.backend_id}, expected {backend_id}")
+            expected_revision = EXPECTED_LOCAL_MODEL_REVISIONS.get(backend_id)
+            if expected_revision and spec.model_revision != expected_revision:
+                raise ValueError(
+                    f"runner model revision {spec.model_revision} does not match expected {expected_revision}"
+                )
+            if spec.model_family == "acestep":
+                expected_setup_source = "dce621408bee8c31b4fcf4811682eb9359e1bc94"
+            else:
+                requirements = (
+                    Path(__file__).resolve().parent
+                    / "assets"
+                    / "runners"
+                    / f"{spec.model_family}.in"
+                )
+                expected_setup_source = sha256_file(requirements) if requirements.is_file() else "<missing>"
+            if spec.setup_source_revision != expected_setup_source:
+                raise ValueError("runner was built from an obsolete Setup requirements source")
+            return spec
+        except FileNotFoundError as exc:
+            raise BackendError(
+                f"local Backend {backend_id} is not prepared",
+                kind=ErrorKind.NOT_READY,
+                action=f"Run: video-generator setup --backend {backend_id}",
+            ) from exc
+        except (ValidationError, ValueError) as exc:
+            raise BackendError(
+                f"invalid runner manifest for {backend_id}: {exc}", kind=ErrorKind.NOT_READY
+            ) from exc
+
+    def probe(self, backend_id: str, *, live: bool = False) -> ProbeReport:
+        items: list[ProbeItem] = []
+        try:
+            spec = self.load_spec(backend_id)
+        except BackendError as exc:
+            return ProbeReport(
+                backend_id=backend_id,
+                ready=False,
+                items=[ProbeItem(name="runner_manifest", ready=False, detail=exc.message, action=exc.action)],
+            )
+        items.append(ProbeItem(name="runner_manifest", ready=True, detail=str(self.manifest_path(backend_id))))
+        if spec.platform == "native":
+            executable = spec.command[0] if spec.command else ""
+            found = bool(executable and (Path(executable).is_file() or shutil.which(executable)))
+            items.append(
+                ProbeItem(
+                    name="runner_executable",
+                    ready=found,
+                    detail=executable if found else f"executable not found: {executable}",
+                    action=None if found else f"Repair {self.manifest_path(backend_id)} or rerun Setup.",
+                )
+            )
+            if spec.requires_cuda:
+                nvidia_smi = shutil.which("nvidia-smi")
+                cuda_ready = False
+                used_gpu_memory_mb: int | None = None
+                if nvidia_smi:
+                    try:
+                        cuda_ready = subprocess.run(
+                            [nvidia_smi, "-L"],
+                            capture_output=True,
+                            timeout=30,
+                            check=False,
+                        ).returncode == 0
+                        memory_probe = subprocess.run(
+                            [
+                                nvidia_smi,
+                                "--query-gpu=memory.used",
+                                "--format=csv,noheader,nounits",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            timeout=30,
+                            check=False,
+                        )
+                        if memory_probe.returncode == 0:
+                            values = [
+                                int(line.strip().split(",", 1)[0])
+                                for line in memory_probe.stdout.splitlines()
+                                if line.strip()
+                            ]
+                            used_gpu_memory_mb = sum(values) if values else None
+                    except (OSError, ValueError, subprocess.TimeoutExpired):
+                        pass
+                items.append(
+                    ProbeItem(
+                        name="cuda_gpu",
+                        ready=cuda_ready,
+                        detail="CUDA-capable NVIDIA GPU visible" if cuda_ready else "NVIDIA GPU probe failed",
+                        action=None if cuda_ready else "Install/repair the NVIDIA driver before local generation.",
+                    )
+                )
+                if used_gpu_memory_mb is not None:
+                    detail = f"{used_gpu_memory_mb} MB aggregate GPU memory in use before model launch"
+                    if used_gpu_memory_mb > 2048:
+                        detail += "; close unrelated GPU applications before fit or speed benchmarks"
+                    items.append(
+                        ProbeItem(name="gpu_memory_baseline", ready=True, detail=detail)
+                    )
+        else:
+            wsl = shutil.which("wsl.exe") or shutil.which("wsl")
+            distro_ready = False
+            python_ready = False
+            ffmpeg_ready = False
+            cuda_ready = False
+            if wsl and spec.wsl_distribution:
+                try:
+                    listed = subprocess.run(
+                        [wsl, "-l", "-q"],
+                        capture_output=True,
+                        timeout=30,
+                        check=False,
+                    )
+                    distro_ready = spec.wsl_distribution.casefold() in {
+                        line.strip().casefold()
+                        for line in decode_wsl_output(listed.stdout).splitlines()
+                        if line.strip()
+                    }
+                    if distro_ready:
+                        python_ready = subprocess.run(
+                            [wsl, "-d", spec.wsl_distribution, "--", "test", "-x", spec.command[0]],
+                            capture_output=True,
+                            timeout=30,
+                            check=False,
+                        ).returncode == 0
+                        ffmpeg_ready = subprocess.run(
+                            [wsl, "-d", spec.wsl_distribution, "--", "which", "ffmpeg"],
+                            capture_output=True,
+                            timeout=30,
+                            check=False,
+                        ).returncode == 0
+                        cuda_ready = subprocess.run(
+                            [wsl, "-d", spec.wsl_distribution, "--", "nvidia-smi", "-L"],
+                            capture_output=True,
+                            timeout=30,
+                            check=False,
+                        ).returncode == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            items.append(
+                ProbeItem(
+                    name="wsl",
+                    ready=distro_ready,
+                    detail=(
+                        f"WSL distribution: {spec.wsl_distribution}"
+                        if distro_ready
+                        else "WSL executable or configured distribution is unavailable"
+                    ),
+                    action=None if distro_ready else "Install the configured WSL2 distribution, then rerun Setup.",
+                )
+            )
+            items.extend(
+                [
+                    ProbeItem(
+                        name="wsl_runner_python",
+                        ready=python_ready,
+                        detail=spec.command[0] if python_ready else "runner Python is missing inside WSL",
+                        action=None if python_ready else f"Rerun Setup for {backend_id}.",
+                    ),
+                    ProbeItem(
+                        name="wsl_ffmpeg",
+                        ready=ffmpeg_ready,
+                        detail="Linux FFmpeg available" if ffmpeg_ready else "Linux FFmpeg is missing",
+                        action=None if ffmpeg_ready else f"Install ffmpeg inside {spec.wsl_distribution}.",
+                    ),
+                    ProbeItem(
+                        name="wsl_cuda",
+                        ready=cuda_ready,
+                        detail="CUDA GPU visible in WSL" if cuda_ready else "CUDA GPU is not visible in WSL",
+                        action=None if cuda_ready else "Repair the NVIDIA WSL2 driver/CUDA integration.",
+                    ),
+                ]
+            )
+        for model_path in spec.model_paths:
+            path = (self.project_root / model_path).resolve()
+            in_cache = False
+            try:
+                relative_cache_path = path.relative_to(self.cache_root)
+                in_cache = bool(
+                    relative_cache_path.parts
+                    and relative_cache_path.parts[0] in {"models", "runtimes"}
+                )
+            except ValueError:
+                pass
+            exists = path.exists() and in_cache
+            items.append(
+                ProbeItem(
+                    name=f"model:{model_path}",
+                    ready=exists,
+                    detail=str(path) if exists else f"missing or outside managed cache: {path}",
+                    action=None if exists else f"Run: video-generator setup --backend {backend_id}",
+                )
+            )
+        for runtime_value, expected_hash in spec.runtime_files.items():
+            runtime_path = (self.project_root / runtime_value).resolve()
+            try:
+                runtime_path.relative_to(self.cache_root / "runtimes")
+                ready = runtime_path.is_file() and sha256_file(runtime_path) == expected_hash
+            except ValueError:
+                ready = False
+            items.append(
+                ProbeItem(
+                    name=f"runtime_file:{runtime_value}",
+                    ready=ready,
+                    detail=str(runtime_path) if ready else "runtime provenance file is missing or changed",
+                    action=None if ready else f"Rerun Setup for {backend_id}.",
+                )
+            )
+        for manifest_value, expected_hash in spec.asset_manifests.items():
+            manifest_path = (self.project_root / manifest_value).resolve()
+            try:
+                manifest_path.relative_to(self.cache_root)
+                hash_matches = manifest_path.is_file() and sha256_file(manifest_path) == expected_hash
+                detail = (
+                    self._verify_asset_manifest(
+                        manifest_path,
+                        expected_revision=(
+                            None if manifest_path.name == "runtime-source.asset-manifest.json" else spec.model_revision
+                        ),
+                    )
+                    if hash_matches
+                    else "manifest hash mismatch"
+                )
+                ready = hash_matches and detail == "verified"
+            except (OSError, ValueError) as exc:
+                ready = False
+                detail = str(exc)
+            items.append(
+                ProbeItem(
+                    name=f"asset_manifest:{manifest_value}",
+                    ready=ready,
+                    detail=detail,
+                    action=None if ready else f"Rerun Setup for {backend_id}; cached assets failed verification.",
+                )
+            )
+        if live and all(item.ready for item in items):
+            self.last_cleanup.pop(backend_id, None)
+            try:
+                result = self.invoke(backend_id, "health", {}, timeout_seconds=spec.startup_timeout_seconds)
+                items.append(
+                    ProbeItem(
+                        name="live_worker_health",
+                        ready=True,
+                        detail=json.dumps(result, ensure_ascii=False, sort_keys=True)[:1000],
+                    )
+                )
+            except BackendError as exc:
+                items.append(
+                    ProbeItem(
+                        name="live_worker_health",
+                        ready=False,
+                        detail=exc.message,
+                        action=exc.action or f"Repair the runtime/model for {backend_id} and rerun live Preflight.",
+                    )
+                )
+            finally:
+                self.stop_current()
+                if self._lease_held:
+                    self.lease.release()
+                    self._lease_held = False
+            cleanup = self.last_cleanup.get(backend_id)
+            if cleanup is not None:
+                process_exited = bool(cleanup.get("process_exited"))
+                gpu_released = bool(cleanup.get("gpu_process_released"))
+                within_tolerance = bool(cleanup.get("vram_within_tolerance"))
+                ready = process_exited and gpu_released
+                items.append(
+                    ProbeItem(
+                        name="live_worker_cleanup",
+                        ready=ready,
+                        detail=json.dumps(cleanup, ensure_ascii=False, sort_keys=True)[:2000],
+                        action=(
+                            None
+                            if ready and within_tolerance
+                            else (
+                                "Close unrelated GPU applications and repeat live Preflight; "
+                                "the managed process exited, but aggregate Windows VRAM did not return near baseline."
+                                if ready
+                                else "Terminate the residual runner process and repeat live Preflight."
+                            )
+                        ),
+                    )
+                )
+            elif spec.model_family == "llama-server":
+                items.append(
+                    ProbeItem(
+                        name="live_worker_cleanup",
+                        ready=False,
+                        detail="the live probe produced no fresh llama-server cleanup evidence",
+                        action=(
+                            "Inspect the runner log, terminate any residual llama-server process, "
+                            "and repeat live Preflight."
+                        ),
+                    )
+                )
+        return ProbeReport(
+            backend_id=backend_id,
+            ready=all(item.ready for item in items),
+            items=items,
+        )
+
+    @staticmethod
+    def _verify_asset_manifest(manifest_path: Path, *, expected_revision: str | None) -> str:
+        manifest = read_json(manifest_path)
+        recorded_revisions = {
+            str(value)
+            for key in ("revision", "source_revision", "xl_revision")
+            if (value := manifest.get(key))
+        }
+        if expected_revision is not None and expected_revision not in recorded_revisions:
+            raise ValueError(
+                f"asset manifest does not declare expected revision {expected_revision}"
+            )
+        root = (manifest_path.parent / str(manifest.get("root") or ".")).resolve()
+        root.relative_to(manifest_path.parent.resolve())
+        files = manifest.get("files")
+        if isinstance(files, list):
+            if not files:
+                raise ValueError("asset manifest contains no files")
+            recorded_paths: set[str] = set()
+            for item in files:
+                if not isinstance(item, dict) or not item.get("path") or not item.get("sha256"):
+                    raise ValueError("asset manifest contains a malformed file entry")
+                recorded_paths.add(Path(str(item["path"])).as_posix())
+                path = (root / str(item["path"])).resolve()
+                path.relative_to(root)
+                if not path.is_file():
+                    raise ValueError(f"asset file is missing: {item['path']}")
+                if item.get("size") is not None and path.stat().st_size != int(item["size"]):
+                    raise ValueError(f"asset file size changed: {item['path']}")
+                if sha256_file(path) != str(item["sha256"]):
+                    raise ValueError(f"asset file hash changed: {item['path']}")
+            exact_suffixes = manifest.get("exact_file_suffixes")
+            if isinstance(exact_suffixes, list) and exact_suffixes:
+                suffixes = {str(value).casefold() for value in exact_suffixes}
+                excluded_roots = {
+                    str(value).casefold()
+                    for value in manifest.get("exact_exclude_roots", [])
+                }
+
+                actual_executable_sources: set[str] = set()
+                for directory, child_directories, filenames in os.walk(root):
+                    child_directories[:] = [
+                        name for name in child_directories if name.casefold() not in excluded_roots
+                    ]
+                    directory_path = Path(directory)
+                    for filename in filenames:
+                        candidate = directory_path / filename
+                        if candidate.suffix.casefold() in suffixes:
+                            actual_executable_sources.add(candidate.relative_to(root).as_posix())
+                recorded_executable_sources = {
+                    value
+                    for value in recorded_paths
+                    if Path(value).suffix.casefold() in suffixes
+                    and not any(part.casefold() in excluded_roots for part in Path(value).parts)
+                }
+                if actual_executable_sources != recorded_executable_sources:
+                    added = sorted(actual_executable_sources - recorded_executable_sources)
+                    removed = sorted(recorded_executable_sources - actual_executable_sources)
+                    changed = (added or removed)[0]
+                    state = "unexpected" if added else "missing"
+                    raise ValueError(f"{state} executable runtime source: {changed}")
+            return "verified"
+        filename = manifest.get("file")
+        expected = manifest.get("sha256")
+        if filename and expected:
+            path = (root / str(filename)).resolve()
+            path.relative_to(root)
+            if not path.is_file() or sha256_file(path) != str(expected):
+                raise ValueError(f"asset file hash changed: {filename}")
+            return "verified"
+        raise ValueError("asset manifest has no verifiable files")
+
+    def _command(self, spec: RunnerSpec) -> tuple[list[str], dict[str, str]]:
+        inherited_names = {
+            "PATH",
+            "PATHEXT",
+            "SYSTEMROOT",
+            "WINDIR",
+            "COMSPEC",
+            "TEMP",
+            "TMP",
+            "HOME",
+            "USERPROFILE",
+            "CUDA_PATH",
+            "CUDA_VISIBLE_DEVICES",
+            "NVIDIA_VISIBLE_DEVICES",
+            "WSLENV",
+        }
+        environment = {name: value for name, value in os.environ.items() if name.upper() in inherited_names}
+        environment.update(spec.environment)
+        environment.update(
+            {
+                "HF_HOME": str(self.model_root / "huggingface"),
+                "HUGGINGFACE_HUB_CACHE": str(self.model_root / "huggingface" / "hub"),
+                "TRANSFORMERS_OFFLINE": "1",
+                "HF_HUB_OFFLINE": "1",
+                "DIFFUSERS_OFFLINE": "1",
+                "PYTHONNOUSERSITE": "1",
+                "VIDEO_GENERATOR_PROJECT_ROOT": str(self.project_root),
+                "VIDEO_GENERATOR_RUN_ROOT": str(self.run_root),
+            }
+        )
+        if spec.platform == "native":
+            return list(spec.command), environment
+        wsl = shutil.which("wsl.exe") or shutil.which("wsl")
+        if not wsl or not spec.wsl_distribution:
+            raise BackendError(
+                f"WSL runner for {spec.backend_id} is not ready",
+                kind=ErrorKind.NOT_READY,
+                action=f"Run: video-generator setup --backend {spec.backend_id}",
+            )
+        wsl_root = windows_to_wsl(self.project_root)
+        wsl_model_root = windows_to_wsl(self.model_root)
+        wsl_run_root = windows_to_wsl(self.run_root)
+        assignments = [
+            f"HF_HOME={wsl_model_root}/huggingface",
+            f"HUGGINGFACE_HUB_CACHE={wsl_model_root}/huggingface/hub",
+            "TRANSFORMERS_OFFLINE=1",
+            "HF_HUB_OFFLINE=1",
+            "DIFFUSERS_OFFLINE=1",
+            "PYTHONNOUSERSITE=1",
+            f"VIDEO_GENERATOR_PROJECT_ROOT={wsl_root}",
+            f"VIDEO_GENERATOR_RUN_ROOT={wsl_run_root}",
+        ]
+        assignments.extend(f"{key}={value}" for key, value in spec.environment.items())
+        command = [
+            wsl,
+            "-d",
+            spec.wsl_distribution,
+            "--cd",
+            wsl_root,
+            "--",
+            "env",
+            *assignments,
+            *spec.command,
+        ]
+        return command, environment
+
+    def _start(self, spec: RunnerSpec) -> _RunnerProcess:
+        if not self._lease_held:
+            self.lease.acquire()
+            self._lease_held = True
+        command, environment = self._command(spec)
+        logs = self.run_root / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        stderr_handle = (logs / f"runner-{runner_slug(spec.backend_id)}.log").open(
+            "a", encoding="utf-8", errors="replace"
+        )
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=self.project_root,
+                env=environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=stderr_handle,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=creationflags,
+            )
+        except OSError as exc:
+            stderr_handle.close()
+            raise BackendError(
+                f"could not start runner for {spec.backend_id}: {exc}", kind=ErrorKind.NOT_READY
+            ) from exc
+        responses: queue.Queue[dict[str, Any]] = queue.Queue()
+
+        def read_stdout() -> None:
+            assert process.stdout is not None
+            for line in process.stdout:
+                try:
+                    value = json.loads(line)
+                    if isinstance(value, dict):
+                        responses.put(value)
+                except json.JSONDecodeError:
+                    responses.put(
+                        {
+                            "protocol_version": 1,
+                            "request_id": "",
+                            "ok": False,
+                            "error": {
+                                "kind": "invalid_output",
+                                "message": "runner wrote non-JSON data to stdout",
+                            },
+                        }
+                    )
+
+        reader = threading.Thread(target=read_stdout, name=f"runner-{runner_slug(spec.backend_id)}", daemon=True)
+        reader.start()
+        running = _RunnerProcess(spec, process, responses, reader, stderr_handle)
+        self.current = running
+        try:
+            self._invoke_current("health", {}, timeout=spec.startup_timeout_seconds)
+        except BaseException:
+            self.stop_current()
+            if self._lease_held:
+                self.lease.release()
+                self._lease_held = False
+            raise
+        return running
+
+    def _ensure(self, backend_id: str) -> _RunnerProcess:
+        spec = self.load_spec(backend_id)
+        if self.current and self.current.spec.backend_id == spec.backend_id:
+            if self.current.process.poll() is None:
+                return self.current
+        self.stop_current()
+        return self._start(spec)
+
+    def invoke(
+        self,
+        backend_id: str,
+        operation: str,
+        payload: Mapping[str, Any],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        with self._request_lock:
+            runner = self._ensure(backend_id)
+            return self._invoke_current(operation, dict(payload), timeout=timeout_seconds or runner.spec.timeout_seconds)
+
+    def _invoke_current(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float,
+        stop_on_failure: bool = True,
+    ) -> dict[str, Any]:
+        runner = self.current
+        if runner is None or runner.process.poll() is not None or runner.process.stdin is None:
+            raise BackendError("local runner exited unexpectedly", kind=ErrorKind.INTERNAL)
+        request_id = uuid.uuid4().hex
+        envelope = {
+            "protocol_version": 1,
+            "request_id": request_id,
+            "operation": operation,
+            "payload": payload,
+        }
+        try:
+            runner.process.stdin.write(json.dumps(envelope, ensure_ascii=False) + "\n")
+            runner.process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            if stop_on_failure:
+                self.stop_current()
+            raise BackendError("local runner pipe closed", kind=ErrorKind.INTERNAL) from exc
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if stop_on_failure:
+                    self.stop_current()
+                raise BackendError(f"local runner timed out after {timeout:.0f}s", kind=ErrorKind.TRANSIENT)
+            try:
+                response = runner.responses.get(timeout=min(remaining, 1.0))
+            except queue.Empty:
+                if runner.process.poll() is not None:
+                    if stop_on_failure:
+                        self.stop_current()
+                    raise BackendError("local runner crashed", kind=ErrorKind.INTERNAL)
+                continue
+            if response.get("request_id") not in {request_id, ""}:
+                continue
+            if response.get("protocol_version") != 1:
+                raise BackendError("local runner protocol version mismatch", kind=ErrorKind.UNSUPPORTED)
+            if not response.get("ok"):
+                error = response.get("error") if isinstance(response.get("error"), dict) else {}
+                kind_value = str(error.get("kind") or "internal")
+                try:
+                    kind = ErrorKind(kind_value)
+                except ValueError:
+                    kind = ErrorKind.INTERNAL
+                raise BackendError(
+                    str(error.get("message") or "local runner failed"),
+                    kind=kind,
+                    action=error.get("action"),
+                    details=error.get("details") if isinstance(error.get("details"), dict) else {},
+                )
+            result = response.get("result")
+            if not isinstance(result, dict):
+                raise BackendError("local runner result was not an object", kind=ErrorKind.INVALID_OUTPUT)
+            return result
+
+    def stop_current(self) -> None:
+        runner = self.current
+        if runner is None:
+            return
+        process = runner.process
+        if process.poll() is None and process.stdin is not None:
+            try:
+                result = self._invoke_current(
+                    "shutdown", {}, timeout=45, stop_on_failure=False
+                )
+                lifecycle = result.get("lifecycle")
+                if isinstance(lifecycle, dict):
+                    self.last_cleanup[runner.spec.backend_id] = lifecycle
+                    self._cleanup_sequence += 1
+                    atomic_write_json(
+                        self.run_root
+                        / "logs"
+                        / (
+                            f"runner-cleanup-{self._cleanup_sequence:03d}-"
+                            f"{runner_slug(runner.spec.backend_id)}.json"
+                        ),
+                        {
+                            "backend_id": runner.spec.backend_id,
+                            "model_family": runner.spec.model_family,
+                            "lifecycle": lifecycle,
+                        },
+                    )
+                process.wait(timeout=10)
+            except (BackendError, OSError, subprocess.TimeoutExpired):
+                self._kill_process_tree(process)
+        self.current = None
+        if process.stdin:
+            process.stdin.close()
+        if process.stdout:
+            process.stdout.close()
+        runner.reader.join(timeout=5)
+        runner.stderr_handle.close()
+
+    @staticmethod
+    def _kill_process_tree(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        else:
+            process.terminate()
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+
+    def close(self) -> None:
+        self.stop_current()
+        if self._lease_held:
+            self.lease.release()
+            self._lease_held = False
+
+    def __enter__(self) -> "RunnerManager":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()

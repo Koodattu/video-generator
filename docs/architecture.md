@@ -2,7 +2,7 @@
 
 ## Status and intent
 
-This document defines the v0 architecture for a local-first Python CLI that turns one Creative Brief into a narrated still-image video. It is a plan, not a claim that the pipeline already works.
+This document defines the v0 architecture implemented by the local-first Python CLI that turns one Creative Brief into a narrated still-image video. The structure and contracts are implemented; actual provider/model readiness is established only by Setup, Preflight, and the user's first evaluation Runs.
 
 The design supports local, cloud, and hybrid Runs without creating separate workflows for providers or languages. All Backends conform to the narrow protocols in [Contract design](contracts.md). The normal user chooses a curated Run Profile; advanced users may override individual Workflow Tasks.
 
@@ -58,19 +58,20 @@ The intended user-controlled files are:
 
 - `config.toml`: Run Profile, Output Language, duration, quality, feature switches, Voice Profile references, and advanced task overrides;
 - `brief.toml`: story direction and creative boundaries;
+- `local-llm.toml`: one audited local GGUF/runtime/context/speculation benchmark variant;
 - `.env`: credentials only.
 
 Built-in profiles, prompt assets, schemas, Style Profiles, and Backend descriptors ship with the package. v0 has no config inheritance, includes, Python config files, or prompt plugin system. CLI flags override `config.toml`; the resolved, secret-free configuration is frozen into the Run Bundle.
 
-The main commands are planned as:
+The main commands are:
 
 ```text
-video-generator setup [--profile NAME] [--backend ID]
+video-generator setup [--profile NAME] [--backend ID] [--llm-profile local-llm.toml]
 video-generator preflight --config config.toml
 video-generator generate --config config.toml --brief brief.toml [--stop-after STAGE]
 video-generator resume RUN_DIR
 video-generator rerun RUN_DIR --from STAGE [--config config.toml]
-video-generator evaluate --suite smoke|quality [--language en|fi]
+video-generator evaluate --suite smoke|draft-quality|quality [--language en|fi]
 video-generator runs prune [--older-than DAYS]
 ```
 
@@ -89,7 +90,7 @@ video-generator runs prune [--older-than DAYS]
 | media services | Probe/normalize audio, create captions, build FFmpeg commands, media QC | generative-model selection |
 | Run store | Atomic artifact promotion, hashes, stage status, logs, usage/provenance | a database or cross-Run cache |
 
-This split lets the same story workflow use OpenAI, Gemini, Qwen, ElevenLabs, VoxCPM, FLUX, or future replacements without those names appearing in domain models.
+This split lets the same story workflow use OpenAI, Gemini, a manifest-selected local GGUF, ElevenLabs, VoxCPM, FLUX, or future replacements without those names appearing in domain models.
 
 ## Stage ordering and GPU residency
 
@@ -110,7 +111,11 @@ The runner manager should batch adjacent calls, while accepting bounded reloads 
 
 This is an optimization over the same artifact contracts, not a different workflow. Each Scene item is independently validated and atomically promoted, so an unhealthy runner can fail the aggregate stage without losing already completed items.
 
-Native Windows is first-class only when a Backend passes conformance and live smoke tests. WSL2 is a per-Backend fallback, not a requirement for the whole application. The likely initial split is native Windows for llama.cpp and ACE-Step, WSL2 for Parakeet, and benchmark-dependent placement for VoxCPM and FLUX.
+Native Windows is the default placement. The implemented LLM, VoxCPM, FLUX, ACE-Step, media, and orchestration paths are native; only the current Parakeet/NeMo alignment adapter uses WSL2. WSL2 remains a per-Backend exception after native alternatives fail matched conformance and English/Finnish quality tests, never a requirement for the whole application.
+
+The Structured Text adapter starts one stock `llama-server.exe` on a dynamically selected loopback port with a generated in-memory API key. The adjacent LLM task batch reuses that child process. A model-family switch terminates it, requires process exit and disappearance of its GPU PID when observable, and records baseline/load/peak/post-exit aggregate VRAM. Aggregate return-to-baseline is advisory under Windows WDDM because unrelated applications may change GPU use.
+
+Context and speculative decoding are launch properties. The selected `local-llm.toml` therefore freezes one context tier and one `none` or `draft-mtp` variant. A larger context is a bounded relaunch/evaluation case, not a per-request toggle or an automatic 256K promise.
 
 ## Scene, narration, and duration
 
@@ -152,7 +157,7 @@ Fiction research is inspiration: motifs, settings, vocabulary, unexpected detail
 
 Factual mode is a stricter branch, not a vague fiction/fact hybrid. It additionally requires evidence records, atomic claim IDs, claim-to-source links, and a source-grounded factual review before TTS. Factual mode must remain disabled in the implementation until those artifacts and checks exist. In Offline Runs it requires supplied source material and may not claim currentness.
 
-Search is its own supporting Backend binding. Provider-native OpenAI web search, Gemini grounding, and an independent search API are separate implementations. Query limits are enforced from actual tool calls and persisted source metadata, not trusted to prompt wording alone. When source retrieval is required, only returned or explicitly supplied HTTP(S) sources may be fetched; redirects and resolved addresses are rechecked against private-network targets, response type/size/time are bounded, scripts are never executed, and only normalized excerpts enter prompts.
+Search is its own supporting Backend binding. Provider-native OpenAI web search, Gemini grounding, and an independent search API are separate implementations. Query limits are enforced from actual calls and persisted source metadata, not trusted to prompt wording alone. v0 does not fetch arbitrary result pages: it retains only provider-grounded URLs and bounded excerpts returned by the selected Search Backend. A future factual mode may add a separately audited, address-pinned fetch contract.
 
 ## Music and audio mix
 
@@ -164,7 +169,7 @@ The Music Backend declares its observed duration limit. The media layer trims, f
 
 The deterministic Render Plan contains no model decisions. FFmpeg holds each normalized image for its Scene interval, applies hard cuts, combines the master narration and optional Music Bed, and writes H.264/AAC MP4 with `yuv420p`, 30 fps, and fast-start metadata.
 
-Setup checks FFmpeg capabilities rather than assuming a version string is sufficient: H.264 encoding, AAC, `mov_text`, SRT, ASS/libass when animated captions are requested, and ffprobe. The currently installed FFmpeg 4.2.1 exposes the needed baseline components, but it still needs an actual render smoke test before being declared supported.
+Preflight checks FFmpeg capabilities rather than assuming a version string is sufficient: H.264 encoding, AAC, `mov_text`, SRT, ASS/libass when animated captions are requested, and ffprobe. An installed build is not declared supported until those probes pass; the first real render remains the final integration check.
 
 Media QC verifies:
 
@@ -191,11 +196,6 @@ runs/<run-id>/
     010-research/attempt-001/
     020-ideate/attempt-001/
     ...
-  media/
-    narration/
-    images/
-    music/
-    captions/
   outputs/
   logs/
   work/
@@ -211,7 +211,7 @@ Run Bundles are preserved by default. `runs prune` is explicit. Model assets liv
 
 ## Budgets, failures, and safety
 
-Every model call has bounded attempts and output size. The Cost Ceiling reserves a conservative maximum before each cloud call using a dated pricing snapshot. Actual tokens, images, TTS characters, music duration, tool queries, retries, and cost are recorded. Local Runs record elapsed time, model revision, and peak VRAM when observable.
+Every model call has bounded attempts and output size. The Cost Ceiling reserves a conservative maximum before each cloud call using a dated pricing snapshot. Actual tokens, images, TTS characters, music duration, tool queries, retries, and cost are recorded. Local Runs record elapsed time and model revision. The llama-server worker also records its process lifecycle and before/load/peak/post-exit GPU observations; other worker families retain process-exit checks and may add equivalent telemetry after acceptance.
 
 Preflight rejects missing capabilities, credentials, model assets, license compatibility, disk capacity, Output Language support, and impossible feature combinations. It never responds by changing the Run Profile. Setup may prepare exactly the missing item.
 
@@ -230,33 +230,32 @@ The v0 names describe the leading creative provider, not every service involved:
 
 Profile mappings are versioned and printed by Preflight. They never dynamically route based on price or failure. Advanced task overrides are validated through the same descriptors and contracts.
 
-## Planned package shape
+## Implemented package shape
 
 ```text
 src/video_generator/
   cli.py
   config.py
-  domain/
-  contracts/
-  workflow/
-  prompts/
-  profiles/
+  contracts.py
+  local_llm.py
+  workflow.py
+  prompting.py
+  profiles.py
+  executor.py
+  registry.py
+  setup.py
+  preflight.py
+  provenance.py
+  runners.py
+  run_store.py
+  media.py
   backends/
-    openai/
-    gemini/
-    elevenlabs/
-    local/
-  runners/
-  media/
-  run_store/
+  workers/
+  assets/runners/
 tests/
-  unit/
-  contracts/
-  integration/
-  fixtures/
 ```
 
-This is package organization, not a mandate for a class per file. One reusable structured-task executor should serve the text roles; one static registry should serve Backend lookup.
+One reusable structured-task executor serves the text roles, and one static registry serves Backend lookup.
 
 ## Explicit v0 non-goals
 

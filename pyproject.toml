@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "video-generator"
+version = "0.1.0"
+description = "Local-first CLI for narrated still-image video generation"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "Juha" }]
+dependencies = [
+  "pydantic>=2.11,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+]
+
+[project.scripts]
+video-generator = "video_generator.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/video_generator"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/README.md",
+  "/LICENSE",
+  "/config.example.toml",
+  "/local-llm.example.toml",
+  "/brief.example.toml",
+  "/.env.example",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]

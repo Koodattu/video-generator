@@ -18,15 +18,15 @@ Setup answers the first two with pinned assets and live probes. Contract tests a
 | Workflow capability | `local` | `cloud-openai` | `cloud-gemini` | `hybrid-local-first` |
 | --- | --- | --- | --- | --- |
 | Live search | Brave Search; none when Offline | OpenAI web search | Gemini Google Search | Brave Search |
-| Research reduction and creative text | Qwen3.6-27B Q4 candidate | GPT-5.5; Terra after access probe | Gemini 3.5 Flash | Qwen3.6-27B Q4 candidate |
-| Script reviews | same Qwen text runner | GPT-5.5 | Gemini 3.5 Flash | same Qwen text runner |
-| Visual planning | Qwen3.6-27B Q4 candidate | GPT-5.5 | Gemini 3.5 Flash | Qwen3.6-27B Q4 candidate |
-| Image-prompt compilation | Qwen3.6-27B Q4 candidate | GPT-5.5 | Gemini 3.5 Flash | Qwen3.6-27B Q4 candidate |
+| Research reduction and creative text | Manifest-selected GGUF through stock llama.cpp | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
+| Script reviews | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
+| Visual planning | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
+| Image-prompt compilation | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
 | Narration | VoxCPM2 | ElevenLabs Multilingual v2 | ElevenLabs Multilingual v2 | ElevenLabs Multilingual v2 |
 | Word timing | Parakeet v3 plus exact-script reconciliation | ElevenLabs returned timestamps | ElevenLabs returned timestamps | ElevenLabs returned timestamps |
 | Image generation | FLUX.2 klein 4B | GPT Image 2 | Gemini 3.1 Flash Image | FLUX.2 klein 4B |
-| Visual review | Qwen3.6 vision path, evaluation-gated | vision-capable GPT-5.5 | Gemini 3.5 Flash | Qwen3.6 vision path, evaluation-gated |
-| Music brief | Qwen3.6-27B Q4 candidate | GPT-5.5 | Gemini 3.5 Flash | Qwen3.6-27B Q4 candidate |
+| Visual review | Qwen3.6 vision path, evaluation-gated | GPT-5.6 Terra | Gemini 3.5 Flash | Qwen3.6 vision path, evaluation-gated |
+| Music brief | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
 | Music when enabled | ACE-Step 1.5 XL Turbo | ElevenLabs Music v2 | ElevenLabs Music v2 | ACE-Step 1.5 XL Turbo |
 | Render | local FFmpeg | local FFmpeg | local FFmpeg | local FFmpeg |
 
@@ -38,7 +38,7 @@ Profile mappings are versioned and inspectable. They never switch dynamically af
 
 ### Text and research
 
-`gpt-5.6-terra` is the attractive balanced GPT-5.6 variant the original idea identified. However, OpenAI currently describes the GPT-5.6 family as a limited preview for selected organizations. The portable `cloud-openai` profile should therefore start with generally available `gpt-5.5`; Setup may expose Terra as a conditional override only after a real model-access and structured-output probe succeeds. The Responses API is the appropriate integration surface for structured generation and bounded web search. [GPT-5.6 preview/access](https://help.openai.com/en/articles/20001325-a-preview-of-gpt-5-6-sol-terra-and-luna), [latest-model guide](https://developers.openai.com/api/docs/guides/latest-model), [web search](https://developers.openai.com/api/docs/guides/tools-web-search)
+`gpt-5.6-terra` is the balanced GPT-5.6 variant the original idea identified and is now the curated `cloud-openai` default. OpenAI's current model guide recommends Terra when intelligence and cost both matter. Live Preflight still verifies access for the configured project before a Run spends credits. The Responses API is the integration surface for structured generation and bounded web search. [latest-model guide](https://developers.openai.com/api/docs/guides/latest-model), [web search](https://developers.openai.com/api/docs/guides/tools-web-search)
 
 Model aliases can change behavior. Reproducible evaluations should prefer dated snapshots when offered; otherwise the Run records the alias and request date, and profile changes require a new profile version.
 
@@ -70,30 +70,27 @@ Voice cloning requires the user's own authorized recordings, kept under `private
 
 ### Music
 
-`music_v2` is the cloud music primary because it supports instrumental generation and structured composition plans and reuses the ElevenLabs credential. First-party pages currently conflict between a five-minute overview limit and API/composition-plan schemas accepting ten minutes. The Backend descriptor should conservatively advertise five minutes until a live capability probe proves more for the configured account. This does not affect 60–90-second v0 Runs. [composition plans](https://elevenlabs.io/docs/eleven-api/guides/how-to/music/composition-plans), [compose API](https://elevenlabs.io/docs/api-reference/music/compose)
+`music_v2` is the cloud music primary because it supports instrumental generation and structured composition plans and reuses the ElevenLabs credential. The v0 Backend contract caps one generation at 600 seconds. A longer Narration Timeline therefore requests a shorter explicitly seamless instrumental loop and fits it deterministically; live Preflight still confirms account/model access. [composition plans](https://elevenlabs.io/docs/eleven-api/guides/how-to/music/composition-plans), [compose API](https://elevenlabs.io/docs/api-reference/music/compose)
 
 ## Local text and vision
 
-### Qwen3.6-27B
+### Manifest-selected GGUF through stock llama.cpp
 
-`Qwen/Qwen3.6-27B` is the initial local LLM candidate for both English and Finnish. It is an Apache-2.0 dense multimodal model with official llama.cpp support. The official BF16 and currently published Q8 MTP GGUF weights do not fit fully in 24 GB VRAM. The practical v0 path is a pinned Q4/IQ4 quantization, text-only at first, approximately 32K context, batch/parallelism 1, and MTP disabled. [model card](https://huggingface.co/Qwen/Qwen3.6-27B), [official repository](https://github.com/QwenLM/Qwen3.6), [official ggml-org MTP GGUF](https://huggingface.co/ggml-org/Qwen3.6-27B-MTP-GGUF)
+The workflow no longer bakes in one local text model. One typed `local-llm.toml` selects an exact target GGUF, optional compatible drafter, full repository and stock llama.cpp commits, independent file hashes, reviewed license, context tier, and MTP mode. A stdlib control worker owns one native-Windows `llama-server.exe`, reuses it for the adjacent text batch, and keeps JSON Schema plus domain validation outside the model runtime. [llama-server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md), [speculative decoding](https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md)
 
-There is no upstream Qwen Q4 artifact to bless automatically. Before `setup` can expose this Backend, the project must choose one of two auditable options:
+Qwen3.6 27B/35B-A3B and Gemma 4 31B/26B-A4B GGUF variants are reasonable first candidates, not defaults. Qwen MTP can be embedded in the target GGUF; current Gemma 4 MTP artifacts use a separate assistant GGUF. The same target must be evaluated with MTP off and on because speculative decoding can improve generation while worsening prompt processing, memory, or runtime stability. [Qwen 27B MTP GGUF](https://huggingface.co/unsloth/Qwen3.6-27B-MTP-GGUF), [Qwen 35B-A3B MTP GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF), [Gemma 4 31B QAT GGUF](https://huggingface.co/unsloth/gemma-4-31B-it-qat-GGUF), [Gemma 4 26B-A4B QAT GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF)
 
-- self-quantize the official weights with a pinned llama.cpp revision; or
-- pin a reviewed third-party quantization by repository revision and file hash.
+Start with one Qwen and one Gemma candidate rather than downloading the whole matrix. Use one slot, 32K as the first application benchmark tier, and MTP disabled. Context is allocated at server startup; 64K/128K/256K are separate relaunch profiles and become usable only after real 24 GB fit, structured-output, and quality evidence. A native model context limit does not prove that its quantized runtime plus KV cache and work buffers fit this GPU.
 
-The exact artifact, quantization recipe, SHA-256, source license, and llama.cpp revision belong in the model manifest. MTP and long context remain disabled until evaluation proves a net gain without structured-output regressions.
+Visual Review remains a separate capability. A text GGUF cannot claim it merely because the original architecture family is multimodal. The existing Qwen vision path stays evaluation-gated until its projector/runtime passes memory and image fixtures; another explicit VLM may win independently of the text benchmark.
 
-The same model's vision path is a candidate for local Visual Review, but its projector/runtime memory on this machine must be benchmarked separately. A text-only runner cannot claim Visual Review. If the Qwen vision path does not fit reliably, the final local profile needs an explicitly selected smaller vision Backend; draft local Runs may skip review as declared.
-
-Do not create separate Finnish orchestration or assume a separate Finnish LLM. The Evaluation Suite decides whether a language-specific Backend becomes justified.
+Do not create separate Finnish orchestration or assume a separate Finnish LLM. Matched English/Finnish fixtures decide whether a language-specific Backend becomes justified.
 
 ## Local narration and alignment
 
 ### VoxCPM2
 
-`openbmb/VoxCPM2` is the local TTS primary. It is Apache-2.0, supports English and Finnish among its documented languages, supports voice cloning, and is reported around 8 GB VRAM on an RTX 4090-class path. Native Windows has documented Triton limitations; `optimize = false` is the compatibility path and WSL2 is the preferred accelerated fallback. [VoxCPM repository](https://github.com/OpenBMB/VoxCPM), [VoxCPM2 weights](https://huggingface.co/openbmb/VoxCPM2), [Windows/Triton FAQ](https://voxcpm.readthedocs.io/en/latest/faq.html)
+`openbmb/VoxCPM2` is the local TTS primary. It is Apache-2.0, supports English and Finnish among its documented languages, supports voice cloning, and is reported around 8 GB VRAM on an RTX 4090-class path. The implemented v0 runner uses native Windows with `optimize = false`; another platform is considered only if this path fails its live fixtures. [VoxCPM repository](https://github.com/OpenBMB/VoxCPM), [VoxCPM2 weights](https://huggingface.co/openbmb/VoxCPM2), [Windows/Triton FAQ](https://voxcpm.readthedocs.io/en/latest/faq.html)
 
 Use language-matched recordings of the same authorized voice rather than separate TTS models unless evaluation says otherwise. The adapter probes the actual output sample rate and duration instead of hardcoding a documentation claim. VoxCPM does not provide the authoritative word timing required for captions.
 
@@ -111,7 +108,7 @@ Parakeet is loaded only when captions are enabled. Scene boundaries use probed T
 
 ## Local images
 
-`black-forest-labs/FLUX.2-klein-4B` is the local image primary. It is Apache-2.0, supports text-to-image and reference editing, and first-party memory figures range from roughly 8.4 to 13 GB; the descriptor should reserve the conservative 13 GB figure. Native Windows with Diffusers is benchmark-first, with WSL2 fallback. [FLUX.2 klein model card](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B), [BFL comparison](https://bfl.ai/models/flux-2-klein), [official inference repository](https://github.com/black-forest-labs/flux2)
+`black-forest-labs/FLUX.2-klein-4B` is the local image primary. It is Apache-2.0, supports text-to-image and reference editing, and first-party memory figures range from roughly 8.4 to 13 GB; the descriptor reserves the conservative 13 GB figure. The implemented v0 runner uses native Windows with Diffusers. A WSL2 runner would require a separate implementation and acceptance run. [FLUX.2 klein model card](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B), [BFL comparison](https://bfl.ai/models/flux-2-klein), [official inference repository](https://github.com/black-forest-labs/flux2)
 
 The 4B model is the simpler default even though the declared personal noncommercial Usage Purpose may allow experiments with other licenses. Larger variants are not implied fallbacks and need their own memory/license evaluation.
 
@@ -123,7 +120,7 @@ Upstream guidance favors shorter instrumental generations even though ten minute
 
 ## Search for local and hybrid Runs
 
-“Local” describes inference, not research connectivity. Brave Search is a reasonable independent Search Backend because its API has a simple credential and query interface. It lets research stay provider-neutral when Qwen performs the reduction. Pricing and quotas are unstable and therefore live in dated pricing metadata, not this architecture. [Brave Search API](https://brave.com/search/api/), [authentication](https://api-dashboard.search.brave.com/documentation/guides/authentication)
+“Local” describes inference, not research connectivity. Brave Search is a reasonable independent Search Backend because its API has a simple credential and query interface. It lets research stay provider-neutral when the selected local LLM performs the reduction. Pricing and quotas are unstable and therefore live in dated pricing metadata, not this architecture. [Brave Search API](https://brave.com/search/api/), [authentication](https://api-dashboard.search.brave.com/documentation/guides/authentication)
 
 When `offline = true`, the Search Backend is disabled. Fiction can proceed from supplied material or clearly non-current model knowledge; factual mode requires supplied sources and cannot claim currentness.
 
@@ -133,13 +130,13 @@ The target machine has 24 GB VRAM and 64 GB system RAM. These figures are planni
 
 | Local Backend | Conservative implication |
 | --- | --- |
-| Qwen3.6-27B Q4 | Near the GPU limit once runtime/context overhead is included; start at 32K, one request, probe partial/full offload |
-| VoxCPM2 | About 8 GB reported; native compatibility path or WSL2 |
+| 14–19 GB GGUF candidate | Near the GPU limit once context/MTP/work buffers and Windows display use are included; start at 32K, one slot, MTP off |
+| VoxCPM2 | About 8 GB reported; native compatibility path |
 | Parakeet 0.6B | Small relative to other stages; WSL2 for the supported platform |
 | FLUX.2 klein 4B | Reserve 13 GB; batch images while resident |
 | ACE-Step XL Turbo | Reserve the full card; no concurrent model |
 
-Only one local model family is resident. Process termination is the VRAM-release boundary. Setup records peak observed VRAM from smoke tests and refuses a profile whose configured runner exceeds the machine.
+Only one local model family is resident. Process termination is the v0 VRAM-release boundary. For llama-server, live Preflight now requires process exit/GPU-PID disappearance when observable and records baseline/load/peak/post-exit aggregate VRAM. Exact aggregate return is advisory on Windows WDDM. Other model workers retain sequential load/process-exit probes until they add equivalent telemetry.
 
 The model cache is `./.cache/models`, not a global surprise cache. Download manifests pin repositories, revisions, exact files, hashes, licenses, expected disk size, and required runtime. Hugging Face credentials are used only for gated downloads and never copied into a Run Bundle.
 
@@ -151,16 +148,16 @@ These candidates from the supplied local-model research are useful contingencies
 
 | Candidate | Evaluate when | Caution |
 | --- | --- | --- |
-| [Gemma 4 QAT](https://huggingface.co/google/gemma-4-12B-it-qat-q4_0-unquantized) | Qwen Q4 provenance, Finnish quality, or runtime support is unacceptable | validate current exact checkpoint and Finnish quality; do not assume multilingual breadth equals quality |
+| Additional Qwen3.6/Gemma 4 GGUF variants | the first one-per-family pair misses speed, fit, or quality | do not spend roughly another 35 GB before the first pair provides evidence |
 | [Chatterbox Multilingual V3](https://github.com/resemble-ai/chatterbox) | VoxCPM is too heavy or unreliable on Windows/WSL | Finnish is listed and the model is MIT-licensed, but multilingual latency/quality needs testing and output is watermarked |
 | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) large-v3-turbo | Parakeet alignment/reconciliation is unreliable | mature but larger/slower than needed if Parakeet works |
-| `ik_llama.cpp` plus Qwen MTP | plain llama.cpp is correct but too slow | requires a separately pinned runtime and must beat the no-MTP path without schema regressions |
+| MTP-on variant of the same target | generation throughput is a bottleneck | stock llama.cpp support is recent; it must beat MTP-off without schema, quality, or cleanup regressions |
 
 ## License snapshot
 
 | Asset | Documented license |
 | --- | --- |
-| Qwen3.6-27B | Apache 2.0 |
+| Selected local GGUF | model-specific; frozen in `local-llm.toml` and the runner manifest |
 | VoxCPM2 | Apache 2.0 |
 | Parakeet TDT 0.6B v3 | CC BY 4.0 |
 | FLUX.2 klein 4B | Apache 2.0 |
@@ -180,4 +177,4 @@ A candidate becomes a profile default only after:
 6. cost/runtime and license/terms are recorded;
 7. any profile change receives a new profile version.
 
-This is especially important for the Qwen Q4 provenance, Qwen vision memory, Finnish VoxCPM voice similarity, Parakeet reconciliation coverage, FLUX Windows support, ACE-Step long-form coherence, Terra account access, and ElevenLabs music-duration limit.
+This is especially important for local GGUF provenance/fit/MTP behavior, Qwen vision memory, Finnish VoxCPM voice similarity, Parakeet reconciliation coverage, FLUX Windows support, ACE-Step long-form coherence, Terra account access, and ElevenLabs music-duration limit.

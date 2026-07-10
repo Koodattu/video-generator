@@ -1,46 +1,283 @@
 # Video Generator
 
-A planned Python CLI for producing narrated, still-image videos from a creative brief. One command will coordinate research, story development, narration, scene images, captions, optional music, and local FFmpeg rendering.
+A local-first Python CLI that turns one creative brief into a narrated still-image video. The fixed,
+typed workflow researches story material, creates and selects ideas, outlines and revises a spoken
+script, synthesizes narration, derives timestamps/captions, plans and generates one image per Scene,
+optionally creates instrumental music, and renders MP4 delivery files with FFmpeg.
 
-The project is currently in the architecture phase. No working generator has been implemented yet. The planning documents define the contracts first so local, cloud, and hybrid Backends can be selected independently without duplicating the workflow.
+The default `generate` command runs end to end. Every public stage and expensive per-Scene item is
+checkpointed in an immutable Run Bundle, so `resume` does not silently repeat valid paid or local
+model work. A task can select a local, OpenAI, Gemini, ElevenLabs, Brave, or mixed Backend without
+changing the workflow.
 
-## Design goals
+## Current v0 scope
 
-- Run end to end by default, with durable checkpoints and resumable failures.
-- Support English and Finnish as one Output Language per Run.
-- Run every expensive local model in an isolated process so a 24 GB GPU can reuse VRAM between stages.
-- Mix local and cloud Backends per task through curated Run Profiles.
-- Produce simple 16:9 videos with spoken narration, static generated images, hard cuts, and captions.
-- Keep the normal interface to `config.toml`, `brief.toml`, and `.env`.
+- One Output Language per Run: English (`en`) or Finnish (`fi`).
+- Fiction inspired by bounded research. Factual mode remains rejected until claim-level evidence
+  capture is implemented; the program will not pretend unsupported factual output is ready.
+- Static 16:9 images with hard cuts; default output is 1280x720 draft or 1920x1080 final at 30 fps.
+- Selectable SRT captions, plus optional animated ASS captions burned into a second MP4.
+- Optional ambient instrumental music mixed below narration.
+- Built-in `ms_paint_stick` image style and arbitrary additional style IDs described in config.
+- Personal, noncommercial use; voice cloning is limited to your own voice or explicit permission.
+- Final-quality local Visual Review is intentionally readiness-gated because the planned Qwen vision
+  runner has not yet been proven reliable in 24 GB VRAM. Local draft Runs work without it.
 
-## Planning documents
+## Requirements
 
-- [Domain language](CONTEXT.md)
-- [Contract design](docs/contracts.md)
-- [Architecture](docs/architecture.md)
-- [Prompt system](docs/prompt-system.md)
-- [Initial model matrix](docs/model-matrix.md)
-- [Implementation plan](docs/implementation-plan.md)
-- [Architecture decisions](docs/adr/)
+- Windows 10/11 with Python 3.11 (3.12 is also accepted by the orchestrator).
+- [`uv`](https://docs.astral.sh/uv/) for locked environments.
+- FFmpeg and ffprobe on `PATH`, with libx264 and AAC; libass is additionally required for animated
+  captions.
+- For local CUDA Backends: an NVIDIA driver/CUDA-compatible PyTorch environment and substantial free
+  disk space. Only one model worker owns the GPU at a time.
+- WSL2 with an explicitly installed Linux distribution and Python 3.12 for the Parakeet/NeMo runner.
+  Other local workers run natively on Windows unless their own probe fails.
 
-Example inputs are provided in [config.example.toml](config.example.toml), [brief.example.toml](brief.example.toml), and [.env.example](.env.example). These files describe the intended CLI and are not executable yet.
+## Install the orchestrator
 
-## Intended CLI
+Always run project Python commands from the repository virtual environment:
+
+```powershell
+py -3.11 -m venv .venv
+Set-ExecutionPolicy -Scope Process Bypass
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade uv
+uv sync --active --all-extras
+```
+
+Copy the safe examples. `.env`, `config.toml`, `brief.toml`, `local-llm.toml`, `private/`, model
+caches, downloads, and Run Bundles are ignored by Git.
 
 ```powershell
 Copy-Item config.example.toml config.toml
 Copy-Item brief.example.toml brief.toml
 Copy-Item .env.example .env
-
-video-generator setup --profile local
-video-generator preflight --config config.toml
-video-generator generate --config config.toml --brief brief.toml
-video-generator resume runs/<run-id>
-video-generator rerun runs/<run-id> --from <stage>
+Copy-Item local-llm.example.toml local-llm.toml
+New-Item -ItemType Directory -Force private\voice
 ```
 
-Setup may download pinned model assets. Preflight is read-only. Generate performs no surprise model downloads.
+Edit `config.toml` and `brief.toml`. Put only required API keys in `.env`; never put secrets in TOML.
+For a local clone, copy your authorized reference WAV (and preferably its exact UTF-8 transcript) to
+`private/voice/` and keep `voice.authorization = "self"`. For ElevenLabs, set
+`voice.elevenlabs_voice_id` to your authorized voice ID; no private reference recording is uploaded
+by this program.
 
-## Scope
+The 90-second example is the intended first useful target. For the first mechanical check, set
+`duration_seconds = 30`. The configured duration is both the goal and hard ceiling; accepted measured
+narration must occupy 90-100% of it.
 
-The initial Usage Purpose is private, personal, noncommercial research, education, and entertainment. Voice cloning is limited to the user's own voice or a voice used with explicit permission. Model and asset licenses still need to be recorded per Run.
+## Fastest first Run: cloud
+
+Choose `cloud-openai` or `cloud-gemini` in `config.toml`, set the corresponding API key plus
+`ELEVENLABS_API_KEY`, and set your ElevenLabs voice ID. Increase `cost_ceiling_usd` only after reading
+the Preflight estimate.
+
+```powershell
+video-generator setup --config config.toml --no-download
+video-generator preflight --config config.toml --live
+video-generator generate --config config.toml --brief brief.toml
+```
+
+`--live` performs explicit cloud access probes and, for local Backends, sequential worker health/model-load
+checks without generating media. Preflight never downloads models or writes a Run. Generate repeats
+non-live readiness checks, freezes the report/config/prompts/schemas/profile,
+then creates `runs/<run-id>/`. Runtime cost reservations enforce the hard ceiling before each cloud
+request; no provider call is silently rerouted.
+
+## Prepare the local profile
+
+The local profile uses:
+
+| Task | Initial Backend |
+|---|---|
+| Research search | Brave Search, or no search when `offline = true` |
+| Text/reviews/prompt compilation | Manifest-selected GGUF through stock `llama-server.exe` |
+| English/Finnish voice clone | VoxCPM2 |
+| Local timestamps | Parakeet TDT 0.6B v3 through NeMo in WSL2 |
+| Images | FLUX.2 Klein 4B through Diffusers |
+| Optional music | ACE-Step 1.5 XL Turbo |
+
+Setup pins runtime/model revisions, stores assets in `.cache/`, writes hashes and runner manifests,
+and may take a long time. Generate is offline with respect to model repositories and never downloads
+missing weights.
+
+The placement policy is Windows first. The LLM, VoxCPM, FLUX, ACE-Step, FFmpeg, and the orchestrator
+run natively. The current Parakeet/NeMo timestamp adapter is the only WSL2 Backend; a native alignment
+candidate may replace it only after matched English/Finnish timing evaluation.
+
+### 1. Prepare one auditable local LLM profile
+
+`local-llm.toml` describes one benchmark variant: exact target GGUF, optional compatible drafter,
+full repository commit(s), SHA-256 hashes, license, exact stock llama.cpp commit/build, context tier,
+and MTP setting. Setup rejects branch names, abbreviated commits, zero placeholders, altered files,
+and arbitrary server launch overrides.
+
+Download one candidate first instead of the entire candidate matrix. Pin the full Hugging Face commit;
+do not use `main`:
+
+```powershell
+New-Item -ItemType Directory -Force .cache\models\llm\CANDIDATE-ID, downloads\llama.cpp
+
+uvx --from huggingface-hub hf download ORGANIZATION/REPOSITORY MODEL.gguf `
+  --revision FULL_40_CHARACTER_COMMIT `
+  --local-dir .cache\models\llm\CANDIDATE-ID
+
+Get-FileHash .cache\models\llm\CANDIDATE-ID\MODEL.gguf -Algorithm SHA256
+Get-FileHash downloads\llama.cpp\llama-server.exe -Algorithm SHA256
+Get-ChildItem downloads\llama.cpp\*.dll | Get-FileHash -Algorithm SHA256
+```
+
+Download a pinned Windows x64 CUDA build from the stock
+[`llama.cpp` releases](https://github.com/ggml-org/llama.cpp/releases), merge its required CUDA DLL
+bundle into the same `downloads\llama.cpp\` directory, and fill `local-llm.toml`. Setup copies or adopts only
+`llama-server.exe`, its sibling DLLs, the selected GGUF, and optional drafter into `.cache/`, then
+records every copied hash. Unsloth may supply a quantized GGUF, but it is not the inference runtime.
+When `model_path` points anywhere under `.cache\models\llm\`, Setup verifies and adopts the GGUF in
+place rather than creating another multi-gigabyte copy. MTP-off/on profiles may therefore share the
+same target artifact while retaining different `profile_id` and launch metadata.
+
+Start with `context_size = 32768`, `speculation = "none"`, and one server slot. Treat the same model
+with `speculation = "draft-mtp"` as a separate benchmark profile. Embedded MTP needs no drafter path;
+models that ship a separate MTP assistant require every `draft_model_*` field. Larger context tiers
+are separate launches and must prove they fit; the program does not silently allocate 256K.
+
+### 2. Install WSL2 only for the current Parakeet adapter
+
+Setup will not install or choose a Linux distribution for you. One example:
+
+```powershell
+wsl --install -d Ubuntu
+wsl -d Ubuntu -- python3.12 --version
+wsl -d Ubuntu -- python3.12 -m venv --help
+wsl -d Ubuntu -- ffmpeg -version
+wsl -d Ubuntu -- nvidia-smi -L
+```
+
+If that distribution does not provide Python 3.12, its `venv` module, FFmpeg, or CUDA access, install
+them inside the distribution or pass the name of another prepared distribution with
+`--wsl-distro`. Setup deliberately does not install operating-system packages or choose a distro.
+
+### 3. Prepare all Backends active in config
+
+With music disabled and draft quality, this prepares the selected LLM, VoxCPM, Parakeet, FLUX, and optionally
+Brave. Set `offline = true` if you want no web search and no Brave key. On native Windows, Setup asks
+`uv` to select a CUDA-compatible PyTorch wheel from the installed NVIDIA driver; live Preflight then
+loads each worker sequentially. For llama.cpp it additionally requires the child server PID to exit
+and records before/load/after aggregate VRAM observations; aggregate drift is advisory on Windows
+because unrelated WDDM applications can change it.
+
+```powershell
+video-generator setup --config config.toml --llm-profile local-llm.toml --wsl-distro Ubuntu
+
+video-generator preflight --config config.toml --live
+video-generator generate --config config.toml --brief brief.toml
+```
+
+For model comparison, give every target/context/MTP combination a unique `profile_id`, prepare one at
+a time, then run the same English and Finnish fixtures. A new Setup replaces the active
+`local:llama-server` runner manifest; existing Run Bundles will refuse to resume until their original
+profile is restored, which prevents accidental cross-model continuation.
+
+```powershell
+video-generator evaluate --suite smoke --profile local --language en --config config.toml --live-preflight
+video-generator evaluate --suite smoke --profile local --language fi --config config.toml --live-preflight
+```
+
+When `music_enabled = true`, Setup also prepares ACE-Step. You can prepare or repair one Backend
+without touching the others:
+
+```powershell
+video-generator setup --backend local:ace-step-1.5-xl-turbo
+video-generator setup --backend local:parakeet-tdt-0.6b-v3 --wsl-distro Ubuntu
+```
+
+Use `--no-download` to verify existing assets/environments. A missing runner, exact model revision,
+WSL distribution, key, voice file, FFmpeg capability, disk allowance, or Cost Ceiling makes Preflight
+fail with an explicit action. It never substitutes another model.
+
+## Mix Backends per task
+
+Curated profiles are `local`, `cloud-openai`, `cloud-gemini`, and `hybrid-local-first`. Advanced
+overrides live under `[task_overrides]` in config. For example:
+
+```toml
+[task_overrides]
+script_draft = "openai:gpt-5.6-terra"
+image_prompt_compile = "local:llama-server"
+image_generate = "gemini:gemini-3.1-flash-image"
+narration_synthesis = "elevenlabs:eleven_multilingual_v2"
+```
+
+Every override is validated against its protocol, language, usage purpose, Offline setting, and
+capabilities before a Run is created. English and Finnish use the same workflow contracts; separate
+orchestration code is not duplicated by language.
+
+## Resume, inspect, and intentionally rerun
+
+```powershell
+# Stop deliberately after a checkpoint for inspection.
+video-generator generate --config config.toml --brief brief.toml --stop-after script-revision
+
+# Continue with the Run's frozen config/prompts/schemas.
+video-generator resume runs\<run-id>
+
+# Preview invalidation, remaining readiness, and cost without creating a child.
+video-generator rerun runs\<run-id> --from images --dry-run
+
+# Create a parent-linked child Run and carry forward verified upstream artifacts.
+video-generator rerun runs\<run-id> --from images
+
+# Supply intentional new config/brief; the command refuses a fork later than their earliest impact.
+video-generator rerun runs\<run-id> --from research --config config.toml --brief brief.toml
+```
+
+Run Bundles contain resolved non-secret inputs, frozen production assets, stage/item manifests,
+hashes, usage/cost reservations, normalized intermediates, logs, and delivery outputs. They do not
+copy private voice recordings or credentials.
+
+Old Runs are preserved by default. Pruning is a dry run unless `--yes` is explicit, preserves parents
+needed by surviving children, and never touches `.cache/models` or `private/`:
+
+```powershell
+video-generator runs prune --older-than 30
+video-generator runs prune --older-than 30 --yes
+```
+
+## Evaluation harness
+
+The fixed smoke suite creates 30-second draft Runs, `draft-quality` creates 90-second draft Runs, and
+quality creates 90-second final Runs. Use `draft-quality` for the local profile until its optional
+final-quality vision reviewer passes evaluation. Omitting `--language` runs both English and Finnish.
+These commands perform real generation and can incur cost:
+
+```powershell
+video-generator evaluate --suite smoke --language fi --config config.toml
+video-generator evaluate --suite draft-quality --profile local --config config.toml --live-preflight
+video-generator evaluate --suite quality --config config.toml
+```
+
+## CLI exit codes
+
+| Code | Meaning |
+|---:|---|
+| 0 | success or intentional dry run/stop |
+| 1 | internal/transient failure |
+| 2 | invalid or unsupported configuration |
+| 3 | environment/Backend not ready |
+| 4 | Cost Ceiling would be exceeded |
+| 5 | provider/media/contract output invalid or policy refusal |
+| 130 | interrupted by the user |
+
+## Design references
+
+- [Domain language](CONTEXT.md)
+- [Contracts](docs/contracts.md)
+- [Architecture](docs/architecture.md)
+- [Prompt system](docs/prompt-system.md)
+- [Model matrix and pins](docs/model-matrix.md)
+- [Architecture decisions](docs/adr/)
+
+The implementation favors a fixed inspectable workflow over open-ended agent loops: one structured
+repair per LLM result, one measured narration Duration Repair, one final-quality image regeneration
+batch, and no hidden fallbacks. That keeps cost, provenance, resumption, and failure behavior legible.

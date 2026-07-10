@@ -8,7 +8,7 @@ The same task prompt can run on different conforming Structured Text Backends. P
 
 ## Prompt asset layout
 
-The planned built-in layout is:
+The logical built-in prompt layout is shown below. In v0 these assets are compiled from `prompting.py` and frozen into each Run Bundle rather than stored as separate directories:
 
 ```text
 prompts/
@@ -62,7 +62,7 @@ Random temperature alone is not a variance strategy. Candidate generation delibe
 
 ### Research
 
-The research task begins from explicit questions derived from the Creative Brief. It may use at most the configured query limit and may retain at most the configured source limit. It can request search and bounded fetch by returned source ID, while the orchestrator—not source text or model output—enforces allowed URL schemes, redirect/address checks, MIME/size/time limits, and excerpt length. Its output is a Research Pack with:
+The research task begins from explicit questions derived from the Creative Brief. It may use at most the configured query limit and may retain at most the configured source limit. v0 uses only provider-grounded search results and bounded returned excerpts; it does not fetch arbitrary result pages. Its output is a Research Pack with:
 
 - source title, URL, publisher/domain, retrieval time, and relevant language;
 - a short paraphrase of the useful detail;

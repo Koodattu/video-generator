@@ -84,7 +84,7 @@ These sketches show contract shape, not final Python signatures. Visual review r
 
 The Structured Text request carries the task name, task-instruction version, language, validated input-artifact references, desired JSON Schema, bounded output size, and permitted tools. Only `research` may receive the configured Search Backend as a bounded supporting tool. The request does not expose the whole Run Bundle by default.
 
-Search returns normalized source IDs, URLs, titles, provider excerpts, and citation metadata. Fetch accepts only a returned source ID or an explicitly supplied source. An independent HTTP implementation must allow only HTTP(S), resolve and re-check every redirect, reject loopback/private/link-local destinations, send no ambient credentials or cookies, enforce MIME/byte/time/redirect limits, and parse content without executing scripts. It returns bounded plain-text excerpts plus hashes and provenance, never an unrestricted page dump. Provider-native grounding may return sufficient bounded source content without a second HTTP fetch, but must declare that capability. All source content remains untrusted prompt data.
+Search returns normalized source IDs, URLs, titles, provider excerpts, and citation metadata. The `fetch` method is reserved for a future factual-mode capability; v0 adapters reject direct page fetching and use provider-grounded excerpts only. Any later independent HTTP implementation must pin the validated connection address, re-check redirects and peers, reject loopback/private/link-local destinations, send no ambient credentials or cookies, enforce MIME/byte/time/redirect limits, and parse content without executing scripts. All source content remains untrusted prompt data.
 
 The Speech request carries one Scene's exact spoken text, Voice Profile reference, Output Language, delivery audio specification, optional preceding/following text context, and a deterministic seed only if supported. Provider-specific voice controls stay in adapter settings. The result declares the actual sample rate, channels, duration, and timing precision rather than letting the orchestrator assume them.
 
@@ -141,7 +141,7 @@ Deterministic validation, audio normalization, rendering, and media QC are inter
 
 ## Local runner boundary
 
-The orchestrator must not import every CUDA stack. A local adapter owns its natural runner transport: llama.cpp may expose a managed HTTP server, while Diffusers, VoxCPM, Parakeet, or ACE-Step may use dedicated Python workers. The common lifecycle is what matters:
+The orchestrator must not import every CUDA stack. The Structured Text adapter owns one stock `llama-server.exe` through a stdlib control worker, while Diffusers, VoxCPM, Parakeet, or ACE-Step use dedicated Python workers. The common lifecycle is what matters:
 
 1. acquire the single exclusive GPU lease;
 2. stop an incompatible resident runner;
@@ -152,6 +152,8 @@ The orchestrator must not import every CUDA stack. A local adapter owns its natu
 7. terminate it at the next model-family boundary or after failure.
 
 There is no VRAM bin-packing. One GPU model family owns the card at a time. A single path utility maps workspace paths into WSL; runners may not write outside the Run's work directory and model cache.
+
+`local-llm.toml` is a typed Setup input, not a workflow plugin. It declares a stable profile ID, model/repository IDs, full commit and SHA-256 values, license, target GGUF, optional compatible drafter GGUF, stock llama.cpp commit and executable hash, context/batch settings, and `none` or `draft-mtp`. Setup copies and hashes only those assets. The runtime hard-forces loopback, a generated API key, one slot, and controlled model/host/port arguments. Provider output remains subject to the ordinary JSON Schema plus domain-model validation.
 
 ## Item checkpoints
 
@@ -178,4 +180,4 @@ Adapters return typed failures: `not_ready`, `unsupported`, `transient`, `invali
 
 Every stage records the Backend/model revision, prompt/task/schema versions, input and output hashes, attempts, elapsed time, warnings, and usage units. Cloud-cost guarding uses a dated pricing snapshot and bounded request maxima. If a provider cannot supply a defensible upper bound, the request needs an explicit configured reservation before it starts.
 
-Local stages record runtime, peak observed VRAM when available, and model asset hashes. Licenses and provider terms are checked against the declared Usage Purpose during Setup and Preflight; they are not inferred from a filename.
+Local stages record runtime, runner lifecycle data, optional worker-reported peak VRAM, and model asset hashes. The llama-server worker records baseline/load/peak/post-exit aggregate GPU observations and requires its managed PID to disappear; aggregate memory tolerance is advisory on Windows WDDM. Licenses and provider terms are checked against the declared Usage Purpose during Setup and Preflight; they are not inferred from a filename.

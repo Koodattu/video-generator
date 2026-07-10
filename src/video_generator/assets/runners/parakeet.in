@@ -1,0 +1,4 @@
+torch==2.13.0
+nemo-toolkit[asr]==2.7.3
+huggingface-hub>=0.36,<1
+

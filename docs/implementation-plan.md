@@ -1,5 +1,7 @@
 # Implementation plan
 
+The code milestones below are implemented. Their live acceptance criteria remain deliberately open until the pinned cloud/local Backends are prepared and the explicit smoke and quality suites are run.
+
 ## Delivery strategy
 
 All four curated profiles and both languages are v0 scope. “Support them from the start” means their contracts, capability descriptors, configuration shape, fixtures, and acceptance matrix are designed before provider code. It should not mean implementing every unstable SDK and CUDA stack simultaneously before any end-to-end path works.
@@ -112,7 +114,7 @@ Implement Responses API text/search, GPT Image 2, vision review, and the same El
 
 Deliver:
 
-- GPT-5.5 default and conditional GPT-5.6 Terra access probe/override;
+- GPT-5.6 Terra as the curated default, with model access verified by live Preflight;
 - Responses structured-output and bounded web-search adapters;
 - separately assigned GPT Image 2 prompt compiler with legal 16:9 generation dimensions and reference inputs;
 - cloud profile cost and usage accounting;
@@ -130,14 +132,14 @@ Deliver:
 - local cache under `./.cache/models`;
 - native-Windows and WSL2 process launchers plus one workspace path-mapping utility;
 - runner start/health/stop lifecycle, structured logs, timeout/cancellation, and crash cleanup;
-- VRAM baseline/peak/post-exit measurement through `nvidia-smi` where available;
+- declared VRAM reservations plus live sequential load/process-exit probes; llama-server additionally records before/load/peak/post-exit GPU observations and GPU-PID cleanup;
 - exact Setup actions and read-only Preflight probes;
 - no-download enforcement during Generate.
 
 Exit checks:
 
 - a dummy native worker and dummy WSL worker pass the same lifecycle contract;
-- termination releases file handles and returns GPU memory near baseline;
+- termination releases file handles and exits cleanly; llama-server's GPU PID disappears and aggregate memory is compared with its Windows pre-launch baseline;
 - missing WSL distribution, model, runtime, or disk space yields an exact setup command;
 - invalid Windows/WSL path translation is caught before model launch;
 - a runner cannot write outside its Run work directory or model cache.
@@ -148,10 +150,10 @@ The current machine has WSL2 enabled but no distribution. Setup should report th
 
 Integrate one model at a time against existing conformance tests:
 
-1. Qwen3.6-27B through llama.cpp, after selecting or producing an auditable Q4 artifact;
-2. VoxCPM2 with native compatibility mode and WSL2 accelerated comparison;
+1. a manifest-selected GGUF through pinned stock Windows `llama-server.exe`, beginning with one Qwen and one Gemma candidate and separate MTP-off/on variants;
+2. VoxCPM2 with native compatibility mode;
 3. Parakeet v3 under WSL2 plus exact-script timing reconciliation;
-4. FLUX.2 klein 4B with native Windows benchmark and WSL2 fallback;
+4. FLUX.2 klein 4B with a native Windows benchmark;
 5. Qwen vision path for Visual Review, separately memory-tested;
 6. ACE-Step XL Turbo and standard Turbo comparison.
 
@@ -168,14 +170,14 @@ Exit checks:
 - the full local profile completes in both languages without another generative cloud service;
 - live research is independently switchable from local inference and Offline blocks all network calls;
 - local captions preserve the canonical transcript above the required reconciliation coverage;
-- Qwen, VoxCPM, FLUX, and ACE-Step never coexist in VRAM;
+- the selected LLM, VoxCPM, FLUX, and ACE-Step never coexist in VRAM;
 - failures after any model family resume without repeating prior families.
 
 If Qwen vision is not reliable in 24 GB, final-quality local Visual Review remains unavailable until an explicit smaller local vision Backend is evaluated. It must not be silently skipped.
 
 ## Milestone 7 — Hybrid, optional features, and factual mode
 
-Freeze the first `hybrid-local-first` mapping only after local and cloud measurements exist. The planned initial mapping is local Qwen/FLUX/ACE-Step plus ElevenLabs narration/timestamps and independent search.
+Freeze the first `hybrid-local-first` mapping only after local and cloud measurements exist. The planned initial mapping is the promoted local GGUF/FLUX/ACE-Step plus ElevenLabs narration/timestamps and independent search.
 
 Complete:
 
@@ -216,6 +218,7 @@ Measure:
 - visual brief/style/identity success and regeneration rate;
 - music unobtrusiveness and narration intelligibility;
 - cold/warm runtime, peak VRAM/RAM, disk, provider usage, and actual cost;
+- for local GGUF variants: model load/prompt/generation throughput, MTP acceptance where exposed, context tier, schema validity, and shutdown time;
 - end-to-end completion and resume correctness.
 
 Automated model judges support comparisons; deterministic checks and human listening/visual review anchor them. Profile defaults change only with a versioned evaluation report. English and Finnish may select different models only when this evidence justifies the operational complexity.
@@ -256,7 +259,7 @@ Live tests are clearly marked and budget-capped. Unit tests never require creden
 
 | Risk | Test early | Planned response |
 | --- | --- | --- |
-| Qwen Q4 provenance or 24 GB fit | quantization/hash review and 32K llama.cpp smoke | self-quantize or pin reviewed artifact; no untracked download |
+| Local GGUF provenance or 24 GB fit | full commit/hash review and 32K stock llama-server smoke | evaluate one Qwen and one Gemma candidate first; no untracked download or automatic 256K |
 | Finnish creative quality | matched EN/FI story fixtures | language-specific prompt guidance first; separate model only with evidence |
 | Scene TTS prosody discontinuity | listen to adjacent emotional Scenes | pass text context, preserve voice settings, adjust Scene boundaries; do not merge architecture prematurely |
 | Finnish cloned-voice quality | VoxCPM and Eleven A/B with authorized recordings | language-matched references; model split only if needed |
@@ -268,9 +271,9 @@ Live tests are clearly marked and budget-capped. Unit tests never require creden
 | Duration drift | calibrated voice rates plus measured repair fixture | one targeted repair; resumable failure rather than speed/truncation |
 | Cloud model/access churn | Setup model probes and pinned profile versions | fail with exact supported override; never silently reroute |
 | Cost estimates wrong | compare reservation to actual usage | dated price snapshot, bounded outputs, conservative reservation |
-| Music duration/documentation conflict | account capability probe and long fixture | conservatively declare five minutes; deterministic loop only when explicit |
+| Music duration/account capability conflict | account capability probe and long fixture | cap one generation at 600 seconds; deterministic loop only when explicit |
 | Old FFmpeg edge cases | actual render/caption/mux smoke | capability-based warning and documented upgrade if test fails |
-| Research copying, prompt injection, or unsafe fetch | adversarial content plus redirect/private-address/oversize fixtures | safe bounded fetch, treat excerpts as data, paraphrase pack, bounded tools, provenance |
+| Research copying or prompt injection | adversarial grounded-search excerpts | no direct page fetch in v0; treat excerpts as data, paraphrase pack, bounded calls, provenance |
 | Factual claims unsupported | claim/evidence fixture | block factual mode until review contract passes |
 | Disk growth | repeated Run and model setup test | Run Bundle accounting and explicit `runs prune`; separate model cache |
 

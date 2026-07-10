@@ -1,0 +1,250 @@
+from __future__ import annotations
+
+import os
+import tomllib
+from pathlib import Path
+from typing import Any, Mapping
+
+from pydantic import ValidationError
+
+from .contracts import (
+    ContentMode,
+    CreativeBrief,
+    ProtocolName,
+    Quality,
+    RawRunConfig,
+    ResolvedRunConfig,
+    TASK_PROTOCOL,
+)
+from .errors import ConfigurationError
+from .profiles import BACKEND_DESCRIPTORS, PRICING_SNAPSHOT, PROFILE_VERSION, resolve_profile
+
+
+SECRET_NAMES = {
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "ELEVENLABS_API_KEY",
+    "HF_TOKEN",
+    "BRAVE_SEARCH_API_KEY",
+}
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as handle:
+            return tomllib.load(handle)
+    except FileNotFoundError as exc:
+        raise ConfigurationError(f"file does not exist: {path}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigurationError(f"invalid TOML in {path}: {exc}") from exc
+
+
+def load_dotenv(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            raise ConfigurationError(f"invalid .env assignment at {path}:{line_number}")
+        name, value = line.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if value and value[0] in {'"', "'"}:
+            if len(value) < 2 or value[-1] != value[0]:
+                raise ConfigurationError(f"unterminated quoted .env value at {path}:{line_number}")
+            value = value[1:-1]
+        values[name] = value
+    return values
+
+
+def load_environment(config_path: Path, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Load project .env, then let the real process environment take precedence."""
+
+    project_root = find_project_root(config_path.parent)
+    merged = load_dotenv(project_root / ".env")
+    merged.update(dict(environ or os.environ))
+    return merged
+
+
+def find_project_root(start: Path) -> Path:
+    candidate = start.resolve()
+    for directory in (candidate, *candidate.parents):
+        if (directory / "pyproject.toml").is_file():
+            return directory
+    return candidate
+
+
+def load_raw_config(path: Path) -> RawRunConfig:
+    try:
+        return RawRunConfig.model_validate(_read_toml(path.resolve()))
+    except ValidationError as exc:
+        raise ConfigurationError(f"invalid Run configuration:\n{exc}") from exc
+
+
+def load_brief(path: Path) -> CreativeBrief:
+    try:
+        return CreativeBrief.model_validate(_read_toml(path.resolve()))
+    except ValidationError as exc:
+        raise ConfigurationError(f"invalid Creative Brief:\n{exc}") from exc
+
+
+def _relative_private_path(value: str, config_dir: Path, project_root: Path) -> str:
+    if not value:
+        return ""
+    candidate = (config_dir / value).resolve() if not Path(value).is_absolute() else Path(value).resolve()
+    private_root = (project_root / "private").resolve()
+    try:
+        relative = candidate.relative_to(private_root)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"voice reference must stay under {private_root}: {candidate}",
+            action="Move the authorized recording and transcript under private/ and update config.toml.",
+        ) from exc
+    return (Path("private") / relative).as_posix()
+
+
+def resolve_config(path: Path, *, overrides: Mapping[str, Any] | None = None) -> ResolvedRunConfig:
+    path = path.resolve()
+    raw_data = _read_toml(path)
+    for key, value in (overrides or {}).items():
+        if value is not None:
+            raw_data[key] = value
+    try:
+        raw = RawRunConfig.model_validate(raw_data)
+    except ValidationError as exc:
+        raise ConfigurationError(f"invalid Run configuration:\n{exc}") from exc
+
+    project_root = find_project_root(path.parent)
+    bindings = resolve_profile(raw.profile)
+    bindings.update(raw.task_overrides)
+    for task_id, backend_id in bindings.items():
+        descriptor = BACKEND_DESCRIPTORS.get(backend_id)
+        if descriptor is None:
+            raise ConfigurationError(f"task {task_id!r} selects unknown Backend {backend_id!r}")
+        expected = TASK_PROTOCOL[task_id]
+        if expected not in descriptor.protocols:
+            raise ConfigurationError(
+                f"Backend {backend_id!r} does not implement {expected.value} required by {task_id!r}"
+            )
+        if raw.output_language not in descriptor.languages:
+            raise ConfigurationError(
+                f"Backend {backend_id!r} does not support Output Language {raw.output_language.value!r}"
+            )
+        if raw.usage_purpose not in descriptor.allowed_usage_purposes:
+            raise ConfigurationError(
+                f"Backend {backend_id!r} is not declared compatible with {raw.usage_purpose!r}"
+            )
+
+    active_tasks = set(TASK_PROTOCOL)
+    if raw.offline or raw.research_query_limit == 0:
+        active_tasks.discard("search")
+    if not raw.captions_enabled or BACKEND_DESCRIPTORS[bindings["narration_synthesis"]].supports_word_timing:
+        active_tasks.discard("caption_alignment")
+    if raw.quality is Quality.DRAFT:
+        active_tasks.discard("visual_review")
+    if not raw.music_enabled:
+        active_tasks -= {"music_brief", "music_generate"}
+    if raw.content_mode is ContentMode.FICTION:
+        active_tasks.discard("factual_review")
+    if raw.offline:
+        cloud_bindings = sorted(
+            {
+                bindings[task_id]
+                for task_id in active_tasks
+                if BACKEND_DESCRIPTORS[bindings[task_id]].cloud
+            }
+        )
+        if cloud_bindings:
+            raise ConfigurationError(
+                f"offline Run selects cloud Backends: {', '.join(cloud_bindings)}",
+                action="Use only local task bindings or set offline = false. No automatic rerouting is performed.",
+            )
+
+    if raw.quality is Quality.FINAL:
+        review = BACKEND_DESCRIPTORS[bindings["visual_review"]]
+        if not review.supports_vision:
+            raise ConfigurationError("final quality requires a vision-capable visual_review Backend")
+
+    width, height = (1280, 720) if raw.quality is Quality.DRAFT else (1920, 1080)
+    voice = raw.voice.model_copy(
+        update={
+            "reference_audio": _relative_private_path(raw.voice.reference_audio, path.parent, project_root),
+            "reference_transcript": _relative_private_path(
+                raw.voice.reference_transcript, path.parent, project_root
+            ),
+        }
+    )
+    speech = BACKEND_DESCRIPTORS[bindings["narration_synthesis"]]
+    if speech.provider == "elevenlabs" and not voice.elevenlabs_voice_id:
+        raise ConfigurationError(
+            "the selected narration Backend requires voice.elevenlabs_voice_id",
+            action="Create or choose an authorized ElevenLabs voice, then set its ID in config.toml.",
+        )
+
+    return ResolvedRunConfig(
+        profile=raw.profile,
+        profile_version=PROFILE_VERSION,
+        output_language=raw.output_language,
+        duration_seconds=raw.duration_seconds,
+        quality=raw.quality,
+        content_mode=raw.content_mode,
+        audience=raw.audience,
+        style=raw.style,
+        style_description=raw.style_description,
+        motion_style=raw.motion_style,
+        offline=raw.offline,
+        cost_ceiling_usd=raw.cost_ceiling_usd,
+        failure_policy=raw.failure_policy,
+        usage_purpose=raw.usage_purpose,
+        idea_candidates=raw.idea_candidates,
+        research_query_limit=raw.research_query_limit,
+        research_source_limit=raw.research_source_limit,
+        visual_target_seconds=raw.visual_target_seconds,
+        visual_min_seconds=raw.visual_min_seconds,
+        visual_max_seconds=raw.visual_max_seconds,
+        music_enabled=raw.music_enabled,
+        captions_enabled=raw.captions_enabled,
+        animated_captions=raw.animated_captions,
+        voice=voice,
+        task_bindings=bindings,
+        delivery_width=width,
+        delivery_height=height,
+        project_root=str(project_root),
+        pricing_snapshot=PRICING_SNAPSHOT,
+    )
+
+
+def active_task_ids(config: ResolvedRunConfig) -> set[str]:
+    task_ids = set(TASK_PROTOCOL)
+    if config.offline or config.research_query_limit == 0:
+        task_ids.discard("search")
+    speech = BACKEND_DESCRIPTORS[config.task_bindings["narration_synthesis"]]
+    if not config.captions_enabled or speech.supports_word_timing:
+        task_ids.discard("caption_alignment")
+    if config.quality is Quality.DRAFT:
+        task_ids.discard("visual_review")
+    if not config.music_enabled:
+        task_ids -= {"music_brief", "music_generate"}
+    if config.content_mode is ContentMode.FICTION:
+        task_ids.discard("factual_review")
+    return task_ids
+
+
+def active_backend_ids(config: ResolvedRunConfig) -> set[str]:
+    return {config.task_bindings[task_id] for task_id in active_task_ids(config)}
+
+
+def required_secret_names(config: ResolvedRunConfig) -> set[str]:
+    result: set[str] = set()
+    for backend_id in active_backend_ids(config):
+        result.update(BACKEND_DESCRIPTORS[backend_id].required_env)
+    return result
+
+
+def redact_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    return {name: "<configured>" for name in SECRET_NAMES if environment.get(name)}

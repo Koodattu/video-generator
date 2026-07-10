@@ -1,0 +1,42 @@
+schema_version = 1
+profile_id = "replace-with-candidate-and-variant"
+
+# Pin the exact Hugging Face repository commit, download the named GGUF yourself, and replace
+# both placeholders with the independent hashes you verified locally.
+model_id = "organization/model-name"
+model_repo = "organization/model-gguf-repository"
+model_revision = "0000000000000000000000000000000000000000"
+model_path = ".cache/models/llm/replace-with-candidate-and-variant/model.gguf"
+model_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+license_name = "replace-with-reviewed-license"
+
+# Point at llama-server.exe from one pinned stock llama.cpp Windows CUDA build. Merge the
+# release's required DLL bundle into the same directory before Setup.
+llama_cpp_revision = "0000000000000000000000000000000000000000"
+llama_server_path = "downloads/llama.cpp/llama-server.exe"
+llama_server_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# Context is allocated when the temporary server starts. Begin at 32K; larger tiers are separate
+# benchmark variants, not an automatic fallback.
+context_size = 32768
+batch_size = 512
+micro_batch_size = 512
+gpu_layers = 999
+flash_attention = true
+
+# Benchmark "none" first. For embedded Qwen MTP, change this to "draft-mtp" without adding a
+# draft_model block. For a separate compatible drafter, fill every draft_model field below.
+speculation = "none"
+speculative_tokens = 2
+
+# draft_model_id = "organization/drafter-name"
+# draft_model_repo = "organization/drafter-gguf-repository"
+# draft_model_revision = "0000000000000000000000000000000000000000"
+# draft_model_path = "downloads/drafter.gguf"
+# draft_model_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# Declare llama-server.exe and every sibling DLL in the merged runtime directory. Setup rejects
+# missing, extra, renamed, or changed executable runtime files.
+[llama_runtime_files]
+"llama-server.exe" = "0000000000000000000000000000000000000000000000000000000000000000"
+# "ggml-cuda.dll" = "replace-with-sha256"
