@@ -10,18 +10,26 @@ from video_generator.profiles import PROFILES
 from video_generator.prompting import build_frozen_assets
 from video_generator.provenance import build_runtime_snapshot
 from video_generator.run_store import RunStore
-from video_generator.workflow import WorkflowEngine
+from video_generator.workflow import RenderBundle, WorkflowEngine
 
 
 @pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="the deterministic end-to-end workflow requires FFmpeg and ffprobe",
 )
-@pytest.mark.parametrize("language", [OutputLanguage.ENGLISH, OutputLanguage.FINNISH])
+@pytest.mark.parametrize(
+    ("language", "music_enabled"),
+    [
+        (OutputLanguage.ENGLISH, False),
+        (OutputLanguage.FINNISH, False),
+        (OutputLanguage.ENGLISH, True),
+    ],
+)
 def test_deterministic_workflow_delivers_video_and_captions(
     tmp_path: Path,
     resolved_config,
     language: OutputLanguage,
+    music_enabled: bool,
 ) -> None:
     config = resolved_config.model_copy(
         update={
@@ -36,7 +44,7 @@ def test_deterministic_workflow_delivers_video_and_captions(
             "idea_candidates": 2,
             "research_query_limit": 1,
             "research_source_limit": 2,
-            "music_enabled": False,
+            "music_enabled": music_enabled,
             "captions_enabled": True,
             "animated_captions": True,
         }
@@ -64,4 +72,9 @@ def test_deterministic_workflow_delivers_video_and_captions(
     assert all(check.passed for check in delivery.checks)
     for output in delivery.outputs:
         assert (tmp_path / output.media.path).is_file()
+    if music_enabled:
+        render_record = store.stage_record("render")
+        assert render_record is not None
+        render_artifact = store.load_artifact(render_record, RenderBundle)
+        assert render_artifact.plan.music_path
     store.validate_completed_outputs()

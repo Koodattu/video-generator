@@ -82,7 +82,7 @@ from .util import (
 )
 
 
-INTERNAL_REVISION = "media-workflow-v3"
+INTERNAL_REVISION = "media-workflow-v8"
 DetectorFactory.seed = 0
 
 
@@ -669,8 +669,20 @@ class WorkflowEngine:
 
     def _script_word_plan(self, outline: StoryOutline) -> dict[str, Any]:
         words_per_second = 2.55 if self.config.output_language.value == "en" else 1.95
-        minimum_duration_fraction = 0.85 if self.config.output_language.value == "en" else 0.0
+        script_backend_id = getattr(self.config, "task_bindings", {}).get("script_draft", "")
+        local_script_backend = script_backend_id.startswith("local:")
+        minimum_duration_fraction = (
+            0.85
+            if self.config.output_language.value == "en" and not local_script_backend
+            else 0.65
+            if self.config.output_language.value == "en"
+            else 0.0
+        )
         maximum_word_tolerance = 1.0 if self.config.output_language.value == "en" else 1.05
+        use_short_english_envelope = (
+            self.config.output_language.value == "en"
+            and not local_script_backend
+        )
         target_total = max(
             len(outline.scenes) * 8,
             round(self.config.duration_seconds * 0.95 * words_per_second),
@@ -693,7 +705,7 @@ class WorkflowEngine:
                     "minimum_sentence_count": (
                         2
                         if self.config.duration_seconds >= 90
-                        and self.config.output_language.value == "en"
+                        and use_short_english_envelope
                         else 3
                         if self.config.duration_seconds >= 90
                         else 1
@@ -701,7 +713,7 @@ class WorkflowEngine:
                     "maximum_sentence_count": (
                         3
                         if self.config.duration_seconds >= 90
-                        and self.config.output_language.value == "en"
+                        and use_short_english_envelope
                         else 4
                         if self.config.duration_seconds >= 90
                         else 2

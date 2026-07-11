@@ -1,10 +1,57 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from video_generator.media import qc_video
+from video_generator.contracts import RenderPlan, RenderScene
+from video_generator.media import qc_video, render_video
+
+
+def test_music_render_uses_ffmpeg_42_compatible_exact_sum_without_double_attenuation(
+    tmp_path,
+) -> None:
+    commands = []
+
+    class Tools:
+        ffmpeg = "ffmpeg"
+
+        @staticmethod
+        def run(command, **kwargs) -> None:
+            del kwargs
+            commands.append(command)
+            Path(command[-1]).write_bytes(b"fixture")
+
+    plan = RenderPlan(
+        scenes=[
+            RenderScene(
+                scene_id="scene-001",
+                image_path="image.png",
+                start_seconds=0,
+                end_seconds=10,
+            )
+        ],
+        narration_path="narration.wav",
+        music_path="music.wav",
+        width=1280,
+        height=720,
+        fps=30,
+        duration_seconds=10,
+    )
+
+    render_video(
+        Tools(),
+        plan,
+        workspace_root=tmp_path,
+        base_path=tmp_path / "base.mp4",
+        output_path=tmp_path / "video.mp4",
+    )
+
+    graph = commands[0][commands[0].index("-filter_complex") + 1]
+    assert "amix=inputs=2:duration=first,volume=2" in graph
+    assert "volume=0.16" not in graph
+    assert "normalize=" not in graph
 
 
 @pytest.mark.parametrize(

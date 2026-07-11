@@ -771,9 +771,12 @@ def render_video(
     )
     if music_index is not None:
         filters.append(
-            f"[{music_index}:a]atrim=duration={plan.duration_seconds:.6f},asetpts=PTS-STARTPTS,volume=0.16[music]"
+            f"[{music_index}:a]atrim=duration={plan.duration_seconds:.6f},asetpts=PTS-STARTPTS[music]"
         )
-        filters.append("[narr][music]amix=inputs=2:duration=first:normalize=0,alimiter=limit=0.95[outa]")
+        filters.append(
+            "[narr][music]amix=inputs=2:duration=first,volume=2,"
+            "alimiter=limit=0.95[outa]"
+        )
     else:
         filters.append("[narr]alimiter=limit=0.95[outa]")
     command.extend(

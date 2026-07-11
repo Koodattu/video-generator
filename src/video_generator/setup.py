@@ -713,6 +713,102 @@ def _manifest_file(root: Path, path: Path) -> dict[str, str | int]:
     }
 
 
+def _remove_untracked_ace_build_tree(runtime: Path, tracked_files: Sequence[str]) -> None:
+    runtime = runtime.resolve()
+    relative = Path("acestep/third_parts/nano-vllm/build")
+    build_path = runtime / relative
+    if build_path.is_symlink():
+        raise VideoGeneratorError(
+            "ACE-Step generated build path is a symbolic link",
+            kind=ErrorKind.NOT_READY,
+            action="Inspect the pinned ACE-Step checkout before rerunning Setup.",
+        )
+    build_tree = build_path.resolve()
+    build_tree.relative_to(runtime)
+    prefix = relative.as_posix().casefold().rstrip("/") + "/"
+    tracked_under_build = [
+        value
+        for value in tracked_files
+        if Path(value).as_posix().casefold().startswith(prefix)
+    ]
+    if tracked_under_build:
+        raise VideoGeneratorError(
+            "ACE-Step generated build directory contains Git-tracked files",
+            kind=ErrorKind.NOT_READY,
+            action="Inspect the pinned ACE-Step checkout before removing generated build output.",
+        )
+    if not build_tree.exists():
+        return
+    if not build_tree.is_dir():
+        raise VideoGeneratorError(
+            "ACE-Step generated build path is not a regular directory",
+            kind=ErrorKind.NOT_READY,
+            action="Inspect the pinned ACE-Step checkout before rerunning Setup.",
+        )
+    shutil.rmtree(build_tree)
+
+
+def _sync_tracked_ace_checkpoint_code(
+    runtime: Path,
+    checkpoint: Path,
+    tracked_files: Sequence[str],
+) -> list[Path]:
+    runtime = runtime.resolve()
+    checkpoint = checkpoint.resolve()
+    checkpoint.relative_to(runtime / "checkpoints")
+    source_dir = runtime / "acestep" / "models" / "xl_turbo"
+    tracked = {Path(value).as_posix().casefold() for value in tracked_files}
+    synced: list[Path] = []
+    for source in sorted(source_dir.glob("*.py")):
+        if source.name == "__init__.py":
+            continue
+        relative = source.relative_to(runtime).as_posix()
+        if relative.casefold() not in tracked:
+            raise VideoGeneratorError(
+                f"ACE-Step checkpoint sync source is not Git-tracked: {relative}",
+                kind=ErrorKind.NOT_READY,
+                action="Inspect the pinned ACE-Step checkout before rerunning Setup.",
+            )
+        destination = (checkpoint / source.name).resolve()
+        destination.relative_to(checkpoint)
+        shutil.copy2(source, destination)
+        synced.append(destination)
+    return synced
+
+
+def _refresh_ace_model_asset_manifest(
+    checkpoint: Path,
+    synced_files: Sequence[Path],
+    *,
+    expected_revision: str,
+) -> None:
+    manifest_path = checkpoint / "asset-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("revision") != expected_revision:
+        raise VideoGeneratorError(
+            "ACE-Step model asset manifest has an unexpected revision",
+            kind=ErrorKind.NOT_READY,
+            action="Rerun the pinned ACE-Step Setup.",
+        )
+    entries = {
+        str(item.get("path")): item
+        for item in manifest.get("files", [])
+        if isinstance(item, dict) and item.get("path")
+    }
+    for path in synced_files:
+        relative = path.resolve().relative_to(checkpoint.resolve()).as_posix()
+        entry = entries.get(relative)
+        if entry is None:
+            raise VideoGeneratorError(
+                f"ACE-Step model asset manifest does not cover synced file: {relative}",
+                kind=ErrorKind.NOT_READY,
+                action="Rerun the pinned ACE-Step Setup.",
+            )
+        entry["size"] = path.stat().st_size
+        entry["sha256"] = sha256_file(path)
+    atomic_write_json(manifest_path, manifest)
+
+
 def prepare_llama_server_backend(project_root: Path, profile_path: Path) -> ProbeItem:
     profile_path = profile_path.resolve()
     profile: LocalLlmProfile = load_local_llm_profile(profile_path)
@@ -958,6 +1054,8 @@ def prepare_ace_step(project_root: Path, *, download: bool) -> ProbeItem:
             action="Remove the incomplete ACE-Step runtime directory and rerun Setup to clone the pinned release.",
         )
     _run([uv, "sync", "--locked"], cwd=runtime)
+    tracked_files = [line.strip() for line in _run([git, "ls-files"], cwd=runtime, timeout=60).splitlines() if line.strip()]
+    _remove_untracked_ace_build_tree(runtime, tracked_files)
     status_lines = [
         line
         for line in _run(
@@ -1023,6 +1121,13 @@ def prepare_ace_step(project_root: Path, *, download: bool) -> ProbeItem:
     xl = core / "acestep-v15-xl-turbo"
     if not core.is_dir() or not xl.is_dir():
         raise VideoGeneratorError("ACE-Step checkpoints are incomplete", kind=ErrorKind.NOT_READY)
+    if download:
+        synced_files = _sync_tracked_ace_checkpoint_code(runtime, xl, tracked_files)
+        _refresh_ace_model_asset_manifest(
+            xl,
+            synced_files,
+            expected_revision=ACE_XL_REVISION,
+        )
     checkpoint_manifest = runtime / "checkpoints.asset-manifest.json"
     if download:
         files = []
@@ -1056,15 +1161,16 @@ def prepare_ace_step(project_root: Path, *, download: bool) -> ProbeItem:
             action="Rerun Setup without --no-download to prepare and hash the checkpoints.",
         )
     runtime_manifest = runtime / "runtime-source.asset-manifest.json"
-    tracked_files = [line.strip() for line in _run([git, "ls-files"], cwd=runtime, timeout=60).splitlines() if line.strip()]
+    exact_file_suffixes = [".py", ".pyi", ".pyd", ".so", ".dll"]
+    exact_exclude_roots = [".git", ".venv", "checkpoints", "__pycache__"]
     atomic_write_json(
         runtime_manifest,
         {
             "schema_version": 1,
             "root": ".",
             "revision": ACE_REPOSITORY_REVISION,
-            "exact_file_suffixes": [".py", ".pyi", ".pyd", ".so", ".dll"],
-            "exact_exclude_roots": [".git", ".venv", "checkpoints", "__pycache__"],
+            "exact_file_suffixes": exact_file_suffixes,
+            "exact_exclude_roots": exact_exclude_roots,
             "files": [
                 {
                     "path": value.replace("\\", "/"),

@@ -19,6 +19,121 @@ def test_decode_wsl_output_accepts_redirected_utf16le() -> None:
     assert decode_wsl_output(raw).splitlines() == ["Ubuntu", "Debian"]
 
 
+def test_ace_setup_removes_only_untracked_generated_build_tree(tmp_path: Path) -> None:
+    generated = (
+        tmp_path
+        / "acestep"
+        / "third_parts"
+        / "nano-vllm"
+        / "build"
+        / "lib"
+        / "nanovllm"
+        / "__init__.py"
+    )
+    generated.parent.mkdir(parents=True)
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+
+    setup._remove_untracked_ace_build_tree(tmp_path, ["acestep/handler.py"])
+
+    assert not (tmp_path / "acestep" / "third_parts" / "nano-vllm" / "build").exists()
+
+
+def test_ace_setup_refuses_to_remove_tracked_build_tree(tmp_path: Path) -> None:
+    generated = tmp_path / "acestep" / "third_parts" / "nano-vllm" / "build" / "tracked.py"
+    generated.parent.mkdir(parents=True)
+    generated.write_text("VALUE = 1\n", encoding="utf-8")
+
+    with pytest.raises(VideoGeneratorError, match="Git-tracked"):
+        setup._remove_untracked_ace_build_tree(
+            tmp_path,
+            ["acestep/third_parts/nano-vllm/build/tracked.py"],
+        )
+
+    assert generated.is_file()
+
+
+def test_ace_setup_rejects_build_tree_symlink_before_resolving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    build = tmp_path / "acestep" / "third_parts" / "nano-vllm" / "build"
+    build.mkdir(parents=True)
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda path: path == build or original_is_symlink(path),
+    )
+
+    with pytest.raises(VideoGeneratorError, match="symbolic link"):
+        setup._remove_untracked_ace_build_tree(tmp_path, [])
+
+    assert build.is_dir()
+
+
+def test_ace_setup_syncs_only_git_tracked_checkpoint_code(tmp_path: Path) -> None:
+    source = tmp_path / "acestep" / "models" / "xl_turbo" / "configuration_acestep_v15.py"
+    checkpoint = tmp_path / "checkpoints" / "acestep-v15-xl-turbo"
+    destination = checkpoint / source.name
+    source.parent.mkdir(parents=True)
+    checkpoint.mkdir(parents=True)
+    source.write_text("PINNED = True\n", encoding="utf-8")
+    destination.write_text("PINNED = False\n", encoding="utf-8")
+
+    synced = setup._sync_tracked_ace_checkpoint_code(
+        tmp_path,
+        checkpoint,
+        ["acestep/models/xl_turbo/configuration_acestep_v15.py"],
+    )
+
+    assert destination.read_text(encoding="utf-8") == "PINNED = True\n"
+    assert synced == [destination.resolve()]
+
+
+def test_ace_setup_rejects_untracked_checkpoint_sync_source(tmp_path: Path) -> None:
+    source = tmp_path / "acestep" / "models" / "xl_turbo" / "configuration_acestep_v15.py"
+    checkpoint = tmp_path / "checkpoints" / "acestep-v15-xl-turbo"
+    source.parent.mkdir(parents=True)
+    checkpoint.mkdir(parents=True)
+    source.write_text("INJECTED = True\n", encoding="utf-8")
+
+    with pytest.raises(VideoGeneratorError, match="not Git-tracked"):
+        setup._sync_tracked_ace_checkpoint_code(tmp_path, checkpoint, [])
+
+
+def test_ace_setup_refreshes_nested_manifest_for_synced_code(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    synced = checkpoint / "configuration_acestep_v15.py"
+    synced.write_text("PINNED = True\n", encoding="utf-8")
+    (checkpoint / "asset-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "revision": "pinned-revision",
+                "files": [
+                    {
+                        "path": synced.name,
+                        "size": 1,
+                        "sha256": "0" * 64,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    setup._refresh_ace_model_asset_manifest(
+        checkpoint,
+        [synced],
+        expected_revision="pinned-revision",
+    )
+
+    manifest = json.loads((checkpoint / "asset-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["files"][0]["size"] == synced.stat().st_size
+    assert manifest["files"][0]["sha256"] == sha256_file(synced)
+
+
 def test_native_cuda_runner_uses_automatic_torch_backend(
     tmp_path: Path,
     monkeypatch,

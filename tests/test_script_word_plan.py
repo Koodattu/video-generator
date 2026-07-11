@@ -56,20 +56,34 @@ def test_script_word_range_accepts_inclusive_bounds() -> None:
 
 
 @pytest.mark.parametrize(
-    ("language", "expected_minimum", "expected_target", "expected_maximum"),
+    (
+        "language",
+        "backend_id",
+        "expected_minimum",
+        "expected_target",
+        "expected_maximum",
+        "expected_sentence_bounds",
+    ),
     [
-        (OutputLanguage.ENGLISH, 260, 291, 306),
-        (OutputLanguage.FINNISH, 64, 222, 246),
+        (OutputLanguage.ENGLISH, "openai:fixture", 260, 291, 306, (2, 3)),
+        (OutputLanguage.ENGLISH, "local:fixture", 199, 291, 306, (3, 4)),
+        (OutputLanguage.FINNISH, "local:fixture", 64, 222, 246, (3, 4)),
     ],
 )
 def test_script_word_plan_minimum_matches_duration_acceptance(
     language: OutputLanguage,
+    backend_id: str,
     expected_minimum: int,
     expected_target: int,
     expected_maximum: int,
+    expected_sentence_bounds: tuple[int, int],
 ) -> None:
     engine = object.__new__(WorkflowEngine)
-    engine.config = SimpleNamespace(output_language=language, duration_seconds=120)
+    engine.config = SimpleNamespace(
+        output_language=language,
+        duration_seconds=120,
+        task_bindings={"script_draft": backend_id},
+    )
     outline = StoryOutline(
         title="Fixture",
         concept_summary="A winter story.",
@@ -91,7 +105,6 @@ def test_script_word_plan_minimum_matches_duration_acceptance(
     assert plan["minimum_total_word_count"] == expected_minimum
     assert plan["target_total_word_count"] == expected_target
     assert plan["maximum_total_word_count"] == expected_maximum
-    expected_sentence_bounds = (2, 3) if language is OutputLanguage.ENGLISH else (3, 4)
     assert {
         (scene["minimum_sentence_count"], scene["maximum_sentence_count"])
         for scene in plan["scene_word_targets"]
