@@ -27,6 +27,43 @@ def test_custom_style_id_is_supported(tmp_path: Path) -> None:
     assert config.style == "soft_watercolor"
 
 
+def test_elevenlabs_voice_id_falls_back_to_environment(tmp_path: Path) -> None:
+    source = Path(__file__).resolve().parents[1] / "config.example.toml"
+    content = source.read_text(encoding="utf-8").replace(
+        'profile = "local"',
+        'profile = "cloud-openai"',
+    )
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\nversion='0.0.0'\n", encoding="utf-8")
+    (tmp_path / "config.toml").write_text(content, encoding="utf-8")
+
+    config = resolve_config(
+        tmp_path / "config.toml",
+        environment={"ELEVENLABS_VOICE_ID": "voice-from-environment"},
+    )
+
+    assert config.voice.elevenlabs_voice_id == "voice-from-environment"
+
+
+def test_elevenlabs_voice_id_in_toml_takes_precedence(tmp_path: Path) -> None:
+    source = Path(__file__).resolve().parents[1] / "config.example.toml"
+    content = source.read_text(encoding="utf-8").replace(
+        'profile = "local"',
+        'profile = "cloud-openai"',
+    ).replace(
+        'elevenlabs_voice_id = ""',
+        'elevenlabs_voice_id = "voice-from-toml"',
+    )
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\nversion='0.0.0'\n", encoding="utf-8")
+    (tmp_path / "config.toml").write_text(content, encoding="utf-8")
+
+    config = resolve_config(
+        tmp_path / "config.toml",
+        environment={"ELEVENLABS_VOICE_ID": "voice-from-environment"},
+    )
+
+    assert config.voice.elevenlabs_voice_id == "voice-from-toml"
+
+
 def test_offline_rejects_active_cloud_override(tmp_path: Path) -> None:
     source = Path(__file__).resolve().parents[1] / "config.example.toml"
     content = source.read_text(encoding="utf-8").replace("offline = false", "offline = true")

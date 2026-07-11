@@ -58,6 +58,11 @@ All creative tasks follow these rules unless their narrower task overrides one:
 
 Random temperature alone is not a variance strategy. Candidate generation deliberately varies conflict type, setting use, protagonist relationship, narrative shape, emotional color, and visual opportunities while respecting the same brief.
 
+For 90-second and longer fiction, the outline opens inside concrete action or pressure, establishes
+an event-based unanswered question, renews or complicates it once around the middle, and then pays it
+off, recontextualizes an earlier moment, or leaves deliberate ending residue. This is a flexible
+narrative design target, not a mandate for clickbait, a twist, a subplot, or nonlinear chronology.
+
 ## Story workflow
 
 ### Research
@@ -159,7 +164,11 @@ An illustrative Visual Brief shape is:
 }
 ```
 
-The structured brief remains provider-neutral and may be authored from Finnish narration. The compiler should normally express the final image prompt in English because the selected image Backends document or empirically show stronger English prompting; the semantic source and evaluation remain language-independent.
+The structured brief remains provider-neutral and may be authored from Finnish narration. The
+compiler always expresses both the final prompt and negative prompt in English because the selected
+image Backends document or empirically show stronger English prompting; the semantic source and
+evaluation remain language-independent. Image-prompt compilation therefore uses English as its
+explicit task output language even when the Run narration language is Finnish.
 
 ### Built-in `ms_paint_stick` Style Profile
 

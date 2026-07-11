@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from langdetect import DetectorFactory, LangDetectException, detect
 from pydantic import BaseModel, ConfigDict, Field
 
 from .contracts import (
@@ -64,7 +65,7 @@ from .media import (
     write_ass,
     write_srt,
 )
-from .prompting import PromptLibrary
+from .prompting import PromptLibrary, task_output_language
 from .provenance import verify_runtime_snapshot
 from .registry import BackendRegistry
 from .run_store import RunStore
@@ -79,7 +80,16 @@ from .util import (
 )
 
 
-INTERNAL_REVISION = "media-workflow-v1"
+INTERNAL_REVISION = "media-workflow-v2"
+DetectorFactory.seed = 0
+
+
+def _raw_image_extension(backend_id: str) -> str:
+    if backend_id == "deterministic:stick":
+        return ".ppm"
+    if backend_id == "gemini:gemini-3.1-flash-image":
+        return ".jpg"
+    return ".png"
 
 
 class WorkflowModel(BaseModel):
@@ -270,7 +280,9 @@ class WorkflowEngine:
                     "outline": outline.model_dump(mode="json"),
                     "output_language": self.config.output_language.value,
                     "duration_seconds": self.config.duration_seconds,
-                    "estimated_words_per_second": 2.25 if self.config.output_language.value == "en" else 1.95,
+                    "estimated_words_per_second": (
+                        2.55 if self.config.output_language.value == "en" else 1.95
+                    ),
                     **script_word_plan,
                 },
                 NarrationScript,
@@ -428,6 +440,7 @@ class WorkflowEngine:
         if task_id:
             backend_id = self.config.task_bindings[task_id]
             descriptor = self.registry.descriptor(backend_id)
+            output_language = task_output_language(task_id, self.config.output_language)
             prompt = self.prompts.get(
                 task_id,
                 language=self.config.output_language,
@@ -440,7 +453,7 @@ class WorkflowEngine:
                     {
                         "task_id": task_id,
                         "backend_id": backend_id,
-                        "language": self.config.output_language.value,
+                        "language": output_language.value,
                     }
                 ),
                 "backend_id": backend_id,
@@ -560,15 +573,23 @@ class WorkflowEngine:
                 "output_language": self.config.output_language.value,
             },
             ReviewReport,
-            invariant=lambda value: self._require(
-                value.review_type == expected_type,
-                (
-                    f"{task_id} must set review_type to {expected_type!r}; "
-                    f"got {value.review_type!r}"
-                ),
-            ),
+            invariant=lambda value: self._validate_review(value, expected_type, task_id),
         )
         return report
+
+    @staticmethod
+    def _validate_review(report: ReviewReport, expected_type: str, task_id: str) -> None:
+        WorkflowEngine._require(
+            report.review_type == expected_type,
+            (
+                f"{task_id} must set review_type to {expected_type!r}; "
+                f"got {report.review_type!r}"
+            ),
+        )
+        prefix = f"{expected_type}:"
+        for finding in report.findings:
+            if not finding.finding_id.startswith(prefix):
+                finding.finding_id = prefix + finding.finding_id
 
     @staticmethod
     def _require(condition: bool, message: str) -> None:
@@ -613,7 +634,8 @@ class WorkflowEngine:
         return target_count, max(1, target_count - 1), target_count + 1
 
     def _script_word_plan(self, outline: StoryOutline) -> dict[str, Any]:
-        words_per_second = 2.7 if self.config.output_language.value == "en" else 2.0
+        words_per_second = 2.55 if self.config.output_language.value == "en" else 1.95
+        minimum_duration_fraction = 0.85 if self.config.output_language.value == "en" else 0.60
         target_total = max(
             len(outline.scenes) * 8,
             round(self.config.duration_seconds * 0.95 * words_per_second),
@@ -632,8 +654,18 @@ class WorkflowEngine:
             scene_targets.append({"scene_id": scene.scene_id, "target_word_count": target})
         return {
             "target_total_word_count": target_total,
-            "minimum_total_word_count": target_total - (10 if self.config.output_language.value == "en" else 4),
-            "maximum_total_word_count": target_total + max(4, len(outline.scenes)),
+            "minimum_total_word_count": max(
+                len(outline.scenes) * 8,
+                round(
+                    self.config.duration_seconds
+                    * minimum_duration_fraction
+                    * words_per_second
+                ),
+            ),
+            "maximum_total_word_count": max(
+                len(outline.scenes) * 8,
+                round(self.config.duration_seconds * words_per_second),
+            ),
             "scene_word_targets": scene_targets,
         }
 
@@ -675,6 +707,12 @@ class WorkflowEngine:
             )
 
     def _validate_outline(self, outline: StoryOutline) -> None:
+        self._normalize_outline_durations(
+            outline,
+            self.config.duration_seconds,
+            minimum_seconds=self.config.visual_min_seconds,
+            maximum_seconds=self.config.visual_max_seconds,
+        )
         self._require(
             abs(sum(scene.provisional_seconds for scene in outline.scenes) - self.config.duration_seconds)
             <= 0.05,
@@ -692,6 +730,68 @@ class WorkflowEngine:
                 minimum <= scene.provisional_seconds <= self.config.visual_max_seconds,
                 f"{scene.scene_id} is outside the configured Scene duration bounds",
             )
+
+    @staticmethod
+    def _normalize_outline_durations(
+        outline: StoryOutline,
+        budget_seconds: float,
+        *,
+        minimum_seconds: float = 0,
+        maximum_seconds: float = math.inf,
+    ) -> None:
+        if not outline.scenes:
+            return
+
+        last_index = len(outline.scenes) - 1
+        lower_bounds = [
+            minimum_seconds / 2 if index in {0, last_index} else minimum_seconds
+            for index in range(len(outline.scenes))
+        ]
+        upper_bounds = [maximum_seconds] * len(outline.scenes)
+        if sum(lower_bounds) > budget_seconds + 0.05 or sum(upper_bounds) < budget_seconds - 0.05:
+            raise BackendError(
+                "configured Scene duration bounds cannot fit the Duration Budget",
+                kind=ErrorKind.INVALID_OUTPUT,
+            )
+
+        normalized = list(lower_bounds)
+        remaining = budget_seconds - sum(normalized)
+        active = set(range(len(outline.scenes)))
+        weights = [max(scene.provisional_seconds, 0.001) for scene in outline.scenes]
+        while remaining > 1e-9 and active:
+            weight_total = sum(weights[index] for index in active)
+            proposed = {
+                index: remaining * weights[index] / weight_total for index in active
+            }
+            saturated = [
+                index
+                for index in active
+                if proposed[index] > upper_bounds[index] - normalized[index]
+            ]
+            if not saturated:
+                for index in active:
+                    normalized[index] += proposed[index]
+                remaining = 0
+                break
+            for index in saturated:
+                capacity = upper_bounds[index] - normalized[index]
+                normalized[index] += capacity
+                remaining -= capacity
+                active.remove(index)
+
+        normalized = [round(value, 3) for value in normalized]
+        delta = round(budget_seconds - sum(normalized), 3)
+        for index, value in enumerate(normalized):
+            if abs(delta) <= 0.0005:
+                break
+            if delta > 0:
+                adjustment = min(delta, upper_bounds[index] - value)
+            else:
+                adjustment = max(delta, lower_bounds[index] - value)
+            normalized[index] = round(value + adjustment, 3)
+            delta = round(delta - adjustment, 3)
+        for scene, duration in zip(outline.scenes, normalized, strict=True):
+            scene.provisional_seconds = duration
 
     @staticmethod
     def _validate_revision(
@@ -828,11 +928,24 @@ class WorkflowEngine:
                     sources.append(
                         source.model_copy(update={"source_id": f"source-{len(sources) + 1:03d}"})
                     )
+        if not sources:
+            if queries:
+                warnings.append(
+                    "Search returned no usable bounded sources; continuing with an empty Research Pack."
+                )
+            pack = ResearchPack(queries=queries)
+            promoted = self.store.promote_stage(workspace, pack, usage=usage, warnings=warnings)
+            return ResearchPack.model_validate(promoted)
         task_input = {
             **input_seed,
             "sources": [source.model_dump(mode="json") for source in sources],
         }
-        execution = self.executor.structured("research", task_input, ResearchPack)
+        execution = self.executor.structured(
+            "research",
+            task_input,
+            ResearchPack,
+            invariant=lambda value: self._validate_research_source_references(value, sources),
+        )
         model_pack = ResearchPack.model_validate(execution.artifact)
         pack_data = model_pack.model_dump(mode="json")
         pack_data["queries"] = queries
@@ -844,6 +957,26 @@ class WorkflowEngine:
         usage.extend(_usage_list([execution.result.usage]))
         promoted = self.store.promote_stage(workspace, pack, usage=usage, warnings=warnings)
         return ResearchPack.model_validate(promoted)
+
+    @staticmethod
+    def _validate_research_source_references(
+        pack: ResearchPack,
+        sources: Sequence[ResearchSource],
+    ) -> None:
+        expected_ids = {source.source_id for source in sources}
+        unknown = sorted(
+            {
+                source_id
+                for finding in pack.findings
+                for source_id in finding.source_ids
+                if source_id not in expected_ids
+            }
+        )
+        WorkflowEngine._require(
+            not unknown,
+            "Research Findings reference sources outside the bounded search results: "
+            + ", ".join(unknown),
+        )
 
     def _narration(self, script: NarrationScript) -> NarrationBundle:
         input_data = {
@@ -862,6 +995,23 @@ class WorkflowEngine:
         self.store.begin_stage("narration", attempt=aggregate_workspace.attempt, **metadata)
         items, usage = self._synthesize_script(script, repair=False)
         bundle = self._assemble_narration(script, items, duration_repaired=False)
+        if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
+            pause_fitted_script = self._fit_pauses_to_budget(
+                script,
+                bundle.timeline,
+                self.config.duration_seconds,
+            )
+            if pause_fitted_script is not None:
+                pause_fitted_bundle = self._assemble_narration(
+                    pause_fitted_script,
+                    items,
+                    duration_repaired=True,
+                )
+                if duration_is_accepted(
+                    pause_fitted_bundle.timeline,
+                    self.config.duration_seconds,
+                ):
+                    bundle = pause_fitted_bundle
         if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
             target = self.config.duration_seconds * 0.95
             selected = [scene.scene_id for scene in script.scenes]
@@ -910,6 +1060,90 @@ class WorkflowEngine:
         bundle = bundle.model_copy(update={"timeline": timeline})
         promoted = self.store.promote_stage(workspace, bundle, usage=usage)
         return NarrationBundle.model_validate(promoted)
+
+    @staticmethod
+    def _fit_pauses_to_budget(
+        script: NarrationScript,
+        timeline: NarrationTimeline,
+        budget_seconds: float,
+    ) -> NarrationScript | None:
+        ceiling = delivery_ceiling(budget_seconds, timeline.fps)
+        minimum = budget_seconds * 0.85
+        speech_seconds = sum(
+            scene.speech_end_seconds - scene.start_seconds for scene in timeline.scenes
+        )
+        current_pause_seconds = sum(scene.pause_after_seconds for scene in script.scenes)
+        if speech_seconds > ceiling + 1e-6:
+            return None
+
+        eligible_indexes = list(range(max(0, len(script.scenes) - 1)))
+        maximum_pause_seconds = 3.0 * len(eligible_indexes)
+        if timeline.delivery_duration_seconds < minimum:
+            if speech_seconds + maximum_pause_seconds < minimum - 1e-6:
+                return None
+            desired_total = min(
+                budget_seconds * 0.95,
+                speech_seconds + maximum_pause_seconds,
+                ceiling - 0.0001,
+            )
+            allowed_pause_seconds = max(0.0, desired_total - speech_seconds)
+            weights = [
+                max(script.scenes[index].pause_after_seconds, 0.15)
+                for index in eligible_indexes
+            ]
+        else:
+            if current_pause_seconds <= 0:
+                return None
+            allowed_pause_seconds = max(0.0, ceiling - speech_seconds - 0.0001)
+            eligible_indexes = [
+                index
+                for index in eligible_indexes
+                if script.scenes[index].pause_after_seconds > 0
+            ]
+            weights = [script.scenes[index].pause_after_seconds for index in eligible_indexes]
+
+        if not eligible_indexes or abs(allowed_pause_seconds - current_pause_seconds) <= 0.0005:
+            return None
+
+        allocated = {index: 0.0 for index in eligible_indexes}
+        remaining = allowed_pause_seconds
+        active = set(eligible_indexes)
+        weight_by_index = dict(zip(eligible_indexes, weights, strict=True))
+        while remaining > 1e-9 and active:
+            weight_total = sum(weight_by_index[index] for index in active)
+            proposed = {
+                index: remaining * weight_by_index[index] / weight_total for index in active
+            }
+            saturated = [
+                index for index in active if proposed[index] > 3.0 - allocated[index]
+            ]
+            if not saturated:
+                for index in active:
+                    allocated[index] += proposed[index]
+                remaining = 0
+                break
+            for index in saturated:
+                capacity = 3.0 - allocated[index]
+                allocated[index] += capacity
+                remaining -= capacity
+                active.remove(index)
+
+        rounded = {index: round(value, 4) for index, value in allocated.items()}
+        delta = round(allowed_pause_seconds - sum(rounded.values()), 4)
+        for index in eligible_indexes:
+            if abs(delta) <= 0.00005:
+                break
+            adjustment = min(delta, 3.0 - rounded[index]) if delta > 0 else max(delta, -rounded[index])
+            rounded[index] = round(rounded[index] + adjustment, 4)
+            delta = round(delta - adjustment, 4)
+
+        fitted_scenes = []
+        for index, scene in enumerate(script.scenes):
+            pause = rounded.get(index, 0.0)
+            fitted_scenes.append(scene.model_copy(update={"pause_after_seconds": pause}))
+        return NarrationScript.model_validate(
+            script.model_copy(update={"scenes": fitted_scenes}).model_dump(mode="json")
+        )
 
     def _duration_repair(
         self,
@@ -1387,6 +1621,9 @@ class WorkflowEngine:
                 {
                     "compiler": self.config.task_bindings["image_prompt_compile"],
                     "target": target_backend_id,
+                    "language": task_output_language(
+                        "image_prompt_compile", self.config.output_language
+                    ).value,
                 }
             )
             compiler_id = self.config.task_bindings["image_prompt_compile"]
@@ -1409,6 +1646,7 @@ class WorkflowEngine:
             )
             if reusable_item:
                 image_request = self.store.load_item_artifact(reusable_item, ImageRequest)
+                self._validate_image_request_language(image_request)
                 usage.extend(reusable_item.usage)
             else:
                 item_workspace = self.store.workspace("image-prompt-compile", item_id=visual_brief.scene_id)
@@ -1417,6 +1655,7 @@ class WorkflowEngine:
                     item_input,
                     ImageRequest,
                     target_image_backend=target_backend_id,
+                    invariant=self._validate_image_request_language,
                 )
                 image_request = ImageRequest.model_validate(execution.artifact)
                 image_request = self._canonical_image_request(
@@ -1464,6 +1703,14 @@ class WorkflowEngine:
             settings = settings.model_copy(
                 update={"inference_steps": 4, "guidance_scale": 1.0}
             )
+        elif target_backend_id == "gemini:gemini-3.1-flash-image":
+            settings = settings.model_copy(
+                update={
+                    "output_format": "jpeg",
+                    "aspect_ratio": "16:9",
+                    "image_size": "2K" if max(width, height) >= 1600 else "1K",
+                }
+            )
         return image_request.model_copy(
             update={
                 "scene_id": scene_id,
@@ -1475,6 +1722,25 @@ class WorkflowEngine:
                 "settings": settings,
             }
         )
+
+    @staticmethod
+    def _validate_image_request_language(image_request: ImageRequest) -> None:
+        for field_name in ("prompt", "negative_prompt"):
+            value = getattr(image_request, field_name).strip()
+            if not value:
+                continue
+            try:
+                language = detect(value)
+            except LangDetectException as exc:
+                raise BackendError(
+                    f"ImageRequest.{field_name} language could not be verified as English",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                ) from exc
+            if language != "en":
+                raise BackendError(
+                    f"ImageRequest.{field_name} must be English; detected {language}",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                )
 
     def _images(self, request_set: ImageRequestSet) -> ImageSet:
         input_data = request_set.model_dump(mode="json")
@@ -1508,7 +1774,7 @@ class WorkflowEngine:
                 usage.extend(reusable_item.usage)
             else:
                 workspace = self.store.workspace("images", item_id=request.scene_id)
-                extension = ".ppm" if backend_id == "deterministic:stick" else ".png"
+                extension = _raw_image_extension(backend_id)
                 raw_path = workspace.work_dir / f"generated{extension}"
                 normalized_path = workspace.work_dir / "normalized.png"
                 result = self.executor.image(request, raw_path)
@@ -1611,7 +1877,7 @@ class WorkflowEngine:
                     usage.extend(reusable_item.usage)
                 else:
                     workspace = self.store.workspace("visual-review", item_id=regeneration_id)
-                    extension = ".ppm" if image_backend_id == "deterministic:stick" else ".png"
+                    extension = _raw_image_extension(image_backend_id)
                     raw_path = workspace.work_dir / f"generated{extension}"
                     normalized_path = workspace.work_dir / "normalized.png"
                     result = self.executor.image(corrected, raw_path)

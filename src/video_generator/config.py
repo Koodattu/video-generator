@@ -67,7 +67,7 @@ def load_environment(config_path: Path, environ: Mapping[str, str] | None = None
 
     project_root = find_project_root(config_path.parent)
     merged = load_dotenv(project_root / ".env")
-    merged.update(dict(environ or os.environ))
+    merged.update(dict(os.environ if environ is None else environ))
     return merged
 
 
@@ -108,7 +108,12 @@ def _relative_private_path(value: str, config_dir: Path, project_root: Path) -> 
     return (Path("private") / relative).as_posix()
 
 
-def resolve_config(path: Path, *, overrides: Mapping[str, Any] | None = None) -> ResolvedRunConfig:
+def resolve_config(
+    path: Path,
+    *,
+    overrides: Mapping[str, Any] | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> ResolvedRunConfig:
     path = path.resolve()
     raw_data = _read_toml(path)
     for key, value in (overrides or {}).items():
@@ -120,6 +125,11 @@ def resolve_config(path: Path, *, overrides: Mapping[str, Any] | None = None) ->
         raise ConfigurationError(f"invalid Run configuration:\n{exc}") from exc
 
     project_root = find_project_root(path.parent)
+    resolved_environment = load_environment(path, environ=environment)
+    elevenlabs_voice_id = (
+        raw.voice.elevenlabs_voice_id.strip()
+        or resolved_environment.get("ELEVENLABS_VOICE_ID", "").strip()
+    )
     bindings = resolve_profile(raw.profile)
     bindings.update(raw.task_overrides)
     for task_id, backend_id in bindings.items():
@@ -177,13 +187,17 @@ def resolve_config(path: Path, *, overrides: Mapping[str, Any] | None = None) ->
             "reference_transcript": _relative_private_path(
                 raw.voice.reference_transcript, path.parent, project_root
             ),
+            "elevenlabs_voice_id": elevenlabs_voice_id,
         }
     )
     speech = BACKEND_DESCRIPTORS[bindings["narration_synthesis"]]
     if speech.provider == "elevenlabs" and not voice.elevenlabs_voice_id:
         raise ConfigurationError(
             "the selected narration Backend requires voice.elevenlabs_voice_id",
-            action="Create or choose an authorized ElevenLabs voice, then set its ID in config.toml.",
+            action=(
+                "Create or choose an authorized ElevenLabs voice, then set ELEVENLABS_VOICE_ID "
+                "in .env or voice.elevenlabs_voice_id in config.toml."
+            ),
         )
 
     return ResolvedRunConfig(

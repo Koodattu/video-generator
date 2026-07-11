@@ -17,7 +17,7 @@ Setup answers the first two with pinned assets and live probes. Contract tests a
 
 | Workflow capability | `local` | `cloud-openai` | `cloud-gemini` | `hybrid-local-first` |
 | --- | --- | --- | --- | --- |
-| Live search | Brave Search; none when Offline | OpenAI web search | Gemini Google Search | Brave Search |
+| Live search | DDGS/DuckDuckGo; none when Offline | OpenAI web search | Gemini Google Search | DDGS/DuckDuckGo |
 | Research reduction and creative text | Manifest-selected GGUF through stock llama.cpp | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
 | Script reviews | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
 | Visual planning | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
@@ -32,6 +32,10 @@ Setup answers the first two with pinned assets and live probes. Contract tests a
 
 The cloud profile names identify the leading text/image provider, not every service. ElevenLabs remains the initial cloud voice and music provider. `hybrid-local-first` spends cloud budget only on narration/timing by default, where voice-clone quality and exact timestamps remove substantial local complexity.
 
+`cloud-openai-gemini` is the mixed benchmark profile: pinned `gpt-5.4-mini-2026-03-17`
+for structured text, Gemini 3.1 Flash Image, ElevenLabs Multilingual v2, and keyless bounded
+DDGS/DuckDuckGo research.
+
 Profile mappings are versioned and inspectable. They never switch dynamically after an error. Every listed alternative below is an explicit override or a future profile revision, not a silent fallback.
 
 ## OpenAI
@@ -39,6 +43,10 @@ Profile mappings are versioned and inspectable. They never switch dynamically af
 ### Text and research
 
 `gpt-5.6-terra` is the balanced GPT-5.6 variant the original idea identified and is now the curated `cloud-openai` default. OpenAI's current model guide recommends Terra when intelligence and cost both matter. Live Preflight still verifies access for the configured project before a Run spends credits. The Responses API is the integration surface for structured generation and bounded web search. [latest-model guide](https://developers.openai.com/api/docs/guides/latest-model), [web search](https://developers.openai.com/api/docs/guides/tools-web-search)
+
+The mixed cloud benchmark instead pins `gpt-5.4-mini-2026-03-17`, the cost-efficient GPT-5.4
+variant with Responses API and Structured Outputs support. The dated snapshot keeps comparisons
+reproducible instead of silently following an alias.
 
 Model aliases can change behavior. Reproducible evaluations should prefer dated snapshots when offered; otherwise the Run records the alias and request date, and profile changes require a new profile version.
 
@@ -122,7 +130,11 @@ Upstream guidance favors shorter instrumental generations even though ten minute
 
 ## Search for local and hybrid Runs
 
-“Local” describes inference, not research connectivity. Brave Search is a reasonable independent Search Backend because its API has a simple credential and query interface. It lets research stay provider-neutral when the selected local LLM performs the reduction. Pricing and quotas are unstable and therefore live in dated pricing metadata, not this architecture. [Brave Search API](https://brave.com/search/api/), [authentication](https://api-dashboard.search.brave.com/documentation/guides/authentication)
+“Local” describes inference, not research connectivity. Curated local and mixed profiles use the
+pinned DDGS package with the DuckDuckGo backend, explicit `us-en`/`fi-fi` regions, moderate safe
+search, bounded result counts, and returned snippets only. Arbitrary page extraction remains
+disabled. This path is keyless but has no provider SLA, so `offline = true` or a zero query limit
+remains the deterministic no-network option. Brave is retained only as an explicit legacy override.
 
 When `offline = true`, the Search Backend is disabled. Fiction can proceed from supplied material or clearly non-current model knowledge; factual mode requires supplied sources and cannot claim currentness.
 

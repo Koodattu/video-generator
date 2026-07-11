@@ -5,7 +5,7 @@ from copy import deepcopy
 from .contracts import BackendDescriptor, OutputLanguage, ProtocolName, TASK_IDS
 
 
-PROFILE_VERSION = "2026-07-11.v4"
+PROFILE_VERSION = "2026-07-11.v5"
 PRICING_SNAPSHOT = "2026-07-10.conservative-v1"
 
 EXPECTED_LOCAL_MODEL_REVISIONS: dict[str, str] = {
@@ -33,6 +33,17 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         required_env=["BRAVE_SEARCH_API_KEY"],
         reservation_usd=0.02,
         license_name="Brave Search API terms",
+    ),
+    "ddgs:duckduckgo": BackendDescriptor(
+        backend_id="ddgs:duckduckgo",
+        provider="ddgs",
+        model_id="duckduckgo-text",
+        revision="ddgs-9.14.4",
+        protocols={ProtocolName.SEARCH},
+        cloud=True,
+        languages=_all_languages(),
+        license_name="MIT",
+        notes="Keyless bounded DuckDuckGo search through the pinned DDGS package; no page extraction.",
     ),
     "openai:web": BackendDescriptor(
         backend_id="openai:web",
@@ -70,6 +81,20 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         supports_vision=True,
         reservation_usd=0.50,
         license_name="OpenAI service terms",
+    ),
+    "openai:gpt-5.4-mini": BackendDescriptor(
+        backend_id="openai:gpt-5.4-mini",
+        provider="openai",
+        model_id="gpt-5.4-mini-2026-03-17",
+        revision="gpt-5.4-mini-2026-03-17",
+        protocols={ProtocolName.STRUCTURED_TEXT},
+        cloud=True,
+        languages=_all_languages(),
+        required_env=["OPENAI_API_KEY"],
+        supports_vision=True,
+        reservation_usd=0.25,
+        license_name="OpenAI service terms",
+        notes="Pinned cost-efficient GPT-5.4 mini snapshot for structured production tasks.",
     ),
     "openai:gpt-5.6-terra": BackendDescriptor(
         backend_id="openai:gpt-5.6-terra",
@@ -383,7 +408,7 @@ def _profile(
 
 PROFILES: dict[str, dict[str, str]] = {
     "local": _profile(
-        search="brave:web",
+        search="ddgs:duckduckgo",
         text="local:llama-server",
         speech="local:voxcpm2",
         alignment="local:faster-whisper-large-v3-turbo",
@@ -409,8 +434,17 @@ PROFILES: dict[str, dict[str, str]] = {
         review="gemini:gemini-3.5-flash",
         music="elevenlabs:music_v2",
     ),
+    "cloud-openai-gemini": _profile(
+        search="ddgs:duckduckgo",
+        text="openai:gpt-5.4-mini",
+        speech="elevenlabs:eleven_multilingual_v2",
+        alignment="elevenlabs:forced-alignment",
+        image="gemini:gemini-3.1-flash-image",
+        review="openai:gpt-5.4-mini",
+        music="elevenlabs:music_v2",
+    ),
     "hybrid-local-first": _profile(
-        search="brave:web",
+        search="ddgs:duckduckgo",
         text="local:llama-server",
         speech="elevenlabs:eleven_multilingual_v2",
         alignment="elevenlabs:forced-alignment",

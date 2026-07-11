@@ -16,7 +16,8 @@ changing the workflow.
 - Fiction inspired by bounded research. Factual mode remains rejected until claim-level evidence
   capture is implemented; the program will not pretend unsupported factual output is ready.
 - Static 16:9 images with hard cuts; default output is 1280x720 draft or 1920x1080 final at 30 fps.
-- Selectable SRT captions, plus optional animated ASS captions burned into a second MP4.
+- Selectable SRT captions, plus optional ASS captions with the active spoken word highlighted in a
+  second, burned-in MP4.
 - Optional ambient instrumental music mixed below narration.
 - Built-in `ms_paint_stick` image style and arbitrary additional style IDs described in config.
 - Personal, noncommercial use; voice cloning is limited to your own voice or explicit permission.
@@ -61,8 +62,8 @@ New-Item -ItemType Directory -Force private\voice
 Edit `config.toml` and `brief.toml`. Put only required API keys in `.env`; never put secrets in TOML.
 For a local clone, copy your authorized reference WAV (and preferably its exact UTF-8 transcript) to
 `private/voice/` and keep `voice.authorization = "self"`. For ElevenLabs, set
-`voice.elevenlabs_voice_id` to your authorized voice ID; no private reference recording is uploaded
-by this program.
+`ELEVENLABS_VOICE_ID` in `.env` (or `voice.elevenlabs_voice_id` in TOML) to your authorized voice ID;
+no private reference recording is uploaded by this program.
 
 The 90-second example is the intended first useful target. For the first mechanical check, set
 `duration_seconds = 30`. The configured duration is both the goal and hard ceiling; accepted measured
@@ -70,9 +71,10 @@ narration must occupy 85-100% of it.
 
 ## Fastest first Run: cloud
 
-Choose `cloud-openai` or `cloud-gemini` in `config.toml`, set the corresponding API key plus
-`ELEVENLABS_API_KEY`, and set your ElevenLabs voice ID. Increase `cost_ceiling_usd` only after reading
-the Preflight estimate.
+Choose `cloud-openai`, `cloud-gemini`, or `cloud-openai-gemini` in `config.toml`, set the corresponding
+API keys plus `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`. The mixed profile uses pinned GPT-5.4
+mini for text, Gemini 3.1 Flash Image, ElevenLabs narration, and keyless DDGS/DuckDuckGo research.
+Increase `cost_ceiling_usd` only after reading the Preflight estimate.
 
 ```powershell
 video-generator setup --config config.toml --no-download
@@ -92,7 +94,7 @@ The local profile uses:
 
 | Task | Initial Backend |
 |---|---|
-| Research search | Brave Search, or no search when `offline = true` |
+| Research search | Keyless DDGS/DuckDuckGo, or no search when `offline = true` |
 | Text/reviews/prompt compilation | Manifest-selected GGUF through stock `llama-server.exe` |
 | English/Finnish voice clone | VoxCPM2 |
 | Local timestamps | faster-whisper large-v3-turbo through CTranslate2 on native Windows |
@@ -222,8 +224,8 @@ fail with an explicit action. It never substitutes another model.
 
 ## Mix Backends per task
 
-Curated profiles are `local`, `cloud-openai`, `cloud-gemini`, and `hybrid-local-first`. Advanced
-overrides live under `[task_overrides]` in config. For example:
+Curated profiles are `local`, `cloud-openai`, `cloud-gemini`, `cloud-openai-gemini`, and
+`hybrid-local-first`. Advanced overrides live under `[task_overrides]` in config. For example:
 
 ```toml
 [task_overrides]

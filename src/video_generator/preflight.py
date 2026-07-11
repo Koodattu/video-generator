@@ -109,7 +109,7 @@ def estimate_cost(
 
     if not config.offline and "search" in active_tasks:
         descriptor = BACKEND_DESCRIPTORS[config.task_bindings["search"]]
-        if descriptor.cloud:
+        if descriptor.cloud and descriptor.reservation_usd > 0:
             calls = max(0, config.research_query_limit - completed_calls.get("search", 0))
             line_items["search"] = float(descriptor.reservation_usd) * calls
 
@@ -250,7 +250,11 @@ def _voice_checks(config: ResolvedRunConfig, project_root: Path) -> list[ProbeIt
                 name="elevenlabs_voice_id",
                 ready=bool(config.voice.elevenlabs_voice_id),
                 detail="configured" if config.voice.elevenlabs_voice_id else "missing",
-                action=None if config.voice.elevenlabs_voice_id else "Set voice.elevenlabs_voice_id in config.toml.",
+                action=(
+                    None
+                    if config.voice.elevenlabs_voice_id
+                    else "Set ELEVENLABS_VOICE_ID in .env or voice.elevenlabs_voice_id in config.toml."
+                ),
             )
         )
     return checks

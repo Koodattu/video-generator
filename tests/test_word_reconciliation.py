@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+import pytest
+
+from video_generator.contracts import WordTiming
+from video_generator.errors import MediaError
+from video_generator.media import reconcile_word_timings
+
+
+def _timings(words: list[str]) -> list[WordTiming]:
+    return [
+        WordTiming(
+            text=word,
+            start_seconds=index * 0.5,
+            end_seconds=(index + 1) * 0.5,
+            confidence=0.95,
+        )
+        for index, word in enumerate(words)
+    ]
+
+
+def test_reconciliation_accepts_close_finnish_words_and_split_compound() -> None:
+    canonical = "Kettu astui lähemmäs narunpäähän Lumikenttä"
+    recognized = _timings(["Kenitu", "astui", "lähemmässä", "narun", "päähän", "Lomikenttä"])
+
+    words, coverage = reconcile_word_timings(
+        canonical,
+        recognized,
+        scene_duration=3,
+    )
+
+    assert coverage == 1
+    assert [word.text for word in words] == canonical.split()
+    assert words[3].start_seconds == 1.5
+    assert words[3].end_seconds == 2.5
+
+
+def test_reconciliation_maps_recognized_compound_to_two_script_words() -> None:
+    canonical = "snow field glows"
+    recognized = _timings(["snowfield", "glows"])
+
+    words, coverage = reconcile_word_timings(canonical, recognized, scene_duration=1)
+
+    assert coverage == 1
+    assert [word.text for word in words] == canonical.split()
+    assert words[0].end_seconds == words[1].start_seconds
+
+
+def test_reconciliation_still_rejects_unrelated_transcript() -> None:
+    canonical = "alpha bravo charlie delta echo foxtrot golf hotel india juliet"
+    recognized = _timings(["winter", "forest", "lantern", "quiet", "river"])
+
+    with pytest.raises(MediaError, match="caption alignment coverage"):
+        reconcile_word_timings(canonical, recognized, scene_duration=2.5)

@@ -38,7 +38,7 @@ def test_deterministic_workflow_delivers_video_and_captions(
             "research_source_limit": 2,
             "music_enabled": False,
             "captions_enabled": True,
-            "animated_captions": False,
+            "animated_captions": True,
         }
     )
     brief = CreativeBrief(idea_direction="A tiny mystery on a snowy path")
@@ -56,7 +56,11 @@ def test_deterministic_workflow_delivers_video_and_captions(
 
     assert delivery is not None
     assert store.manifest.status == "complete"
-    assert {output.role for output in delivery.outputs} >= {"primary_video", "caption_sidecar"}
+    assert {output.role for output in delivery.outputs} >= {
+        "primary_video",
+        "burned_caption_video",
+        "caption_sidecar",
+    }
     assert all(check.passed for check in delivery.checks)
     for output in delivery.outputs:
         assert (tmp_path / output.media.path).is_file()

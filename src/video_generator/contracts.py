@@ -129,7 +129,13 @@ class VoiceSettings(ContractModel):
 
 
 class RawRunConfig(VersionedContract):
-    profile: Literal["local", "cloud-openai", "cloud-gemini", "hybrid-local-first"] = "local"
+    profile: Literal[
+        "local",
+        "cloud-openai",
+        "cloud-gemini",
+        "cloud-openai-gemini",
+        "hybrid-local-first",
+    ] = "local"
     output_language: OutputLanguage = OutputLanguage.FINNISH
     duration_seconds: Annotated[FiniteFloat, Field(ge=10, le=3600)] = 90
     quality: Quality = Quality.DRAFT

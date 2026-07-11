@@ -394,14 +394,14 @@ class GeminiImageBackend(_GeminiClient):
                 "input": input_value,
                 "response_format": {
                     "type": "image",
-                    "mime_type": "image/png",
+                    "mime_type": "image/jpeg",
                     "aspect_ratio": "16:9",
                     "image_size": image_size,
                 },
             }
         )
         image_data = None
-        image_mime = "image/png"
+        image_mime = "image/jpeg"
         if isinstance(payload.get("output_image"), dict):
             image_data = payload["output_image"].get("data")
             image_mime = payload["output_image"].get("mime_type") or image_mime

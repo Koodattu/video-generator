@@ -220,6 +220,143 @@ def test_duration_repair_scale_uses_midpoint_speech_window_without_fixed_pause()
     assert round(55 * scale) == 48
 
 
+def test_pause_fit_removes_only_excess_silence_when_speech_fits_budget() -> None:
+    audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text="The first sentence remains unchanged.",
+                pause_after_seconds=2,
+            ),
+            ScriptScene(
+                scene_id="scene-002",
+                spoken_text="The second sentence remains unchanged.",
+                pause_after_seconds=0,
+            ),
+        ],
+    )
+    timeline = NarrationTimeline(
+        narration_audio=audio,
+        duration_seconds=121,
+        delivery_duration_seconds=121,
+        scenes=[
+            TimelineScene(
+                scene_id="scene-001",
+                audio=audio,
+                start_seconds=0,
+                speech_end_seconds=60,
+                end_seconds=62,
+            ),
+            TimelineScene(
+                scene_id="scene-002",
+                audio=audio,
+                start_seconds=62,
+                speech_end_seconds=121,
+                end_seconds=121,
+            ),
+        ],
+    )
+
+    fitted = WorkflowEngine._fit_pauses_to_budget(script, timeline, 120)
+
+    assert fitted is not None
+    assert [scene.spoken_text for scene in fitted.scenes] == [
+        scene.spoken_text for scene in script.scenes
+    ]
+    assert sum(scene.pause_after_seconds for scene in fitted.scenes) == pytest.approx(1, abs=0.001)
+
+
+def test_pause_fit_defers_to_script_repair_when_speech_exceeds_budget() -> None:
+    audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text="The first sentence remains unchanged.",
+                pause_after_seconds=1,
+            ),
+            ScriptScene(
+                scene_id="scene-002",
+                spoken_text="The second sentence remains unchanged.",
+                pause_after_seconds=0,
+            ),
+        ],
+    )
+    timeline = NarrationTimeline(
+        narration_audio=audio,
+        duration_seconds=122,
+        delivery_duration_seconds=122,
+        scenes=[
+            TimelineScene(
+                scene_id="scene-001",
+                audio=audio,
+                start_seconds=0,
+                speech_end_seconds=61,
+                end_seconds=62,
+            ),
+            TimelineScene(
+                scene_id="scene-002",
+                audio=audio,
+                start_seconds=62,
+                speech_end_seconds=122,
+                end_seconds=122,
+            ),
+        ],
+    )
+
+    assert WorkflowEngine._fit_pauses_to_budget(script, timeline, 120) is None
+
+
+def test_pause_fit_can_extend_short_narration_to_acceptance_floor() -> None:
+    audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id=f"scene-{index:03d}",
+                spoken_text=f"Scene {index} remains unchanged.",
+                pause_after_seconds=0.5 if index < 5 else 0,
+            )
+            for index in range(1, 6)
+        ],
+    )
+    spans = [
+        (0, 18, 18.5),
+        (18.5, 36.5, 37),
+        (37, 55, 55.5),
+        (55.5, 73.5, 74),
+        (74, 92, 92),
+    ]
+    timeline = NarrationTimeline(
+        narration_audio=audio,
+        duration_seconds=92,
+        delivery_duration_seconds=92,
+        scenes=[
+            TimelineScene(
+                scene_id=f"scene-{index:03d}",
+                audio=audio,
+                start_seconds=start,
+                speech_end_seconds=speech_end,
+                end_seconds=end,
+            )
+            for index, (start, speech_end, end) in enumerate(spans, start=1)
+        ],
+    )
+
+    fitted = WorkflowEngine._fit_pauses_to_budget(script, timeline, 120)
+
+    assert fitted is not None
+    assert [scene.spoken_text for scene in fitted.scenes] == [
+        scene.spoken_text for scene in script.scenes
+    ]
+    assert sum(scene.pause_after_seconds for scene in fitted.scenes) == pytest.approx(12)
+    assert all(scene.pause_after_seconds == 3 for scene in fitted.scenes[:-1])
+    assert fitted.scenes[-1].pause_after_seconds == 0
+
+
 def test_duration_acceptance_keeps_an_exact_ceiling_with_an_eighty_five_percent_floor() -> None:
     audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
 

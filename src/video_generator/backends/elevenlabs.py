@@ -116,7 +116,10 @@ class _ElevenLabsClient(Backend):
                             name="voice_access",
                             ready=False,
                             detail="ElevenLabs voice ID is missing",
-                            action="Set voice.elevenlabs_voice_id in config.toml.",
+                            action=(
+                                "Set ELEVENLABS_VOICE_ID in .env or "
+                                "voice.elevenlabs_voice_id in config.toml."
+                            ),
                         )
                     )
                 else:
@@ -174,6 +177,7 @@ class ElevenLabsSpeechBackend(_ElevenLabsClient):
         voice_id = request.voice.elevenlabs_voice_id
         if not voice_id:
             raise BackendError("ElevenLabs voice ID is not configured", kind=ErrorKind.NOT_READY)
+        encoded_voice_id = urllib.parse.quote(voice_id, safe="")
         body: dict[str, Any] = {
             "text": request.text,
             "model_id": self.descriptor.model_id,
@@ -185,7 +189,7 @@ class ElevenLabsSpeechBackend(_ElevenLabsClient):
             body["next_text"] = request.following_text
         response = self.http.request(
             "POST",
-            f"{self.api_base}/text-to-speech/{voice_id}/with-timestamps?output_format=mp3_44100_128",
+            f"{self.api_base}/text-to-speech/{encoded_voice_id}/with-timestamps?output_format=mp3_44100_128",
             headers=self.headers,
             json_body=body,
             max_response_bytes=100_000_000,

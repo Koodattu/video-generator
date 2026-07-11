@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from pydantic import BaseModel, field_validator
 
 from video_generator.contracts import OutputLanguage, StructuredTextResult
@@ -107,3 +108,120 @@ def test_structured_validation_repair_diagnostics_are_json_serializable() -> Non
     assert requests[1].input_data["validation_errors"] == [
         {"type": "value_error", "loc": ("value",), "msg": "Value error, value must be ok"}
     ]
+
+
+def test_local_structured_output_allows_two_validation_repairs() -> None:
+    requests = []
+
+    class Backend:
+        def complete(self, request):
+            requests.append(request)
+            return StructuredTextResult(data={"value": "ok" if len(requests) == 3 else "bad"})
+
+    backend = Backend()
+    registry = SimpleNamespace(
+        get=lambda backend_id: backend,
+        descriptor=lambda backend_id: SimpleNamespace(reservation_usd=0.0, cloud=False),
+    )
+    store = SimpleNamespace(
+        config=SimpleNamespace(
+            task_bindings={"outline": "local:fixture"},
+            output_language=OutputLanguage.ENGLISH,
+        ),
+        reserve_cost=lambda *args, **kwargs: None,
+    )
+    prompts = SimpleNamespace(
+        get=lambda *args, **kwargs: SimpleNamespace(instructions="Return data.", version="fixture"),
+        schema=lambda task_id: {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        },
+    )
+
+    execution = TaskExecutor(registry=registry, store=store, prompts=prompts).structured(
+        "outline",
+        {},
+        _ValidatedOutput,
+    )
+
+    assert execution.artifact == _ValidatedOutput(value="ok")
+    assert len(requests) == 3
+    assert requests[2].input_data["invalid_output"] == {"value": "bad"}
+
+
+def test_cloud_structured_output_remains_capped_at_one_validation_repair() -> None:
+    requests = []
+
+    class Backend:
+        def complete(self, request):
+            requests.append(request)
+            return StructuredTextResult(data={"value": "bad"})
+
+    backend = Backend()
+    registry = SimpleNamespace(
+        get=lambda backend_id: backend,
+        descriptor=lambda backend_id: SimpleNamespace(reservation_usd=0.0, cloud=True),
+    )
+    store = SimpleNamespace(
+        config=SimpleNamespace(
+            task_bindings={"outline": "cloud:fixture"},
+            output_language=OutputLanguage.ENGLISH,
+        ),
+        reserve_cost=lambda *args, **kwargs: None,
+    )
+    prompts = SimpleNamespace(
+        get=lambda *args, **kwargs: SimpleNamespace(instructions="Return data.", version="fixture"),
+        schema=lambda task_id: {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        },
+    )
+
+    with pytest.raises(BackendError, match="after one repair"):
+        TaskExecutor(registry=registry, store=store, prompts=prompts).structured(
+            "outline",
+            {},
+            _ValidatedOutput,
+        )
+
+    assert len(requests) == 2
+
+
+def test_image_prompt_compile_request_is_english_for_finnish_run() -> None:
+    requests = []
+
+    class Backend:
+        def complete(self, request):
+            requests.append(request)
+            return StructuredTextResult(data={"value": 1})
+
+    backend = Backend()
+    registry = SimpleNamespace(
+        get=lambda backend_id: backend,
+        descriptor=lambda backend_id: SimpleNamespace(reservation_usd=0.0),
+    )
+    store = SimpleNamespace(
+        config=SimpleNamespace(
+            task_bindings={"image_prompt_compile": "local:fixture"},
+            output_language=OutputLanguage.FINNISH,
+        ),
+        reserve_cost=lambda *args, **kwargs: None,
+    )
+    prompts = SimpleNamespace(
+        get=lambda *args, **kwargs: SimpleNamespace(instructions="Return data.", version="fixture"),
+        schema=lambda task_id: {
+            "type": "object",
+            "properties": {"value": {"type": "integer"}},
+            "required": ["value"],
+        },
+    )
+
+    TaskExecutor(registry=registry, store=store, prompts=prompts).structured(
+        "image_prompt_compile",
+        {},
+        _Output,
+    )
+
+    assert requests[0].output_language is OutputLanguage.ENGLISH

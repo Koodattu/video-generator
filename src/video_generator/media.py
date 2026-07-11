@@ -309,6 +309,103 @@ def _normalize_token(value: str) -> str:
     return "".join(character for character in value if unicodedata.category(character)[0] in {"L", "N"})
 
 
+def _tokens_are_close(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if min(len(left), len(right)) < 5:
+        return False
+    return difflib.SequenceMatcher(a=left, b=right, autojunk=False).ratio() >= 0.72
+
+
+def _merged_word_timing(words: Sequence[WordTiming]) -> WordTiming:
+    confidences = [word.confidence for word in words if word.confidence is not None]
+    return WordTiming(
+        text=" ".join(word.text for word in words),
+        start_seconds=words[0].start_seconds,
+        end_seconds=words[-1].end_seconds,
+        confidence=min(confidences) if confidences else None,
+    )
+
+
+def _map_reconciliation_gap(
+    canonical_tokens: Sequence[str],
+    recognized: Sequence[WordTiming],
+    *,
+    canonical_start: int,
+    canonical_end: int,
+    recognized_start: int,
+    recognized_end: int,
+) -> dict[int, WordTiming]:
+    mapped: dict[int, WordTiming] = {}
+    canonical_index = canonical_start
+    recognized_index = recognized_start
+    recognized_tokens = [_normalize_token(word.text) for word in recognized]
+    while canonical_index < canonical_end and recognized_index < recognized_end:
+        canonical_token = canonical_tokens[canonical_index]
+        recognized_token = recognized_tokens[recognized_index]
+        if (
+            recognized_index + 1 < recognized_end
+            and _tokens_are_close(
+                canonical_token,
+                recognized_token + recognized_tokens[recognized_index + 1],
+            )
+        ):
+            mapped[canonical_index] = _merged_word_timing(
+                recognized[recognized_index : recognized_index + 2]
+            )
+            canonical_index += 1
+            recognized_index += 2
+            continue
+        if (
+            canonical_index + 1 < canonical_end
+            and _tokens_are_close(
+                canonical_token + canonical_tokens[canonical_index + 1],
+                recognized_token,
+            )
+        ):
+            timing = recognized[recognized_index]
+            total_length = len(canonical_token) + len(canonical_tokens[canonical_index + 1])
+            first_fraction = len(canonical_token) / total_length
+            split = timing.start_seconds + (
+                timing.end_seconds - timing.start_seconds
+            ) * first_fraction
+            mapped[canonical_index] = WordTiming(
+                text=timing.text,
+                start_seconds=timing.start_seconds,
+                end_seconds=split,
+                confidence=timing.confidence,
+            )
+            mapped[canonical_index + 1] = WordTiming(
+                text=timing.text,
+                start_seconds=split,
+                end_seconds=timing.end_seconds,
+                confidence=timing.confidence,
+            )
+            canonical_index += 2
+            recognized_index += 1
+            continue
+        if _tokens_are_close(canonical_token, recognized_token):
+            mapped[canonical_index] = recognized[recognized_index]
+            canonical_index += 1
+            recognized_index += 1
+            continue
+        if (
+            recognized_index + 1 < recognized_end
+            and _tokens_are_close(canonical_token, recognized_tokens[recognized_index + 1])
+        ):
+            recognized_index += 1
+            continue
+        if (
+            canonical_index + 1 < canonical_end
+            and _tokens_are_close(canonical_tokens[canonical_index + 1], recognized_token)
+        ):
+            canonical_index += 1
+            continue
+        canonical_index += 1
+        recognized_index += 1
+    return mapped
+
+
 def reconcile_word_timings(
     canonical_text: str,
     recognized_words: Sequence[WordTiming],
@@ -320,20 +417,34 @@ def reconcile_word_timings(
     if not canonical:
         return [], 1.0
     recognized = [word for word in recognized_words if _normalize_token(word.text)]
+    canonical_tokens = [_normalize_token(word) for word in canonical]
+    recognized_tokens = [_normalize_token(word.text) for word in recognized]
     matcher = difflib.SequenceMatcher(
-        a=[_normalize_token(word) for word in canonical],
-        b=[_normalize_token(word.text) for word in recognized],
+        a=canonical_tokens,
+        b=recognized_tokens,
         autojunk=False,
     )
     mapped: dict[int, WordTiming] = {}
-    matched = 0
+    canonical_cursor = 0
+    recognized_cursor = 0
     for block in matcher.get_matching_blocks():
+        mapped.update(
+            _map_reconciliation_gap(
+                canonical_tokens,
+                recognized,
+                canonical_start=canonical_cursor,
+                canonical_end=block.a,
+                recognized_start=recognized_cursor,
+                recognized_end=block.b,
+            )
+        )
         for offset in range(block.size):
             canonical_index = block.a + offset
             recognized_word = recognized[block.b + offset]
             mapped[canonical_index] = recognized_word
-            matched += 1
-    coverage = matched / len(canonical)
+        canonical_cursor = block.a + block.size
+        recognized_cursor = block.b + block.size
+    coverage = len(mapped) / len(canonical)
     if coverage + 1e-9 < minimum_coverage:
         raise MediaError(
             f"caption alignment coverage {coverage:.1%} is below the required {minimum_coverage:.1%}",
@@ -481,20 +592,23 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = [header.rstrip()]
     for cue in _caption_cues(track.words):
-        karaoke: list[str] = []
-        cursor = cue[0].start_seconds
-        for index, word in enumerate(cue):
-            gap_cs = round(max(0.0, word.start_seconds - cursor) * 100)
-            if gap_cs:
-                karaoke.append(r"{\k" + str(gap_cs) + "}")
-            duration_cs = max(1, round((word.end_seconds - word.start_seconds) * 100))
-            prefix = " " if index else ""
-            karaoke.append(prefix + r"{\k" + str(duration_cs) + "}" + _ass_escape(word.text))
-            cursor = word.end_seconds
-        text = r"{\fad(80,100)}" + "".join(karaoke)
+        escaped_words = [_ass_escape(word.text) for word in cue]
+        neutral_text = r"{\fad(80,100)}" + " ".join(escaped_words)
         lines.append(
-            f"Dialogue: 0,{_ass_timestamp(cue[0].start_seconds)},{_ass_timestamp(cue[-1].end_seconds)},Default,,0,0,0,,{text}"
+            f"Dialogue: 0,{_ass_timestamp(cue[0].start_seconds)},{_ass_timestamp(cue[-1].end_seconds)},Default,,0,0,0,,{neutral_text}"
         )
+        for index, word in enumerate(cue):
+            highlighted = list(escaped_words)
+            highlighted[index] = (
+                r"{\1c&H0046C7FF&}"
+                + highlighted[index]
+                + r"{\1c&H00FFFFFF&}"
+            )
+            end_seconds = max(word.end_seconds, word.start_seconds + 0.01)
+            lines.append(
+                f"Dialogue: 1,{_ass_timestamp(word.start_seconds)},{_ass_timestamp(end_seconds)},"
+                f"Default,,0,0,0,,{' '.join(highlighted)}"
+            )
     atomic_write_text(path, "\n".join(lines) + "\n")
 
 

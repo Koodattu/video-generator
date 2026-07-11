@@ -23,7 +23,7 @@ from .contracts import (
     UsageRecord,
 )
 from .errors import BackendError, ErrorKind
-from .prompting import PromptLibrary
+from .prompting import PromptLibrary, task_output_language
 from .registry import BackendRegistry
 from .run_store import RunStore
 from .util import hash_value
@@ -110,6 +110,7 @@ class TaskExecutor:
     ) -> StructuredExecution:
         backend_id = self.config.task_bindings[task_id]
         backend = self.registry.get(backend_id)
+        output_language = task_output_language(task_id, self.config.output_language)
         prompt = self.prompts.get(
             task_id,
             language=self.config.output_language,
@@ -122,7 +123,7 @@ class TaskExecutor:
             instructions=prompt.instructions,
             input_data=input_data,
             output_schema=schema,
-            output_language=self.config.output_language,
+            output_language=output_language,
             max_output_tokens=max_output_tokens,
             media_inputs=[str(path.resolve()) for path in media_inputs or []],
         )
@@ -155,11 +156,28 @@ class TaskExecutor:
                 raise error
             return [{"type": "invariant", "msg": error.message, "loc": []}]
 
-        try:
-            artifact = validate(result.data)
-        except (ValidationError, BackendError) as first_error:
-            first_errors = validation_errors(first_error)
-            first_usage = result.usage.model_copy(deep=True) if result.usage else None
+        maximum_validation_repairs = 1 if getattr(descriptor, "cloud", False) else 2
+        prior_usage: list[UsageRecord] = []
+        repair_count = 0
+        while True:
+            try:
+                artifact = validate(result.data)
+                break
+            except (ValidationError, BackendError) as error:
+                errors = validation_errors(error)
+                if repair_count >= maximum_validation_repairs:
+                    repair_label = (
+                        "one repair"
+                        if maximum_validation_repairs == 1
+                        else f"{maximum_validation_repairs} repairs"
+                    )
+                    raise BackendError(
+                        f"{task_id} output failed validation after {repair_label}: {error}",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    ) from error
+                if result.usage:
+                    prior_usage.append(result.usage.model_copy(deep=True))
+                repair_count += 1
             repair_request = request.model_copy(
                 update={
                     "instructions": (
@@ -170,7 +188,7 @@ class TaskExecutor:
                     "input_data": {
                         "original_input": input_data,
                         "invalid_output": result.data,
-                        "validation_errors": first_errors,
+                        "validation_errors": errors,
                     },
                 }
             )
@@ -181,21 +199,14 @@ class TaskExecutor:
                 invalid_retries=0,
                 reservation=text_reservation,
             )
-            try:
-                artifact = validate(result.data)
-            except (ValidationError, BackendError) as second_error:
-                validation_errors(second_error)
-                raise BackendError(
-                    f"{task_id} output failed validation after one repair: {second_error}",
-                    kind=ErrorKind.INVALID_OUTPUT,
-                ) from second_error
-            if first_usage and result.usage:
-                result.usage.input_units += first_usage.input_units
-                result.usage.output_units += first_usage.output_units
-                result.usage.reserved_usd += first_usage.reserved_usd
-                result.usage.warnings.append(
-                    "usage includes the invalid response and one structured repair"
-                )
+        if prior_usage and result.usage:
+            for usage in prior_usage:
+                result.usage.input_units += usage.input_units
+                result.usage.output_units += usage.output_units
+                result.usage.reserved_usd += usage.reserved_usd
+            result.usage.warnings.append(
+                f"usage includes {len(prior_usage)} invalid structured response(s)"
+            )
         return StructuredExecution(artifact, result, prompt.version, schema_hash)
 
     def search(self, request: SearchRequest) -> SearchResult:

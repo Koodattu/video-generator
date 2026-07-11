@@ -231,6 +231,8 @@ The v0 names describe the leading creative provider, not every service involved:
 - `local`: local generation plus optional independent live search; fully Offline when requested;
 - `cloud-openai`: OpenAI-led text/images, ElevenLabs narration/music, local FFmpeg;
 - `cloud-gemini`: Gemini-led text/images, ElevenLabs narration/music, local FFmpeg;
+- `cloud-openai-gemini`: pinned GPT-5.4 mini text, Gemini images, ElevenLabs narration/music,
+  keyless DDGS search, local FFmpeg;
 - `hybrid-local-first`: local text/images/music, with ElevenLabs narration/timing for the highest-value cloud quality gain.
 
 Profile mappings are versioned and printed by Preflight. They never dynamically route based on price or failure. Advanced task overrides are validated through the same descriptors and contracts.

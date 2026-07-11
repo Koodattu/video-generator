@@ -1,6 +1,7 @@
 schema_version = 1
 
-# Curated choices: local, cloud-openai, cloud-gemini, hybrid-local-first.
+# Curated choices: local, cloud-openai, cloud-gemini, cloud-openai-gemini,
+# hybrid-local-first.
 profile = "local"
 
 # One language per Run: en or fi.
@@ -48,13 +49,14 @@ authorization = "self"
 # Keep these files under private/, which is excluded from version control.
 reference_audio = "private/voice/me.wav"
 reference_transcript = "private/voice/me.txt"
-# Used by profiles that route narration to ElevenLabs.
+# Used by profiles that route narration to ElevenLabs. When blank, ELEVENLABS_VOICE_ID
+# is loaded from .env or the process environment.
 elevenlabs_voice_id = ""
 
 # Advanced per-task overrides remain explicit and opt-in. Ordinary Runs should use a curated profile;
 # the resolved Backend descriptors and local runner manifests are frozen into each Run Bundle.
 [task_overrides]
-# search = "brave:web"
+# search = "ddgs:duckduckgo"
 # research = "local:llama-server"
 # script_draft = "openai:gpt-5.6-terra"
 # image_prompt_compile = "local:llama-server"

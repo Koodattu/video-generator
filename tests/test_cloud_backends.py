@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import json
+import base64
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from video_generator.backends.gemini import (
+    GeminiImageBackend,
     GeminiSearchBackend,
     GeminiStructuredTextBackend,
     _gemini_usage,
 )
 from video_generator.backends.openai import OpenAIStructuredTextBackend, OpenAIWebSearchBackend
-from video_generator.contracts import OutputLanguage, SearchRequest, StructuredTextRequest
+from video_generator.contracts import ImageRequest, OutputLanguage, SearchRequest, StructuredTextRequest
 from video_generator.errors import BackendError, ErrorKind
 from video_generator.net import HttpResponse
 from video_generator.profiles import BACKEND_DESCRIPTORS, PROFILES
@@ -191,9 +193,65 @@ def test_gemini_search_rejects_multiple_billable_queries() -> None:
 
 def test_curated_profiles_use_current_backends() -> None:
     assert PROFILES["cloud-openai"]["script_draft"] == "openai:gpt-5.6-terra"
+    assert PROFILES["cloud-openai-gemini"]["script_draft"] == "openai:gpt-5.4-mini"
+    assert PROFILES["cloud-openai-gemini"]["image_generate"] == "gemini:gemini-3.1-flash-image"
+    assert PROFILES["cloud-openai-gemini"]["search"] == "ddgs:duckduckgo"
     assert PROFILES["local"]["script_draft"] == "local:llama-server"
+    assert PROFILES["local"]["search"] == "ddgs:duckduckgo"
     assert BACKEND_DESCRIPTORS["openai:web"].model_id == "gpt-5.6-terra"
+    assert BACKEND_DESCRIPTORS["openai:gpt-5.4-mini"].model_id == "gpt-5.4-mini-2026-03-17"
     assert BACKEND_DESCRIPTORS["gemini:search"].model_id == "gemini-3.5-flash"
+
+
+def test_gemini_image_uses_current_jpeg_response_format(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    http = StubHttpClient(
+        {
+            "id": "interaction-image-1",
+            "status": "completed",
+            "steps": [
+                {
+                    "type": "model_output",
+                    "content": [
+                        {
+                            "type": "image",
+                            "data": base64.b64encode(b"jpeg-bytes").decode("ascii"),
+                            "mime_type": "image/jpeg",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr("video_generator.backends.gemini.image_dimensions", lambda path: (1024, 576))
+    backend = GeminiImageBackend(
+        "test-key",
+        workspace_root=tmp_path,
+        run_root=tmp_path,
+        http=http,
+    )
+
+    result = backend.generate(
+        ImageRequest(
+            scene_id="scene-001",
+            target_backend_id="gemini:gemini-3.1-flash-image",
+            prompt="A fox beside an amber lantern, no text.",
+            width=2048,
+            height=1152,
+            quality="low",
+        ),
+        tmp_path / "generated.jpg",
+    )
+
+    assert http.requests[0]["json_body"]["response_format"] == {
+        "type": "image",
+        "mime_type": "image/jpeg",
+        "aspect_ratio": "16:9",
+        "image_size": "2K",
+    }
+    assert result.asset.image.mime_type == "image/jpeg"
+    assert result.asset.image.path.endswith("generated.jpg")
 
 
 def test_registry_applies_frozen_descriptor_to_adapter(tmp_path: Path, resolved_config) -> None:

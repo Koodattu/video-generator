@@ -5,6 +5,7 @@ from typing import Any, Mapping
 
 from .backends.base import Backend
 from .backends.brave import BraveSearchBackend
+from .backends.ddgs import DDGSSearchBackend
 from .backends.deterministic import (
     DeterministicAlignmentBackend,
     DeterministicImageBackend,
@@ -85,9 +86,15 @@ class BackendRegistry:
     def _build(self, backend_id: str) -> Any:
         if backend_id == "brave:web":
             return BraveSearchBackend(self.environment["BRAVE_SEARCH_API_KEY"])
+        if backend_id == "ddgs:duckduckgo":
+            return DDGSSearchBackend()
         if backend_id == "openai:web":
             return OpenAIWebSearchBackend(self.environment["OPENAI_API_KEY"])
-        if backend_id in {"openai:gpt-5.5", "openai:gpt-5.6-terra"}:
+        if backend_id in {
+            "openai:gpt-5.4-mini",
+            "openai:gpt-5.5",
+            "openai:gpt-5.6-terra",
+        }:
             return OpenAIStructuredTextBackend(
                 self.environment["OPENAI_API_KEY"], backend_id=backend_id, workspace_root=self.run_root
             )
