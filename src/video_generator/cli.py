@@ -257,6 +257,8 @@ def _next_incomplete_stage(store: RunStore) -> str | None:
 def _completed_call_counts(store: RunStore) -> dict[str, int]:
     narration = store.completed_item_ids("narration")
     visual_review = store.completed_item_ids("visual-review")
+    music_brief = store.completed_item_ids("music-brief")
+    music_brief_stage = store.stage_record("music-brief")
     return {
         "search": len(store.completed_item_ids("research")),
         "narration_synthesis": sum(
@@ -268,6 +270,10 @@ def _completed_call_counts(store: RunStore) -> dict[str, int]:
         "image_generate": len(store.completed_item_ids("images"))
         + sum(1 for item_id in visual_review if item_id.endswith("-regeneration")),
         "visual_review": sum(1 for item_id in visual_review if "-review-" in item_id),
+        "music_brief": int(
+            "brief" in music_brief
+            or (music_brief_stage is not None and music_brief_stage.status == "complete")
+        ),
     }
 
 

@@ -380,13 +380,16 @@ class WorkflowEngine:
             image_requests = self._image_prompts(visual_plan)
             if self._stop("image-prompt-compile"):
                 return None
+            prepared_music_brief = None
+            if self._should_prepare_music_brief():
+                prepared_music_brief = self._prepare_music_brief(narration)
             images = self._images(image_requests)
             if self._stop("images"):
                 return None
             reviewed = self._visual_review(visual_plan, image_requests, images)
             if self._stop("visual-review"):
                 return None
-            music_brief = self._music_brief(narration)
+            music_brief = self._music_brief(narration, prepared=prepared_music_brief)
             if self._stop("music-brief"):
                 return None
             music = self._music(music_brief, narration.timeline)
@@ -436,6 +439,17 @@ class WorkflowEngine:
             self.store.stop_after(stage)
             return True
         return False
+
+    def _should_prepare_music_brief(self) -> bool:
+        return (
+            self.config.music_enabled
+            and self.config.task_bindings["music_brief"]
+            == self.config.task_bindings["image_prompt_compile"]
+            and (
+                self.stop_after is None
+                or PUBLIC_STAGES.index(self.stop_after) >= PUBLIC_STAGES.index("music-brief")
+            )
+        )
 
     def _stage_metadata(
         self,
@@ -2142,6 +2156,8 @@ class WorkflowEngine:
         if failed:
             image_backend_id = self.config.task_bindings["image_generate"]
             image_descriptor = self.registry.descriptor(image_backend_id)
+            replacements: dict[str, ImageItem] = {}
+            regeneration_usage: dict[str, list[UsageRecord]] = {}
             for failure in failed:
                 original = request_by_id[failure.scene_id]
                 corrected = original.model_copy(
@@ -2166,7 +2182,7 @@ class WorkflowEngine:
                 )
                 if reusable_item:
                     replacement = self.store.load_item_artifact(reusable_item, ImageItem)
-                    usage.extend(reusable_item.usage)
+                    item_usage = reusable_item.usage
                 else:
                     workspace = self.store.workspace("visual-review", item_id=regeneration_id)
                     extension = _raw_image_extension(image_backend_id)
@@ -2201,8 +2217,13 @@ class WorkflowEngine:
                         usage=item_usage,
                     )
                     replacement = ImageItem.model_validate(promoted)
-                    usage.extend(item_usage)
+                replacements[failure.scene_id] = replacement
+                regeneration_usage[failure.scene_id] = item_usage
                 final_items[failure.scene_id] = replacement
+
+            for failure in failed:
+                replacement = replacements[failure.scene_id]
+                usage.extend(regeneration_usage[failure.scene_id])
                 second = self._review_image(briefs[failure.scene_id], visual_plan, replacement, pass_number=2)
                 second_reviews.append(second[0])
                 usage.extend(second[1])
@@ -2287,7 +2308,9 @@ class WorkflowEngine:
         )
         return VisualReviewItem.model_validate(promoted), item_usage
 
-    def _music_brief(self, narration: NarrationBundle) -> MusicBriefBundle:
+    def _music_brief_context(
+        self, narration: NarrationBundle
+    ) -> tuple[BackendDescriptor, float, float, dict[str, Any], dict[str, str]]:
         music_descriptor = self.registry.descriptor(self.config.task_bindings["music_generate"])
         timeline_duration = narration.timeline.duration_seconds
         generation_duration = min(
@@ -2302,18 +2325,31 @@ class WorkflowEngine:
             "script": narration.script.model_dump(mode="json"),
             "timeline": narration.timeline.model_dump(mode="json"),
         }
-        metadata = self._stage_metadata(stage="music-brief", task_id=None, input_data=input_data)
-        if self.config.music_enabled:
-            task_metadata = self._stage_metadata(stage="music-brief", task_id="music_brief", input_data=input_data)
-            metadata = task_metadata
+        metadata = self._stage_metadata(
+            stage="music-brief",
+            task_id="music_brief" if self.config.music_enabled else None,
+            input_data=input_data,
+        )
+        return music_descriptor, timeline_duration, generation_duration, input_data, metadata
+
+    def _prepare_music_brief(
+        self, narration: NarrationBundle
+    ) -> tuple[MusicBriefBundle, list[UsageRecord]]:
+        if not self.config.music_enabled:
+            raise ValueError("music brief preparation requires music to be enabled")
+        music_descriptor, timeline_duration, generation_duration, input_data, metadata = (
+            self._music_brief_context(narration)
+        )
         reusable = self.store.reusable_record("music-brief", **metadata)
         if reusable:
-            return self.store.load_artifact(reusable, MusicBriefBundle)
-        workspace = self.store.workspace("music-brief")
-        self.store.begin_stage("music-brief", attempt=workspace.attempt, **metadata)
-        if not self.config.music_enabled:
-            promoted = self.store.promote_stage(workspace, MusicBriefBundle(enabled=False))
-            return MusicBriefBundle.model_validate(promoted)
+            return self.store.load_artifact(reusable, MusicBriefBundle), reusable.usage
+        reusable_item = self.store.reusable_item("music-brief", "brief", **metadata)
+        if reusable_item:
+            return (
+                self.store.load_item_artifact(reusable_item, MusicBriefBundle),
+                reusable_item.usage,
+            )
+        workspace = self.store.workspace("music-brief", item_id="brief")
         execution = self.executor.structured("music_brief", input_data, MusicBrief)
         brief = MusicBrief.model_validate(execution.artifact)
         if abs(brief.requested_duration_seconds - generation_duration) > 0.01:
@@ -2330,9 +2366,32 @@ class WorkflowEngine:
             )
         atomic_write_json(workspace.work_dir / "provider-response.json", execution.result.raw_response)
         bundle = MusicBriefBundle(enabled=True, brief=brief)
-        promoted = self.store.promote_stage(
-            workspace, bundle, usage=_usage_list([execution.result.usage])
+        item_usage = _usage_list([execution.result.usage])
+        promoted = self.store.promote_item(
+            workspace,
+            bundle,
+            usage=item_usage,
+            **metadata,
         )
+        return MusicBriefBundle.model_validate(promoted), item_usage
+
+    def _music_brief(
+        self,
+        narration: NarrationBundle,
+        *,
+        prepared: tuple[MusicBriefBundle, list[UsageRecord]] | None = None,
+    ) -> MusicBriefBundle:
+        _, _, _, _, metadata = self._music_brief_context(narration)
+        reusable = self.store.reusable_record("music-brief", **metadata)
+        if reusable:
+            return self.store.load_artifact(reusable, MusicBriefBundle)
+        workspace = self.store.workspace("music-brief")
+        self.store.begin_stage("music-brief", attempt=workspace.attempt, **metadata)
+        if not self.config.music_enabled:
+            promoted = self.store.promote_stage(workspace, MusicBriefBundle(enabled=False))
+            return MusicBriefBundle.model_validate(promoted)
+        bundle, usage = prepared or self._prepare_music_brief(narration)
+        promoted = self.store.promote_stage(workspace, bundle, usage=usage)
         return MusicBriefBundle.model_validate(promoted)
 
     def _music(self, brief_bundle: MusicBriefBundle, timeline: NarrationTimeline) -> MusicBundle:
