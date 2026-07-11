@@ -8,7 +8,7 @@ from .schema import restricted_json_schema
 from .task_models import TASK_OUTPUT_MODELS
 
 
-PROMPT_SET_VERSION = "2026-07-10.v1"
+PROMPT_SET_VERSION = "2026-07-11.v10"
 
 
 SHARED_RULES = """
@@ -55,14 +55,18 @@ Choose exactly one supplied candidate ID. You may not rewrite candidates or inve
 Turn the selected concept into one complete causal and emotional Story Outline before prose is
 written. Use contiguous Scene IDs scene-001 onward. Each Scene needs one narrative purpose, one
 meaningful change, an emotional beat, a primary visual opportunity, and continuity obligations.
-Allocate the entire Duration Budget across Scenes; provisional seconds must sum to it. Follow the
-visual cadence as a soft target while using natural story boundaries. Opening and closing Scenes may
-be shorter when justified. Do not write narration prose.
+Return between minimum_scene_count and maximum_scene_count Scenes inclusive, aiming for
+target_scene_count. Allocate the entire Duration Budget across Scenes; provisional seconds must sum
+to it. Keep every Scene within the supplied visual duration bounds; only opening and closing Scenes
+may use the documented half-minimum exception. Do not write narration prose.
 """,
     "script_draft": """
 Write the Narration Script as words the single Narrator Voice will speak verbatim. Preserve outline
 Scene IDs and order. Write no headings, citations, markdown, bracketed directions, visual notes, or
 review comments in spoken_text. Fit each Scene's word envelope and provisional duration.
+The supplied scene_word_targets and target_total_word_count are the writing plan. The full script
+must contain between minimum_total_word_count and maximum_total_word_count words inclusive. The
+validator counts words as len(spoken_text.split()).
 
 Make every sentence understandable on first hearing. Use concrete verbs, controlled sentence and
 clause length, natural spoken rhythm, and event-driven transitions. Avoid generic throat-clearing,
@@ -79,34 +83,51 @@ allows. End the final Scene with pause_after_seconds equal to zero.
 Review the draft only for causal coherence, weak turns, generic beats, emotional setup/payoff,
 interchangeable characters, coincidence, and research-copy risk. Quote short exact evidence and
 identify the Scene ID. Findings must be actionable and severity-calibrated. Do not rewrite prose.
-Set passed=false for any blocking finding.
+Set review_type exactly to "story". Set passed=false for any blocking finding.
 """,
     "review_spoken": """
 Read the draft as if hearing it once. Review sentence load, rhythm, breath, repetition, transitions,
 pronunciation risk, number/name handling, and natural use of the selected language. Finnish review
 must catch translated-English syntax, unnatural cases/clitics/compounds, and awkward loanwords.
 English review must catch stiff written prose and unnatural formality. Identify exact Scene evidence
-and recommendations, but do not rewrite the story or silently change facts.
+and recommendations, but do not rewrite the story or silently change facts. Set review_type exactly
+to "spoken".
 """,
     "review_constraints": """
 Review hard constraints: Creative Brief inclusions/exclusions, Audience Profile, Scene ID/order,
 continuity obligations, duration risk, single-language narration, missing setup/payoff, unsupported
 real-world claims, and non-spoken markup. Hard safety or brief violations are blocking. Do not waive a
-rule because the draft is otherwise good, and do not rewrite the draft.
+rule because the draft is otherwise good, and do not rewrite the draft. Set review_type exactly to
+"constraints".
 """,
     "script_revision": """
 Produce one complete revised Narration Script after reconciling all three review reports. Resolve
 conflicts in this order: hard safety/evidence constraints, causal coherence, spoken clarity,
 Duration Budget, then stylistic preference. Preserve Scene IDs/order and story facts unless a review
 identifies a factual or causal defect. Return one disposition for every material finding; rejection
-requires a concise reason. Do not add another editorial conversation or commentary to spoken text.
+requires a concise reason. The input required_finding_ids is exhaustive: return exactly one
+disposition for every listed ID and no other IDs. Do not add another editorial conversation or
+commentary to spoken text.
+Keep the complete revised script between minimum_total_word_count and maximum_total_word_count
+inclusive, using target_total_word_count and scene_word_targets to preserve proportional pacing.
+The validator counts words as len(spoken_text.split()).
 """,
     "duration_repair": """
 Perform the single allowed measured Duration Repair. Change only selected_scene_ids, preserving every
 Scene ID, order, narrative purpose, fact, continuity obligation, tone, and payoff. Use measured Scene
 durations and duration_scale to shorten or lengthen those passages naturally toward the accepted
-90-100% band. Do not speed speech, truncate a sentence, add filler, add/remove Scenes, or change
-unselected text. Return the full script plus dispositions describing repaired Scenes.
+85-100% band. Do not speed speech, truncate a sentence, add filler, add/remove Scenes, or change
+unselected text. When shortening, make a deletion-first minimal edit: retain the original sentence
+order and wording, removing only enough nonessential modifiers, clauses, or complete sentences to
+meet the target. Do not paraphrase or rewrite the passage from scratch. When lengthening, restore
+concrete detail from the input rather than adding filler. For every selected Scene, keep
+pause_after_seconds unchanged and meet the supplied
+target_word_count within its inclusive minimum_word_count/maximum_word_count bounds. The validator
+counts words exactly as len(spoken_text.split()): every nonempty whitespace-separated token is one
+word. Count and verify each selected Scene before returning. If correcting an invalid response,
+change the deficient spoken_text by the exact reported add/remove delta; changing only dispositions
+is not a repair. A claimed edit with unchanged word count is not a repair. Return the full script
+plus dispositions describing repaired Scenes.
 """,
     "visual_plan": """
 Create a provider-neutral Visual Plan after narration timing is final. Define the resolved Style
@@ -156,7 +177,8 @@ timeline_duration_seconds; otherwise prefer a natural ending unless the input ex
     "factual_review": """
 Inventory every externally verifiable claim and link it to supplied Evidence IDs. Mark each supported,
 partially_supported, unsupported, or time_sensitive with precise source linkage. Unsupported claims
-block narration. This task remains disabled until the evidence contract is promoted.
+block narration. Set review_type exactly to "factual". This task remains disabled until the evidence
+contract is promoted.
 """,
 }
 

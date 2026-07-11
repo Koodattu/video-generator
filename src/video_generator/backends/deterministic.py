@@ -168,15 +168,20 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
     if task == "script_draft":
         outline = data.get("outline", {})
         language = OutputLanguage(data.get("output_language", request.output_language.value))
+        target_by_scene = {
+            item["scene_id"]: int(item["target_word_count"])
+            for item in data.get("scene_word_targets", [])
+        }
         scenes = []
         for index, scene in enumerate(outline.get("scenes", [])):
             seconds = float(scene.get("provisional_seconds", 15))
-            desired_words = max(8, round(seconds / 0.42))
+            desired_words = target_by_scene.get(scene["scene_id"], max(8, round(seconds / 0.42)))
             text = ""
             sentence_index = index
             while len(text.split()) < desired_words:
                 text = (text + " " + _fixture_sentence(language, sentence_index)).strip()
                 sentence_index += 1
+            text = " ".join(text.split()[:desired_words]).rstrip(".,;:") + "."
             scenes.append(
                 {
                     "scene_id": scene["scene_id"],
@@ -210,7 +215,7 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                 text = scene["spoken_text"]
                 while len(text.split()) < desired:
                     text += " " + _fixture_sentence(language, index + len(text.split()))
-                scene["spoken_text"] = text
+                scene["spoken_text"] = " ".join(text.split()[:desired]).rstrip(".,;:") + "."
         return {"schema_version": 1, "script": script, "dispositions": []}
     if task == "visual_plan":
         script = data["script"]

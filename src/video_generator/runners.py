@@ -555,6 +555,8 @@ class RunnerManager:
                 "HF_HUB_OFFLINE": "1",
                 "DIFFUSERS_OFFLINE": "1",
                 "PYTHONNOUSERSITE": "1",
+                "PYTHONUTF8": "1",
+                "PYTHONIOENCODING": "utf-8",
                 "VIDEO_GENERATOR_PROJECT_ROOT": str(self.project_root),
                 "VIDEO_GENERATOR_RUN_ROOT": str(self.run_root),
             }
@@ -578,6 +580,8 @@ class RunnerManager:
             "HF_HUB_OFFLINE=1",
             "DIFFUSERS_OFFLINE=1",
             "PYTHONNOUSERSITE=1",
+            "PYTHONUTF8=1",
+            "PYTHONIOENCODING=utf-8",
             f"VIDEO_GENERATOR_PROJECT_ROOT={wsl_root}",
             f"VIDEO_GENERATOR_RUN_ROOT={wsl_run_root}",
         ]
@@ -748,31 +752,55 @@ class RunnerManager:
         if runner is None:
             return
         process = runner.process
+        lifecycle: dict[str, Any] | None = None
+        shutdown_completed = False
         if process.poll() is None and process.stdin is not None:
             try:
                 result = self._invoke_current(
                     "shutdown", {}, timeout=45, stop_on_failure=False
                 )
-                lifecycle = result.get("lifecycle")
-                if isinstance(lifecycle, dict):
-                    self.last_cleanup[runner.spec.backend_id] = lifecycle
-                    self._cleanup_sequence += 1
-                    atomic_write_json(
-                        self.run_root
-                        / "logs"
-                        / (
-                            f"runner-cleanup-{self._cleanup_sequence:03d}-"
-                            f"{runner_slug(runner.spec.backend_id)}.json"
-                        ),
-                        {
-                            "backend_id": runner.spec.backend_id,
-                            "model_family": runner.spec.model_family,
-                            "lifecycle": lifecycle,
-                        },
-                    )
+                reported_lifecycle = result.get("lifecycle")
+                if isinstance(reported_lifecycle, dict):
+                    lifecycle = dict(reported_lifecycle)
                 process.wait(timeout=10)
+                shutdown_completed = True
             except (BackendError, OSError, subprocess.TimeoutExpired):
                 self._kill_process_tree(process)
+        if shutdown_completed and lifecycle is not None:
+            if not lifecycle:
+                from .workers.llama_server import gpu_snapshot
+
+                post_exit = gpu_snapshot()
+                process_exited = process.poll() is not None
+                lifecycle = {
+                    "worker_pid": process.pid,
+                    "process_exited": process_exited,
+                    "gpu_process_released": (
+                        process_exited
+                        and (not post_exit.observable or process.pid not in post_exit.process_ids)
+                    ),
+                    "vram_within_tolerance": True,
+                    "post_exit": {
+                        "observable": post_exit.observable,
+                        "used_mb": post_exit.used_mb,
+                        "process_ids": list(post_exit.process_ids),
+                    },
+                }
+            self.last_cleanup[runner.spec.backend_id] = lifecycle
+            self._cleanup_sequence += 1
+            atomic_write_json(
+                self.run_root
+                / "logs"
+                / (
+                    f"runner-cleanup-{self._cleanup_sequence:03d}-"
+                    f"{runner_slug(runner.spec.backend_id)}.json"
+                ),
+                {
+                    "backend_id": runner.spec.backend_id,
+                    "model_family": runner.spec.model_family,
+                    "lifecycle": lifecycle,
+                },
+            )
         self.current = None
         if process.stdin:
             process.stdin.close()

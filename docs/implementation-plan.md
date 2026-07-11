@@ -152,7 +152,7 @@ Integrate one model at a time against existing conformance tests:
 
 1. a manifest-selected GGUF through pinned stock Windows `llama-server.exe`, beginning with one Qwen and one Gemma candidate and separate MTP-off/on variants;
 2. VoxCPM2 with native compatibility mode;
-3. Parakeet v3 under WSL2 plus exact-script timing reconciliation;
+3. faster-whisper large-v3-turbo on native Windows plus exact-script timing reconciliation, retaining Parakeet v3 as an explicit WSL2 comparison Backend;
 4. FLUX.2 klein 4B with a native Windows benchmark;
 5. Qwen vision path for Visual Review, separately memory-tested;
 6. ACE-Step XL Turbo and standard Turbo comparison.

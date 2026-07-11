@@ -31,3 +31,12 @@ def test_setup_accepts_typed_local_llm_profile() -> None:
     )
 
     assert args.llm_profile.name == "local-llm.toml"
+
+
+def test_models_download_selects_a_curated_candidate() -> None:
+    args = build_parser().parse_args(
+        ["models", "download", "qwen3.6-27b-q4-mtp", "--dry-run"]
+    )
+
+    assert args.candidate == "qwen3.6-27b-q4-mtp"
+    assert args.dry_run

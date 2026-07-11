@@ -5,11 +5,12 @@ from copy import deepcopy
 from .contracts import BackendDescriptor, OutputLanguage, ProtocolName, TASK_IDS
 
 
-PROFILE_VERSION = "2026-07-10.v3"
+PROFILE_VERSION = "2026-07-11.v4"
 PRICING_SNAPSHOT = "2026-07-10.conservative-v1"
 
 EXPECTED_LOCAL_MODEL_REVISIONS: dict[str, str] = {
     "local:voxcpm2": "bffb3df5a29440629464e5e839f4d214c8714c3d",
+    "local:faster-whisper-large-v3-turbo": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
     "local:parakeet-tdt-0.6b-v3": "7c35754d166cca382ad1e53e68b01e7c575f3a1d",
     "local:flux.2-klein-4b": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
     "local:ace-step-1.5-xl-turbo": "d4a0b288b83ebb7e25a8c0b32c573c22e134e8ee",
@@ -179,6 +180,20 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         required_assets=["parakeet-tdt-0.6b-v3"],
         exclusive_gpu=True,
         license_name="CC-BY-4.0",
+    ),
+    "local:faster-whisper-large-v3-turbo": BackendDescriptor(
+        backend_id="local:faster-whisper-large-v3-turbo",
+        provider="local",
+        model_id="dropbox-dash/faster-whisper-large-v3-turbo",
+        revision="runner-manifest-v1",
+        protocols={ProtocolName.ALIGNMENT},
+        cloud=False,
+        runner="native",
+        languages=_all_languages(),
+        required_assets=["faster-whisper-large-v3-turbo"],
+        exclusive_gpu=True,
+        license_name="MIT",
+        notes="Native Windows word timestamps; canonical captions still come from exact-script reconciliation.",
     ),
     "openai:gpt-image-2": BackendDescriptor(
         backend_id="openai:gpt-image-2",
@@ -371,7 +386,7 @@ PROFILES: dict[str, dict[str, str]] = {
         search="brave:web",
         text="local:llama-server",
         speech="local:voxcpm2",
-        alignment="local:parakeet-tdt-0.6b-v3",
+        alignment="local:faster-whisper-large-v3-turbo",
         image="local:flux.2-klein-4b",
         review="local:qwen3.6-27b-q4-vision",
         music="local:ace-step-1.5-xl-turbo",

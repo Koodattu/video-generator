@@ -124,7 +124,10 @@ class BackendRegistry:
             return LocalStructuredTextBackend(backend_id, self.runners)
         if backend_id == "local:voxcpm2":
             return LocalSpeechBackend(backend_id, self.runners)
-        if backend_id == "local:parakeet-tdt-0.6b-v3":
+        if backend_id in {
+            "local:faster-whisper-large-v3-turbo",
+            "local:parakeet-tdt-0.6b-v3",
+        }:
             return LocalAlignmentBackend(backend_id, self.runners)
         if backend_id == "local:flux.2-klein-4b":
             return LocalImageBackend(backend_id, self.runners)

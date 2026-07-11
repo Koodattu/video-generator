@@ -1,6 +1,6 @@
 # ADR 0011: Windows-first ephemeral model servers
 
-The local execution policy is native Windows first. WSL2 is permitted only for a Backend whose native candidate has failed the same conformance and English/Finnish acceptance fixtures; it is not a global deployment target. The current exception is Parakeet/NeMo alignment.
+The local execution policy is native Windows first. WSL2 is permitted only for an explicit Backend whose native candidate has failed the same conformance and English/Finnish acceptance fixtures; it is not a global deployment target. faster-whisper/CTranslate2 is the default native Alignment Backend, while Parakeet/NeMo remains an optional WSL2 comparison Backend.
 
 Local Structured Text uses a manifest-selected GGUF through one temporary stock `llama-server.exe`, not an embedded Python binding. The existing runner manager owns the exclusive GPU lease and batches adjacent text tasks. A stdlib control worker starts the server on `127.0.0.1` with a generated API key and one slot, polls `/health`, sends schema-constrained `/v1/chat/completions` requests, and terminates the child before the next model family. Shutdown requires process exit and, when observable, disappearance of the server GPU PID. Baseline/load/peak/post-exit aggregate VRAM is recorded with a tolerance because Windows WDDM and unrelated applications make exact global equality unreliable.
 

@@ -23,7 +23,7 @@ Setup answers the first two with pinned assets and live probes. Contract tests a
 | Visual planning | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
 | Image-prompt compilation | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
 | Narration | VoxCPM2 | ElevenLabs Multilingual v2 | ElevenLabs Multilingual v2 | ElevenLabs Multilingual v2 |
-| Word timing | Parakeet v3 plus exact-script reconciliation | ElevenLabs returned timestamps | ElevenLabs returned timestamps | ElevenLabs returned timestamps |
+| Word timing | faster-whisper large-v3-turbo plus exact-script reconciliation | ElevenLabs returned timestamps | ElevenLabs returned timestamps | ElevenLabs returned timestamps |
 | Image generation | FLUX.2 klein 4B | GPT Image 2 | Gemini 3.1 Flash Image | FLUX.2 klein 4B |
 | Visual review | Qwen3.6 vision path, evaluation-gated | GPT-5.6 Terra | Gemini 3.5 Flash | Qwen3.6 vision path, evaluation-gated |
 | Music brief | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
@@ -94,17 +94,19 @@ Do not create separate Finnish orchestration or assume a separate Finnish LLM. M
 
 Use language-matched recordings of the same authorized voice rather than separate TTS models unless evaluation says otherwise. The adapter probes the actual output sample rate and duration instead of hardcoding a documentation claim. VoxCPM does not provide the authoritative word timing required for captions.
 
-VoxCPM's optional `voxcpm[timestamps]`/stable-ts post-processing is worth benchmarking as an Alignment implementation. It is not native authoritative TTS timing and must pass the same exact-script coverage checks as Parakeet.
+VoxCPM's optional `voxcpm[timestamps]`/stable-ts post-processing is worth benchmarking as an Alignment implementation. It is not native authoritative TTS timing and must pass the same exact-script coverage checks as the implemented ASR Backends.
+
+### faster-whisper large-v3-turbo
+
+`faster-whisper` 1.2.1 with CTranslate2 4.8.1 and the commit-pinned `dropbox-dash/faster-whisper-large-v3-turbo` conversion is the current local timing primary. It runs natively on Windows, supports explicit English/Finnish language selection, and returns word timestamps. It is ASR rather than forced alignment: the exact Narration Script remains canonical, and deterministic reconciliation maps recognized times onto it while rejecting poor coverage. The runtime and model are MIT-licensed. [faster-whisper v1.2.1](https://github.com/SYSTRAN/faster-whisper/tree/v1.2.1), [Turbo conversion](https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo)
 
 ### Parakeet TDT 0.6B v3
 
-`nvidia/parakeet-tdt-0.6b-v3` is the local timing primary because Finnish is explicitly supported and it returns word, segment, and character timestamps. It is CC BY 4.0 and Linux is the preferred platform, so the initial runner should use WSL2. It is ASR rather than forced alignment: caption text stays identical to the Narration Script, while a reconciliation algorithm maps recognized times onto it and fails visibly on poor coverage. [Parakeet model card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
+`nvidia/parakeet-tdt-0.6b-v3` remains an explicit comparison Backend because Finnish is supported and it returns word, segment, and character timestamps. It is CC BY 4.0 and its retained NeMo runner uses WSL2. It follows the same canonical-script reconciliation contract as faster-whisper and is never selected as a silent fallback. [Parakeet model card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
 
-Parakeet is loaded only when captions are enabled. Scene boundaries use probed TTS clip durations, so local video generation remains possible without STT when captions are explicitly disabled.
+The selected Alignment Backend is loaded only when captions are enabled. Scene boundaries use probed TTS clip durations, so local video generation remains possible without STT when captions are explicitly disabled.
 
 `Qwen/Qwen3-ASR-1.7B` remains an accuracy candidate, but its companion Qwen forced aligner does not currently list Finnish. It is not the v0 default for this requirement. [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B)
-
-`faster-whisper` with Whisper large-v3-turbo is the mature ecosystem fallback to evaluate if Parakeet's Finnish reconciliation or WSL runtime is unreliable. It remains an explicit Backend choice and must preserve the canonical script just like Parakeet.
 
 ## Local images
 
@@ -132,7 +134,8 @@ The target machine has 24 GB VRAM and 64 GB system RAM. These figures are planni
 | --- | --- |
 | 14–19 GB GGUF candidate | Near the GPU limit once context/MTP/work buffers and Windows display use are included; start at 32K, one slot, MTP off |
 | VoxCPM2 | About 8 GB reported; native compatibility path |
-| Parakeet 0.6B | Small relative to other stages; WSL2 for the supported platform |
+| faster-whisper Turbo | Native CTranslate2 CUDA worker; live probe must confirm the exact Windows wheel and GPU |
+| Parakeet 0.6B | Optional WSL2 comparison Backend |
 | FLUX.2 klein 4B | Reserve 13 GB; batch images while resident |
 | ACE-Step XL Turbo | Reserve the full card; no concurrent model |
 
@@ -140,7 +143,7 @@ Only one local model family is resident. Process termination is the v0 VRAM-rele
 
 The model cache is `./.cache/models`, not a global surprise cache. Download manifests pin repositories, revisions, exact files, hashes, licenses, expected disk size, and required runtime. Hugging Face credentials are used only for gated downloads and never copied into a Run Bundle.
 
-Several candidate stacks currently depend on source revisions rather than sufficiently current released packages. VoxCPM, Parakeet/NeMo, FLUX/Diffusers, Qwen ASR, and ACE-Step therefore need isolated environment manifests with pinned Python, CUDA/PyTorch compatibility, package versions, and source commits. Setup must never install a floating Git branch.
+Every local stack uses an isolated environment manifest. faster-whisper/CTranslate2 pins exact releases; VoxCPM, Parakeet/NeMo, FLUX/Diffusers, Qwen ASR, and ACE-Step additionally pin model or source revisions and CUDA/PyTorch compatibility. Setup must never install a floating Git branch.
 
 ## Evaluation-only alternatives
 
@@ -150,7 +153,7 @@ These candidates from the supplied local-model research are useful contingencies
 | --- | --- | --- |
 | Additional Qwen3.6/Gemma 4 GGUF variants | the first one-per-family pair misses speed, fit, or quality | do not spend roughly another 35 GB before the first pair provides evidence |
 | [Chatterbox Multilingual V3](https://github.com/resemble-ai/chatterbox) | VoxCPM is too heavy or unreliable on Windows/WSL | Finnish is listed and the model is MIT-licensed, but multilingual latency/quality needs testing and output is watermarked |
-| [faster-whisper](https://github.com/SYSTRAN/faster-whisper) large-v3-turbo | Parakeet alignment/reconciliation is unreliable | mature but larger/slower than needed if Parakeet works |
+| Parakeet TDT 0.6B v3 | matched faster-whisper comparison is needed | retained WSL2/NeMo environment is heavier to operate |
 | MTP-on variant of the same target | generation throughput is a bottleneck | stock llama.cpp support is recent; it must beat MTP-off without schema, quality, or cleanup regressions |
 
 ## License snapshot
@@ -159,6 +162,7 @@ These candidates from the supplied local-model research are useful contingencies
 | --- | --- |
 | Selected local GGUF | model-specific; frozen in `local-llm.toml` and the runner manifest |
 | VoxCPM2 | Apache 2.0 |
+| faster-whisper Turbo runtime/model | MIT |
 | Parakeet TDT 0.6B v3 | CC BY 4.0 |
 | FLUX.2 klein 4B | Apache 2.0 |
 | ACE-Step 1.5 | MIT |
@@ -177,4 +181,4 @@ A candidate becomes a profile default only after:
 6. cost/runtime and license/terms are recorded;
 7. any profile change receives a new profile version.
 
-This is especially important for local GGUF provenance/fit/MTP behavior, Qwen vision memory, Finnish VoxCPM voice similarity, Parakeet reconciliation coverage, FLUX Windows support, ACE-Step long-form coherence, Terra account access, and ElevenLabs music-duration limit.
+This is especially important for local GGUF provenance/fit/MTP behavior, Qwen vision memory, Finnish VoxCPM voice similarity, faster-whisper/Parakeet reconciliation coverage, FLUX Windows support, ACE-Step long-form coherence, Terra account access, and ElevenLabs music-duration limit.

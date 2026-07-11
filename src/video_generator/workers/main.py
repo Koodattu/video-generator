@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -57,6 +58,19 @@ class Paths:
         return path
 
 
+def _llama_grammar_schema(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_llama_grammar_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {key: _llama_grammar_schema(item) for key, item in value.items()}
+    result.pop("maxLength", None)
+    if result.get("type") == "number":
+        for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+            result.pop(key, None)
+    return result
+
+
 class LlamaServerWorker:
     def __init__(self, paths: Paths) -> None:
         from .llama_server import LlamaServerSession
@@ -98,8 +112,17 @@ class LlamaServerWorker:
             raise ValueError(f"unsupported llama-server operation: {operation}")
         if payload.get("media_inputs"):
             raise ValueError("this Qwen runner is text-only; use an evaluated vision runner")
+        output_schema = payload["output_schema"]
+        grammar_schema = _llama_grammar_schema(output_schema)
         messages = [
-            {"role": "system", "content": payload["instructions"]},
+            {
+                "role": "system",
+                "content": (
+                    payload["instructions"]
+                    + "\n\nReturn one JSON value matching this exact schema:\n"
+                    + json.dumps(output_schema, ensure_ascii=False, separators=(",", ":"))
+                ),
+            },
             {
                 "role": "user",
                 "content": json.dumps(payload["input_data"], ensure_ascii=False, indent=2),
@@ -110,12 +133,20 @@ class LlamaServerWorker:
             {
                 "messages": messages,
                 "max_tokens": int(payload.get("max_output_tokens", 8000)),
-                "temperature": 0.65,
+                "temperature": (
+                    0.2
+                    if payload["task_id"] in {"script_draft", "script_revision", "duration_repair"}
+                    else 0.65
+                ),
                 "top_p": 0.9,
                 "stream": False,
                 "response_format": {
                     "type": "json_schema",
-                    "schema": payload["output_schema"],
+                    "json_schema": {
+                        "name": str(payload["task_id"]).replace("-", "_"),
+                        "strict": True,
+                        "schema": grammar_schema,
+                    },
                 },
                 "chat_template_kwargs": {"enable_thinking": False},
             }
@@ -180,6 +211,7 @@ class VoxCPMWorker:
         if operation != "speech.synthesize":
             raise ValueError(f"unsupported VoxCPM operation: {operation}")
         import soundfile as sf
+        import torch
 
         voice = payload["voice"]
         reference = self.paths.read_private(voice["reference_audio"])
@@ -187,6 +219,15 @@ class VoxCPMWorker:
         if voice.get("reference_transcript"):
             transcript = self.paths.read_private(voice["reference_transcript"]).read_text(encoding="utf-8").strip()
         output = self.paths.output_run(payload["output_path"])
+        seed = int.from_bytes(
+            hashlib.sha256(
+                (str(payload["scene_id"]) + "\0" + str(payload["text"])).encode("utf-8")
+            ).digest()[:4],
+            "big",
+        )
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
         started = time.monotonic()
         wav = self.model.generate(
             text=payload["text"],
@@ -209,6 +250,7 @@ class VoxCPMWorker:
             "channels": 1,
             "timing_precision": "none",
             "word_timings": [],
+            "seed": seed,
             "usage": {"elapsed_seconds": time.monotonic() - started},
         }
 
@@ -272,6 +314,81 @@ class ParakeetWorker:
             }
         finally:
             temporary.unlink(missing_ok=True)
+
+
+class FasterWhisperWorker:
+    def __init__(self, paths: Paths) -> None:
+        import ctranslate2
+        import faster_whisper
+        from faster_whisper import WhisperModel
+
+        model_path = paths.read_model(os.environ["VIDEO_GENERATOR_MODEL_PATH"])
+        self.paths = paths
+        self.model_path = model_path
+        self.faster_whisper_version = faster_whisper.__version__
+        self.ctranslate2_version = ctranslate2.__version__
+        self.device = "cuda"
+        self.compute_type = "float16"
+        self.supported_compute_types = sorted(ctranslate2.get_supported_compute_types(self.device))
+        if self.compute_type not in self.supported_compute_types:
+            raise RuntimeError(
+                f"CTranslate2 CUDA does not support {self.compute_type} on this GPU"
+            )
+        self.model = WhisperModel(
+            str(model_path),
+            device=self.device,
+            compute_type=self.compute_type,
+            local_files_only=True,
+        )
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "model_path": str(self.model_path),
+            "runtime": "faster-whisper",
+            "faster_whisper_version": self.faster_whisper_version,
+            "ctranslate2_version": self.ctranslate2_version,
+            "device": self.device,
+            "compute_type": self.compute_type,
+            "supported_compute_types": self.supported_compute_types,
+        }
+
+    def dispatch(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if operation != "alignment.align":
+            raise ValueError(f"unsupported faster-whisper operation: {operation}")
+        source = self.paths.read_run(payload["audio_path"])
+        language = str(payload["output_language"])
+        if language not in {"en", "fi"}:
+            raise ValueError(f"unsupported faster-whisper language: {language}")
+        started = time.monotonic()
+        segments, _ = self.model.transcribe(
+            str(source),
+            language=language,
+            task="transcribe",
+            beam_size=5,
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            vad_filter=False,
+        )
+        recognized_words = []
+        recognized_text = []
+        for segment in segments:
+            recognized_text.append(str(segment.text).strip())
+            for word in segment.words or []:
+                recognized_words.append(
+                    {
+                        "text": str(word.word).strip(),
+                        "start_seconds": float(word.start),
+                        "end_seconds": float(word.end),
+                        "confidence": (
+                            float(word.probability) if word.probability is not None else None
+                        ),
+                    }
+                )
+        return {
+            "recognized_words": recognized_words,
+            "recognized_text": " ".join(value for value in recognized_text if value),
+            "usage": {"elapsed_seconds": time.monotonic() - started},
+        }
 
 
 class FluxWorker:
@@ -421,6 +538,8 @@ def build_worker(kind: str, paths: Paths) -> Worker:
         return VoxCPMWorker(paths)
     if kind == "parakeet":
         return ParakeetWorker(paths)
+    if kind == "faster-whisper":
+        return FasterWhisperWorker(paths)
     if kind == "flux":
         return FluxWorker(paths)
     if kind == "acestep":
@@ -435,6 +554,8 @@ def error_kind(error: BaseException) -> str:
         return "not_ready"
     if "llama-server exited during startup" in message or "did not become healthy" in message:
         return "not_ready"
+    if any(marker in message for marker in ("cublas", "cudnn", "cuda driver", "cuda runtime")):
+        return "not_ready"
     if isinstance(error, (FileNotFoundError, ImportError, ModuleNotFoundError)):
         return "not_ready"
     if isinstance(error, (ValueError, KeyError, json.JSONDecodeError)):
@@ -447,7 +568,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--kind",
         required=True,
-        choices=["llama-server", "voxcpm", "parakeet", "flux", "acestep"],
+        choices=["llama-server", "voxcpm", "parakeet", "faster-whisper", "flux", "acestep"],
     )
     args = parser.parse_args(argv)
     paths = Paths()

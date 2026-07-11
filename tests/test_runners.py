@@ -10,6 +10,20 @@ from video_generator.runners import RunnerManager
 from video_generator.util import atomic_write_json, sha256_file
 
 
+def test_native_runner_protocol_forces_utf8_stdio(tmp_path: Path) -> None:
+    manager = RunnerManager(project_root=tmp_path, run_root=tmp_path / "runs" / "fixture")
+    spec = SimpleNamespace(
+        platform="native",
+        command=[sys.executable],
+        environment={},
+    )
+
+    _, environment = manager._command(spec)
+
+    assert environment["PYTHONUTF8"] == "1"
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+
+
 def test_runtime_manifest_rejects_untracked_executable_source(tmp_path: Path) -> None:
     source = tmp_path / "runtime.py"
     source.write_text("VALUE = 1\n", encoding="utf-8")
@@ -81,6 +95,53 @@ def test_stop_current_retains_worker_cleanup_report(tmp_path: Path, monkeypatch)
     assert manager.last_cleanup["local:llama-server"] == lifecycle
     cleanup_log = tmp_path / "runs" / "fixture" / "logs" / "runner-cleanup-001-local--llama-server.json"
     assert cleanup_log.is_file()
+
+
+def test_stop_current_records_cleanup_for_generic_gpu_worker(tmp_path: Path, monkeypatch) -> None:
+    class Handle:
+        def close(self) -> None:
+            return None
+
+    class Process:
+        def __init__(self) -> None:
+            self.pid = 2468
+            self.returncode = None
+            self.stdin = Handle()
+            self.stdout = Handle()
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+    manager = RunnerManager(project_root=tmp_path, run_root=tmp_path / "runs" / "fixture")
+    manager.current = SimpleNamespace(
+        spec=SimpleNamespace(
+            backend_id="local:faster-whisper-large-v3-turbo",
+            model_family="faster-whisper",
+        ),
+        process=Process(),
+        reader=SimpleNamespace(join=lambda timeout: None),
+        stderr_handle=Handle(),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_invoke_current",
+        lambda operation, payload, timeout, stop_on_failure: {"lifecycle": {}},
+    )
+    monkeypatch.setattr(
+        "video_generator.workers.llama_server.gpu_snapshot",
+        lambda: SimpleNamespace(observable=True, used_mb=512, process_ids=(111,)),
+    )
+
+    manager.stop_current()
+
+    lifecycle = manager.last_cleanup["local:faster-whisper-large-v3-turbo"]
+    assert lifecycle["process_exited"] is True
+    assert lifecycle["gpu_process_released"] is True
+    assert lifecycle["worker_pid"] == 2468
 
 
 def test_live_llama_probe_requires_fresh_cleanup_evidence(tmp_path: Path, monkeypatch) -> None:

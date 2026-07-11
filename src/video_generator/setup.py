@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -19,6 +20,7 @@ from .util import atomic_write_json, atomic_write_text, relative_path, replace_p
 
 
 VOXCPM_REVISION = "bffb3df5a29440629464e5e839f4d214c8714c3d"
+FASTER_WHISPER_REVISION = "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
 PARAKEET_REVISION = "7c35754d166cca382ad1e53e68b01e7c575f3a1d"
 FLUX_REVISION = "e7b7dc27f91deacad38e78976d1f2b499d76a294"
 ACE_REPOSITORY_TAG = "v0.1.8"
@@ -38,6 +40,103 @@ class LocalDefinition:
     model_revision: str
     model_subdir: str
     allow_patterns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CuratedLlmArtifact:
+    role: str
+    filename: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class CuratedLlmCandidate:
+    candidate_id: str
+    model_id: str
+    repository: str
+    revision: str
+    license_name: str
+    quantization: str
+    mtp: str
+    speculative_tokens: int
+    estimated_download_gb: float
+    artifacts: tuple[CuratedLlmArtifact, ...]
+
+
+HUGGINGFACE_HUB_TOOL_VERSION = "0.36.2"
+_DOWNLOAD_ENVIRONMENT_NAMES = {
+    "ALL_PROXY",
+    "APPDATA",
+    "COMSPEC",
+    "HOME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "LOCALAPPDATA",
+    "NO_PROXY",
+    "PATH",
+    "PATHEXT",
+    "PROGRAMDATA",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "WINDIR",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+}
+_DOWNLOAD_ENVIRONMENT_NAMES_CASEFOLD = {name.casefold() for name in _DOWNLOAD_ENVIRONMENT_NAMES}
+
+# These are benchmark candidates, not silently selected defaults. Each entry pins the exact
+# third-party quantization named in docs/model-matrix.md and independently verified file hashes.
+CURATED_LLM_CANDIDATES: dict[str, CuratedLlmCandidate] = {
+    "qwen3.6-27b-q4-mtp": CuratedLlmCandidate(
+        candidate_id="qwen3.6-27b-q4-mtp",
+        model_id="Qwen/Qwen3.6-27B",
+        repository="unsloth/Qwen3.6-27B-MTP-GGUF",
+        revision="5cb35eb3dcbf52dbce5f87dbc64df6aaffadcace",
+        license_name="Apache-2.0",
+        quantization="UD-Q4_K_XL",
+        mtp="embedded",
+        speculative_tokens=2,
+        estimated_download_gb=17.9,
+        artifacts=(
+            CuratedLlmArtifact(
+                role="model",
+                filename="Qwen3.6-27B-UD-Q4_K_XL.gguf",
+                sha256="4085665ee36d82a672a238a43f0e5643f2f0e39f2d7bd5d373f0ef10ecf53095",
+            ),
+        ),
+    ),
+    "gemma-4-26b-a4b-q4-mtp": CuratedLlmCandidate(
+        candidate_id="gemma-4-26b-a4b-q4-mtp",
+        model_id="google/gemma-4-26b-a4b-it-qat",
+        repository="unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+        revision="9e8946010e8234901f15b8c10e74b51723c26832",
+        license_name="Apache-2.0",
+        quantization="UD-Q4_K_XL",
+        mtp="separate-drafter",
+        speculative_tokens=4,
+        estimated_download_gb=14.5,
+        artifacts=(
+            CuratedLlmArtifact(
+                role="model",
+                filename="gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf",
+                sha256="dcf179a91153e3a7ece792e48ef872180d9d6ef9b7677f0a0bd3e83cfe624d5e",
+            ),
+            CuratedLlmArtifact(
+                role="draft-model",
+                filename="mtp-gemma-4-26B-A4B-it.gguf",
+                sha256="62bd3af7f66c9308de9a5454233852f8c7324c93767e8dfb824ed45b9179864a",
+            ),
+        ),
+    ),
+}
 
 
 LOCAL_DEFINITIONS: dict[str, LocalDefinition] = {
@@ -61,6 +160,24 @@ LOCAL_DEFINITIONS: dict[str, LocalDefinition] = {
         model_revision=PARAKEET_REVISION,
         model_subdir="parakeet-tdt-0.6b-v3",
         allow_patterns=("*.nemo", "README.md", "LICENSE*"),
+    ),
+    "local:faster-whisper-large-v3-turbo": LocalDefinition(
+        backend_id="local:faster-whisper-large-v3-turbo",
+        kind="faster-whisper",
+        platform="native",
+        python_version="3.11",
+        requirements_name="faster-whisper.in",
+        model_repo="dropbox-dash/faster-whisper-large-v3-turbo",
+        model_revision=FASTER_WHISPER_REVISION,
+        model_subdir="faster-whisper-large-v3-turbo",
+        allow_patterns=(
+            "config.json",
+            "model.bin",
+            "preprocessor_config.json",
+            "tokenizer.json",
+            "vocabulary.json",
+            "README.md",
+        ),
     ),
     "local:flux.2-klein-4b": LocalDefinition(
         backend_id="local:flux.2-klein-4b",
@@ -132,6 +249,215 @@ def _find_uv() -> str | None:
 def _parse_uv_version(value: str) -> tuple[int, int, int] | None:
     match = re.search(r"\buv\s+(\d+)\.(\d+)\.(\d+)\b", value)
     return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _validate_curated_llm_candidate(candidate: CuratedLlmCandidate, requested_id: str) -> None:
+    if candidate.candidate_id != requested_id or not re.fullmatch(
+        r"[a-z0-9][a-z0-9._-]{0,79}", candidate.candidate_id
+    ):
+        raise VideoGeneratorError("invalid curated local LLM candidate ID", kind=ErrorKind.NOT_READY)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", candidate.repository):
+        raise VideoGeneratorError("invalid curated Hugging Face repository", kind=ErrorKind.NOT_READY)
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", candidate.revision) or set(
+        candidate.revision.casefold()
+    ) == {"0"}:
+        raise VideoGeneratorError("invalid curated model revision", kind=ErrorKind.NOT_READY)
+    if not candidate.artifacts or sum(artifact.role == "model" for artifact in candidate.artifacts) != 1:
+        raise VideoGeneratorError(
+            "a curated candidate must contain exactly one model artifact",
+            kind=ErrorKind.NOT_READY,
+        )
+    names: set[str] = set()
+    for artifact in candidate.artifacts:
+        path = Path(artifact.filename)
+        folded = artifact.filename.casefold()
+        if (
+            path.name != artifact.filename
+            or path.is_absolute()
+            or path.suffix.casefold() != ".gguf"
+            or folded in names
+        ):
+            raise VideoGeneratorError(
+                f"invalid curated model filename: {artifact.filename}",
+                kind=ErrorKind.NOT_READY,
+            )
+        names.add(folded)
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", artifact.sha256) or set(
+            artifact.sha256.casefold()
+        ) == {"0"}:
+            raise VideoGeneratorError(
+                f"invalid curated SHA-256 for {artifact.filename}",
+                kind=ErrorKind.NOT_READY,
+            )
+
+
+def _curated_llm_paths(project_root: Path, candidate: CuratedLlmCandidate) -> tuple[Path, Path]:
+    project_root = project_root.resolve()
+    managed_root = (project_root / ".cache" / "models" / "llm").resolve()
+    try:
+        managed_root.relative_to(project_root)
+    except ValueError as exc:
+        raise VideoGeneratorError(
+            "the managed local LLM cache resolves outside the project",
+            kind=ErrorKind.NOT_READY,
+        ) from exc
+    destination = (managed_root / candidate.candidate_id).resolve()
+    try:
+        destination.relative_to(managed_root)
+    except ValueError as exc:
+        raise VideoGeneratorError(
+            "the curated model destination resolves outside the managed cache",
+            kind=ErrorKind.NOT_READY,
+        ) from exc
+    return managed_root, destination
+
+
+def _model_download_environment(environment: Mapping[str, str], project_root: Path) -> dict[str, str]:
+    download_environment = {
+        name: value
+        for name, value in environment.items()
+        if name.casefold() in _DOWNLOAD_ENVIRONMENT_NAMES_CASEFOLD and value
+    }
+    download_environment.update(
+        {
+            "HF_HOME": str(project_root / ".cache" / "models" / "huggingface"),
+            "HF_HUB_DISABLE_TELEMETRY": "1",
+            "HF_HUB_DOWNLOAD_TIMEOUT": "60",
+            "NO_COLOR": "1",
+            "UV_CACHE_DIR": str(project_root / ".cache" / "tools" / "uv"),
+        }
+    )
+    return download_environment
+
+
+def download_curated_llm_candidate(
+    *,
+    project_root: Path,
+    candidate_id: str,
+    environment: Mapping[str, str],
+) -> Path:
+    try:
+        candidate = CURATED_LLM_CANDIDATES[candidate_id]
+    except KeyError as exc:
+        raise VideoGeneratorError(
+            f"unknown curated local LLM candidate: {candidate_id}",
+            kind=ErrorKind.NOT_READY,
+        ) from exc
+
+    project_root = project_root.resolve()
+    _validate_curated_llm_candidate(candidate, candidate_id)
+    managed_root, destination = _curated_llm_paths(project_root, candidate)
+    missing: list[CuratedLlmArtifact] = []
+    verified_hashes: dict[str, str] = {}
+    for artifact in candidate.artifacts:
+        path = destination / artifact.filename
+        if path.is_file():
+            actual = sha256_file(path)
+            if actual.casefold() == artifact.sha256.casefold():
+                verified_hashes[artifact.filename] = actual
+                continue
+        missing.append(artifact)
+
+    if missing:
+        uv = _find_uv()
+        if not uv:
+            raise VideoGeneratorError(
+                "uv is required to download curated local LLM candidates",
+                kind=ErrorKind.NOT_READY,
+            )
+        managed_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{candidate.candidate_id}.",
+                suffix=".download",
+                dir=managed_root,
+            )
+        )
+        download_environment = _model_download_environment(environment, project_root)
+        download_environment.update(
+            {"TEMP": str(staging), "TMP": str(staging), "TMPDIR": str(staging)}
+        )
+        _run(
+            [
+                uv,
+                "tool",
+                "run",
+                "--from",
+                f"huggingface-hub=={HUGGINGFACE_HUB_TOOL_VERSION}",
+                "hf",
+                "download",
+                candidate.repository,
+                *[artifact.filename for artifact in missing],
+                "--revision",
+                candidate.revision,
+                "--local-dir",
+                str(staging),
+            ],
+            cwd=project_root,
+            environment=download_environment,
+            timeout=21600,
+        )
+        staged_hashes: dict[str, str] = {}
+        for artifact in missing:
+            staged = staging / artifact.filename
+            if not staged.is_file():
+                raise VideoGeneratorError(
+                    f"Hugging Face download did not produce {artifact.filename}",
+                    kind=ErrorKind.NOT_READY,
+                )
+            actual = sha256_file(staged)
+            if actual.casefold() != artifact.sha256.casefold():
+                staged.unlink(missing_ok=True)
+                raise VideoGeneratorError(
+                    f"SHA-256 mismatch for downloaded {artifact.filename}",
+                    kind=ErrorKind.NOT_READY,
+                    action=f"Expected {artifact.sha256.lower()}, got {actual.lower()}.",
+                )
+            staged_hashes[artifact.filename] = actual
+        destination.mkdir(parents=True, exist_ok=True)
+        for artifact in missing:
+            staged = staging / artifact.filename
+            replace_path(staged, destination / artifact.filename)
+            verified_hashes[artifact.filename] = staged_hashes[artifact.filename]
+        shutil.rmtree(staging, ignore_errors=True)
+
+    files = []
+    for artifact in candidate.artifacts:
+        path = destination / artifact.filename
+        if not path.is_file():
+            raise VideoGeneratorError(
+                f"curated model artifact is missing: {path}",
+                kind=ErrorKind.NOT_READY,
+            )
+        actual = verified_hashes[artifact.filename]
+        files.append(
+            {
+                "role": artifact.role,
+                "path": artifact.filename,
+                "size": path.stat().st_size,
+                "sha256": actual,
+            }
+        )
+    atomic_write_json(
+        destination / "asset-manifest.json",
+        {
+            "schema_version": 1,
+            "candidate_id": candidate.candidate_id,
+            "source": f"https://huggingface.co/{candidate.repository}",
+            "repository": candidate.repository,
+            "revision": candidate.revision,
+            "model_id": candidate.model_id,
+            "license_name": candidate.license_name,
+            "model_card": (
+                f"https://huggingface.co/{candidate.repository}/blob/{candidate.revision}/README.md"
+            ),
+            "quantization": candidate.quantization,
+            "mtp": candidate.mtp,
+            "speculative_tokens": candidate.speculative_tokens,
+            "files": files,
+        },
+    )
+    return destination
 
 
 def _install_native_environment(project_root: Path, definition: LocalDefinition) -> tuple[Path, Path]:

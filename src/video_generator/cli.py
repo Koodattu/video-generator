@@ -23,7 +23,12 @@ from .provenance import build_runtime_snapshot, verify_runtime_snapshot
 from .profiles import BACKEND_DESCRIPTORS, PROFILES
 from .prompting import build_frozen_assets
 from .run_store import RunStore, TASK_STAGE_IMPACT, earliest_config_impact
-from .setup import selected_backends, setup_backends
+from .setup import (
+    CURATED_LLM_CANDIDATES,
+    download_curated_llm_candidate,
+    selected_backends,
+    setup_backends,
+)
 from .util import hash_value
 from .workflow import WorkflowEngine
 
@@ -167,6 +172,43 @@ def _command_setup(args: argparse.Namespace) -> int:
             kind=ErrorKind.NOT_READY,
             action="Follow the reported Backend actions, then rerun Setup.",
         )
+    return 0
+
+
+def _command_models_list(args: argparse.Namespace) -> int:
+    del args
+    for candidate in CURATED_LLM_CANDIDATES.values():
+        print(
+            f"{candidate.candidate_id}: {candidate.model_id}, {candidate.quantization}, "
+            f"MTP {candidate.mtp}, approximately {candidate.estimated_download_gb:.1f} GB"
+        )
+        print(f"  {candidate.repository}@{candidate.revision}")
+        for artifact in candidate.artifacts:
+            print(f"  {artifact.role}: {artifact.filename}")
+    return 0
+
+
+def _command_models_download(args: argparse.Namespace) -> int:
+    project_root = find_project_root(Path.cwd())
+    candidate = CURATED_LLM_CANDIDATES[args.candidate]
+    destination = project_root / ".cache" / "models" / "llm" / candidate.candidate_id
+    print(
+        f"Candidate: {candidate.candidate_id} ({candidate.quantization}, MTP {candidate.mtp}, "
+        f"approximately {candidate.estimated_download_gb:.1f} GB)"
+    )
+    print(f"Source: https://huggingface.co/{candidate.repository}/tree/{candidate.revision}")
+    print(f"Destination: {destination}")
+    if args.dry_run:
+        print("Dry run only; no files were downloaded or written.")
+        return 0
+    environment = load_environment(project_root / "config.toml")
+    prepared = download_curated_llm_candidate(
+        project_root=project_root,
+        candidate_id=candidate.candidate_id,
+        environment=environment,
+    )
+    print(f"Downloaded and SHA-256 verified: {prepared}")
+    print("The stock llama.cpp runtime is separate and is not downloaded by this command.")
     return 0
 
 
@@ -522,6 +564,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="typed profile for a pinned GGUF, stock llama-server.exe, hashes, context, and MTP mode",
     )
     setup.set_defaults(handler=_command_setup)
+
+    models = commands.add_parser("models", help="inspect or download curated local LLM candidates")
+    model_commands = models.add_subparsers(dest="models_command", required=True)
+    model_list = model_commands.add_parser("list", help="list pinned Q4/MTP benchmark candidates")
+    model_list.set_defaults(handler=_command_models_list)
+    model_download = model_commands.add_parser(
+        "download",
+        help="download one exact candidate into the project model cache and verify its hash",
+    )
+    model_download.add_argument("candidate", choices=sorted(CURATED_LLM_CANDIDATES))
+    model_download.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show the pinned source, revision, estimated size, and destination without writing files",
+    )
+    model_download.set_defaults(handler=_command_models_download)
 
     preflight = commands.add_parser("preflight", help="perform read-only readiness and cost checks")
     preflight.add_argument("--config", type=Path, required=True)

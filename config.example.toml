@@ -60,3 +60,4 @@ elevenlabs_voice_id = ""
 # image_prompt_compile = "local:llama-server"
 # image_generate = "local:flux.2-klein-4b"
 # narration_synthesis = "elevenlabs:eleven_multilingual_v2"
+# caption_alignment = "local:parakeet-tdt-0.6b-v3" # Optional WSL2 comparison Backend.

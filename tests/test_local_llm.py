@@ -255,6 +255,7 @@ def test_llama_worker_maps_finnish_schema_request(monkeypatch, tmp_path: Path) -
     result = worker.dispatch(
         "structured_text.complete",
         {
+            "task_id": "outline",
             "instructions": "Kirjoita suomeksi.",
             "input_data": {"topic": "yö"},
             "output_schema": {

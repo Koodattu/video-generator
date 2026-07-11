@@ -106,6 +106,7 @@ class TaskExecutor:
         media_inputs: list[Path] | None = None,
         target_image_backend: str | None = None,
         max_output_tokens: int = 8000,
+        invariant: Callable[[M], None] | None = None,
     ) -> StructuredExecution:
         backend_id = self.config.task_bindings[task_id]
         backend = self.registry.get(backend_id)
@@ -137,9 +138,27 @@ class TaskExecutor:
             invalid_retries=1,
             reservation=text_reservation,
         )
+        def validate(data: dict[str, Any]) -> M:
+            artifact = output_model.model_validate(data)
+            if invariant:
+                invariant(artifact)
+            return artifact
+
+        def validation_errors(error: ValidationError | BackendError) -> list[dict[str, Any]]:
+            if isinstance(error, ValidationError):
+                return error.errors(
+                    include_url=False,
+                    include_context=False,
+                    include_input=False,
+                )
+            if error.kind is not ErrorKind.INVALID_OUTPUT:
+                raise error
+            return [{"type": "invariant", "msg": error.message, "loc": []}]
+
         try:
-            artifact = output_model.model_validate(result.data)
-        except ValidationError as first_error:
+            artifact = validate(result.data)
+        except (ValidationError, BackendError) as first_error:
+            first_errors = validation_errors(first_error)
             first_usage = result.usage.model_copy(deep=True) if result.usage else None
             repair_request = request.model_copy(
                 update={
@@ -151,7 +170,7 @@ class TaskExecutor:
                     "input_data": {
                         "original_input": input_data,
                         "invalid_output": result.data,
-                        "validation_errors": first_error.errors(include_url=False),
+                        "validation_errors": first_errors,
                     },
                 }
             )
@@ -163,8 +182,9 @@ class TaskExecutor:
                 reservation=text_reservation,
             )
             try:
-                artifact = output_model.model_validate(result.data)
-            except ValidationError as second_error:
+                artifact = validate(result.data)
+            except (ValidationError, BackendError) as second_error:
+                validation_errors(second_error)
                 raise BackendError(
                     f"{task_id} output failed validation after one repair: {second_error}",
                     kind=ErrorKind.INVALID_OUTPUT,
@@ -174,7 +194,7 @@ class TaskExecutor:
                 result.usage.output_units += first_usage.output_units
                 result.usage.reserved_usd += first_usage.reserved_usd
                 result.usage.warnings.append(
-                    "usage includes the schema-invalid response and one structured repair"
+                    "usage includes the invalid response and one structured repair"
                 )
         return StructuredExecution(artifact, result, prompt.version, schema_hash)
 

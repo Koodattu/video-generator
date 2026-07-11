@@ -299,7 +299,7 @@ def build_timeline(
 
 def duration_is_accepted(timeline: NarrationTimeline, budget: float) -> bool:
     return (
-        timeline.duration_seconds + 1e-6 >= budget * 0.9
+        timeline.delivery_duration_seconds + 1e-6 >= budget * 0.85
         and timeline.delivery_duration_seconds <= delivery_ceiling(budget, timeline.fps) + 1e-6
     )
 

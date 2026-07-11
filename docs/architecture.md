@@ -111,7 +111,9 @@ The runner manager should batch adjacent calls, while accepting bounded reloads 
 
 This is an optimization over the same artifact contracts, not a different workflow. Each Scene item is independently validated and atomically promoted, so an unhealthy runner can fail the aggregate stage without losing already completed items.
 
-Native Windows is the default placement. The implemented LLM, VoxCPM, FLUX, ACE-Step, media, and orchestration paths are native; only the current Parakeet/NeMo alignment adapter uses WSL2. WSL2 remains a per-Backend exception after native alternatives fail matched conformance and English/Finnish quality tests, never a requirement for the whole application.
+Native Windows is the default placement. The implemented LLM, VoxCPM, faster-whisper, FLUX,
+ACE-Step, media, and orchestration paths are native. The retained Parakeet/NeMo alignment adapter is
+an explicit WSL2 comparison Backend, never a requirement for the default local profile.
 
 The Structured Text adapter starts one stock `llama-server.exe` on a dynamically selected loopback port with a generated in-memory API key. The adjacent LLM task batch reuses that child process. A model-family switch terminates it, requires process exit and disappearance of its GPU PID when observable, and records baseline/load/peak/post-exit aggregate VRAM. Aggregate return-to-baseline is advisory under Windows WDDM because unrelated applications may change GPU use.
 
@@ -123,7 +125,7 @@ A Scene combines one variable-length spoken passage and one primary visual. Scen
 
 TTS runs per Scene because this gives natural checkpoint and regeneration boundaries. The Speech contract may include surrounding text context for continuity, while provider-specific continuation controls remain inside the adapter. Each returned clip is probed, conservatively boundary-trimmed if required, normalized, and concatenated. Declared pauses are explicit timeline data, not invisible padding.
 
-The Duration Budget is both goal and hard final-file limit. Before narration acceptance, the media layer rounds the maximum usable clock down to the nearest 30 fps frame boundary. A successful narration uses at least 90% of the configured budget and ends at or before that delivery ceiling. Measured audio, not word-count prediction, decides acceptance. One Duration Repair may alter and resynthesize selected Scenes while preserving Scene IDs and order. If the result still misses the band, the Run stops at a resumable failure. The pipeline never solves duration by speeding speech, truncating narration, or silently dropping content.
+The Duration Budget is both goal and hard final-file limit. Before narration acceptance, the media layer rounds the maximum usable clock down to the nearest 30 fps frame boundary. A successful narration uses at least 85% of the configured budget and ends at or before that delivery ceiling. Measured audio, not word-count prediction, decides acceptance. One Duration Repair may alter and resynthesize selected Scenes while preserving Scene IDs and order. If the result still misses the band, the Run stops at a resumable failure. The pipeline never solves duration by speeding speech, truncating narration, or silently dropping content.
 
 FFmpeg is capped to the same delivery ceiling. The visual stream may outlast narration by less than one frame so the final spoken audio is not cut, but the delivered file never exceeds `duration_seconds`.
 
@@ -131,7 +133,10 @@ FFmpeg is capped to the same delivery ceiling. The visual stream may outlast nar
 
 Captions are enabled by default. Cloud TTS character timing is normalized into word timing when available. Local TTS uses an Alignment Backend only when captions are enabled; Scene cuts need only clip durations.
 
-For local alignment, the exact Narration Script remains canonical. Parakeet can propose recognized words and timestamps, but deterministic reconciliation maps those timings back onto the known text and reports coverage. It may not silently rewrite Finnish or English caption text based on ASR mistakes.
+For local alignment, the exact Narration Script remains canonical. faster-whisper or Parakeet can
+propose recognized words and timestamps, but deterministic reconciliation maps those timings back
+onto the known text and reports coverage. Neither may silently rewrite Finnish or English caption
+text based on ASR mistakes.
 
 One Caption Track produces:
 

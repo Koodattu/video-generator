@@ -29,10 +29,11 @@ changing the workflow.
 - [`uv`](https://docs.astral.sh/uv/) for locked environments.
 - FFmpeg and ffprobe on `PATH`, with libx264 and AAC; libass is additionally required for animated
   captions.
-- For local CUDA Backends: an NVIDIA driver/CUDA-compatible PyTorch environment and substantial free
-  disk space. Only one model worker owns the GPU at a time.
-- WSL2 with an explicitly installed Linux distribution and Python 3.12 for the Parakeet/NeMo runner.
-  Other local workers run natively on Windows unless their own probe fails.
+- For local CUDA Backends: a current NVIDIA driver and substantial free disk space. Setup selects
+  CUDA-compatible PyTorch wheels for Torch workers; faster-whisper uses its isolated CTranslate2
+  runtime instead. Only one model worker owns the GPU at a time.
+- WSL2 is optional and needed only when explicitly selecting the retained Parakeet/NeMo Backend.
+  The default local profile runs natively on Windows.
 
 ## Install the orchestrator
 
@@ -65,7 +66,7 @@ by this program.
 
 The 90-second example is the intended first useful target. For the first mechanical check, set
 `duration_seconds = 30`. The configured duration is both the goal and hard ceiling; accepted measured
-narration must occupy 90-100% of it.
+narration must occupy 85-100% of it.
 
 ## Fastest first Run: cloud
 
@@ -94,7 +95,7 @@ The local profile uses:
 | Research search | Brave Search, or no search when `offline = true` |
 | Text/reviews/prompt compilation | Manifest-selected GGUF through stock `llama-server.exe` |
 | English/Finnish voice clone | VoxCPM2 |
-| Local timestamps | Parakeet TDT 0.6B v3 through NeMo in WSL2 |
+| Local timestamps | faster-whisper large-v3-turbo through CTranslate2 on native Windows |
 | Images | FLUX.2 Klein 4B through Diffusers |
 | Optional music | ACE-Step 1.5 XL Turbo |
 
@@ -102,9 +103,9 @@ Setup pins runtime/model revisions, stores assets in `.cache/`, writes hashes an
 and may take a long time. Generate is offline with respect to model repositories and never downloads
 missing weights.
 
-The placement policy is Windows first. The LLM, VoxCPM, FLUX, ACE-Step, FFmpeg, and the orchestrator
-run natively. The current Parakeet/NeMo timestamp adapter is the only WSL2 Backend; a native alignment
-candidate may replace it only after matched English/Finnish timing evaluation.
+The placement policy is Windows first. The default LLM, VoxCPM, faster-whisper, FLUX, ACE-Step,
+FFmpeg, and orchestrator paths run natively. Parakeet/NeMo remains an explicit WSL2 override for
+matched English/Finnish comparison; it is not required for an ordinary local Run.
 
 ### 1. Prepare one auditable local LLM profile
 
@@ -115,6 +116,25 @@ and arbitrary server launch overrides.
 
 Download one candidate first instead of the entire candidate matrix. Pin the full Hugging Face commit;
 do not use `main`:
+
+```powershell
+# Inspect the two curated 24 GB benchmark candidates without downloading anything.
+video-generator models list
+video-generator models download qwen3.6-27b-q4-mtp --dry-run
+video-generator models download gemma-4-26b-a4b-q4-mtp --dry-run
+
+# Download one exact, commit-pinned candidate into .cache/models/llm and verify its SHA-256.
+video-generator models download gemma-4-26b-a4b-q4-mtp
+```
+
+The curated Qwen artifact has embedded MTP. The curated Gemma artifact includes its separate Q4 MTP
+drafter. Both quantizations come from the Unsloth repositories linked in the model matrix, are public,
+and require no Hugging Face login. The command downloads only the listed GGUF file(s), never the whole
+repository, and records the source revision plus independent hashes in `asset-manifest.json`. These are
+benchmark candidates rather than automatic defaults; begin with MTP disabled and promote a variant only
+after it passes the English/Finnish fixtures. The stock llama.cpp runtime remains a separate pinned input.
+
+For an arbitrary candidate not in the curated list, use the manual path below:
 
 ```powershell
 New-Item -ItemType Directory -Force .cache\models\llm\CANDIDATE-ID, downloads\llama.cpp
@@ -142,9 +162,10 @@ with `speculation = "draft-mtp"` as a separate benchmark profile. Embedded MTP n
 models that ship a separate MTP assistant require every `draft_model_*` field. Larger context tiers
 are separate launches and must prove they fit; the program does not silently allocate 256K.
 
-### 2. Install WSL2 only for the current Parakeet adapter
+### 2. Optional: install WSL2 only for a Parakeet override
 
-Setup will not install or choose a Linux distribution for you. One example:
+Skip this section for the default faster-whisper Backend. If you explicitly override alignment to
+Parakeet, Setup will not install or choose a Linux distribution for you. One example:
 
 ```powershell
 wsl --install -d Ubuntu
@@ -160,15 +181,16 @@ them inside the distribution or pass the name of another prepared distribution w
 
 ### 3. Prepare all Backends active in config
 
-With music disabled and draft quality, this prepares the selected LLM, VoxCPM, Parakeet, FLUX, and optionally
-Brave. Set `offline = true` if you want no web search and no Brave key. On native Windows, Setup asks
-`uv` to select a CUDA-compatible PyTorch wheel from the installed NVIDIA driver; live Preflight then
-loads each worker sequentially. For llama.cpp it additionally requires the child server PID to exit
-and records before/load/after aggregate VRAM observations; aggregate drift is advisory on Windows
-because unrelated WDDM applications can change it.
+With music disabled and draft quality, this prepares the selected LLM, VoxCPM, faster-whisper Turbo,
+FLUX, and optionally Brave. Set `offline = true` if you want no web search and no Brave key. Each
+Backend receives an isolated, locked venv. Setup asks `uv` to select a CUDA-compatible PyTorch wheel
+only for Torch workers; faster-whisper pins CTranslate2 separately. Live Preflight then loads each
+worker sequentially. For llama.cpp it additionally requires the child server PID to exit and records
+before/load/after aggregate VRAM observations; aggregate drift is advisory on Windows because
+unrelated WDDM applications can change it.
 
 ```powershell
-video-generator setup --config config.toml --llm-profile local-llm.toml --wsl-distro Ubuntu
+video-generator setup --config config.toml --llm-profile local-llm.toml
 
 video-generator preflight --config config.toml --live
 video-generator generate --config config.toml --brief brief.toml
@@ -189,6 +211,8 @@ without touching the others:
 
 ```powershell
 video-generator setup --backend local:ace-step-1.5-xl-turbo
+video-generator setup --backend local:faster-whisper-large-v3-turbo
+# Optional retained WSL2 alternative:
 video-generator setup --backend local:parakeet-tdt-0.6b-v3 --wsl-distro Ubuntu
 ```
 

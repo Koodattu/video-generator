@@ -238,6 +238,9 @@ class WorkflowEngine:
             chosen = next(
                 candidate for candidate in candidates.candidates if candidate.candidate_id == selection.chosen_candidate_id
             )
+            target_scene_count, minimum_scene_count, maximum_scene_count = (
+                self._outline_scene_count_bounds()
+            )
             outline = self._structured_stage(
                 "outline",
                 "outline",
@@ -249,12 +252,16 @@ class WorkflowEngine:
                     "visual_target_seconds": self.config.visual_target_seconds,
                     "visual_min_seconds": self.config.visual_min_seconds,
                     "visual_max_seconds": self.config.visual_max_seconds,
+                    "target_scene_count": target_scene_count,
+                    "minimum_scene_count": minimum_scene_count,
+                    "maximum_scene_count": maximum_scene_count,
                 },
                 StoryOutline,
                 invariant=self._validate_outline,
             )
             if self._stop("outline"):
                 return None
+            script_word_plan = self._script_word_plan(outline)
             draft = self._structured_stage(
                 "script-draft",
                 "script_draft",
@@ -264,12 +271,14 @@ class WorkflowEngine:
                     "output_language": self.config.output_language.value,
                     "duration_seconds": self.config.duration_seconds,
                     "estimated_words_per_second": 2.25 if self.config.output_language.value == "en" else 1.95,
+                    **script_word_plan,
                 },
                 NarrationScript,
-                invariant=lambda value: self._require(
-                    [scene.scene_id for scene in value.scenes]
-                    == [scene.scene_id for scene in outline.scenes],
-                    "draft changed the outline Scene IDs",
+                invariant=lambda value: self._validate_draft(
+                    value,
+                    outline,
+                    minimum_words=int(script_word_plan["minimum_total_word_count"]),
+                    maximum_words=int(script_word_plan["maximum_total_word_count"]),
                 ),
             )
             if self._stop("script-draft"):
@@ -297,14 +306,22 @@ class WorkflowEngine:
                         spoken_review.model_dump(mode="json"),
                         constraint_review.model_dump(mode="json"),
                     ],
+                    "required_finding_ids": sorted(
+                        finding.finding_id
+                        for review in (story_review, spoken_review, constraint_review)
+                        for finding in review.findings
+                    ),
                     "duration_seconds": self.config.duration_seconds,
                     "output_language": self.config.output_language.value,
+                    **script_word_plan,
                 },
                 RevisedScript,
                 invariant=lambda value: self._validate_revision(
                     value,
                     [story_review, spoken_review, constraint_review],
                     [scene.scene_id for scene in outline.scenes],
+                    minimum_words=int(script_word_plan["minimum_total_word_count"]),
+                    maximum_words=int(script_word_plan["maximum_total_word_count"]),
                 ),
             )
             final_script = revised.script
@@ -513,9 +530,8 @@ class WorkflowEngine:
             output_model,
             media_inputs=media_inputs,
             target_image_backend=target_image_backend,
+            invariant=invariant,
         )
-        if invariant:
-            invariant(execution.artifact)
         atomic_write_json(workspace.work_dir / "provider-response.json", execution.result.raw_response)
         promoted = self.store.promote_stage(
             workspace,
@@ -546,7 +562,10 @@ class WorkflowEngine:
             ReviewReport,
             invariant=lambda value: self._require(
                 value.review_type == expected_type,
-                f"{task_id} returned the wrong review type",
+                (
+                    f"{task_id} must set review_type to {expected_type!r}; "
+                    f"got {value.review_type!r}"
+                ),
             ),
         )
         return report
@@ -586,18 +605,82 @@ class WorkflowEngine:
             "Story Candidates reference unknown Research Finding IDs: " + ", ".join(unknown),
         )
 
+    def _outline_scene_count_bounds(self) -> tuple[int, int, int]:
+        target_count = max(
+            1,
+            math.ceil(self.config.duration_seconds / self.config.visual_target_seconds),
+        )
+        return target_count, max(1, target_count - 1), target_count + 1
+
+    def _script_word_plan(self, outline: StoryOutline) -> dict[str, Any]:
+        words_per_second = 2.7 if self.config.output_language.value == "en" else 2.0
+        target_total = max(
+            len(outline.scenes) * 8,
+            round(self.config.duration_seconds * 0.95 * words_per_second),
+        )
+        scene_targets: list[dict[str, int | str]] = []
+        allocated = 0
+        for index, scene in enumerate(outline.scenes):
+            if index == len(outline.scenes) - 1:
+                target = target_total - allocated
+            else:
+                target = max(
+                    4,
+                    round(target_total * scene.provisional_seconds / self.config.duration_seconds),
+                )
+                allocated += target
+            scene_targets.append({"scene_id": scene.scene_id, "target_word_count": target})
+        return {
+            "target_total_word_count": target_total,
+            "minimum_total_word_count": target_total - (10 if self.config.output_language.value == "en" else 4),
+            "maximum_total_word_count": target_total + max(4, len(outline.scenes)),
+            "scene_word_targets": scene_targets,
+        }
+
+    @classmethod
+    def _validate_draft(
+        cls,
+        draft: NarrationScript,
+        outline: StoryOutline,
+        *,
+        minimum_words: int,
+        maximum_words: int,
+    ) -> None:
+        cls._require(
+            [scene.scene_id for scene in draft.scenes]
+            == [scene.scene_id for scene in outline.scenes],
+            "draft changed the outline Scene IDs",
+        )
+        cls._validate_script_word_range(
+            draft,
+            minimum_words=minimum_words,
+            maximum_words=maximum_words,
+        )
+
+    @staticmethod
+    def _validate_script_word_range(
+        script: NarrationScript,
+        *,
+        minimum_words: int,
+        maximum_words: int,
+    ) -> None:
+        actual = sum(len(scene.spoken_text.split()) for scene in script.scenes)
+        if not minimum_words <= actual <= maximum_words:
+            raise BackendError(
+                (
+                    f"Narration Script has {actual} words; required inclusive range is "
+                    f"{minimum_words}-{maximum_words}"
+                ),
+                kind=ErrorKind.INVALID_OUTPUT,
+            )
+
     def _validate_outline(self, outline: StoryOutline) -> None:
         self._require(
             abs(sum(scene.provisional_seconds for scene in outline.scenes) - self.config.duration_seconds)
             <= 0.05,
             "outline Scene allocations do not equal the Duration Budget",
         )
-        target_count = max(
-            1,
-            math.ceil(self.config.duration_seconds / self.config.visual_target_seconds),
-        )
-        minimum_count = max(1, target_count - 1)
-        maximum_count = target_count + 1
+        _, minimum_count, maximum_count = self._outline_scene_count_bounds()
         self._require(
             minimum_count <= len(outline.scenes) <= maximum_count,
             f"outline must contain {minimum_count}-{maximum_count} Scenes for the configured visual cadence",
@@ -615,6 +698,9 @@ class WorkflowEngine:
         revision: RevisedScript,
         reviews: Sequence[ReviewReport],
         expected_scene_ids: list[str],
+        *,
+        minimum_words: int | None = None,
+        maximum_words: int | None = None,
     ) -> None:
         if [scene.scene_id for scene in revision.script.scenes] != expected_scene_ids:
             raise BackendError("revision changed Scene IDs or order", kind=ErrorKind.INVALID_OUTPUT)
@@ -630,8 +716,15 @@ class WorkflowEngine:
             )
         dispositions = {item.finding_id: item for item in revision.dispositions}
         if set(dispositions) != set(findings):
+            missing = sorted(set(findings) - set(dispositions))
+            unexpected = sorted(set(dispositions) - set(findings))
+            detail = []
+            if missing:
+                detail.append("missing: " + ", ".join(missing))
+            if unexpected:
+                detail.append("unexpected: " + ", ".join(unexpected))
             raise BackendError(
-                "revision did not disposition every review Finding exactly once",
+                "revision dispositions must match required Finding IDs (" + "; ".join(detail) + ")",
                 kind=ErrorKind.INVALID_OUTPUT,
             )
         unresolved_blocking = [
@@ -644,6 +737,12 @@ class WorkflowEngine:
             raise BackendError(
                 "revision left blocking Findings unresolved: " + ", ".join(sorted(unresolved_blocking)),
                 kind=ErrorKind.INVALID_OUTPUT,
+            )
+        if minimum_words is not None and maximum_words is not None:
+            WorkflowEngine._validate_script_word_range(
+                revision.script,
+                minimum_words=minimum_words,
+                maximum_words=maximum_words,
             )
 
     def _research(self) -> ResearchPack:
@@ -764,10 +863,13 @@ class WorkflowEngine:
         items, usage = self._synthesize_script(script, repair=False)
         bundle = self._assemble_narration(script, items, duration_repaired=False)
         if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
-            measured = bundle.timeline.duration_seconds
-            target = self.config.duration_seconds * 0.96
-            scale = target / measured
+            target = self.config.duration_seconds * 0.95
             selected = [scene.scene_id for scene in script.scenes]
+            scale = self._duration_repair_scale(
+                bundle.timeline,
+                target_seconds=target,
+                selected_scene_ids=set(selected),
+            )
             repaired_bundle, llm_repair_usage = self._duration_repair(
                 script=script,
                 measured_timeline=bundle.timeline,
@@ -786,7 +888,7 @@ class WorkflowEngine:
                 raise MediaError(
                     (
                         f"narration is {bundle.timeline.duration_seconds:.2f}s after the single Duration Repair; "
-                        f"required range is {self.config.duration_seconds * 0.9:.2f}-"
+                        f"required range is {self.config.duration_seconds * 0.85:.2f}-"
                         f"{delivery_ceiling(self.config.duration_seconds, self.config.fps):.2f}s"
                     ),
                     kind=ErrorKind.INVALID_OUTPUT,
@@ -823,6 +925,22 @@ class WorkflowEngine:
         descriptor = self.registry.descriptor(backend_id)
         prompt = self.prompts.get(task_id, language=self.config.output_language)
         schema_hash = hash_value(self.prompts.schema(task_id))
+        selected = set(selected_scene_ids)
+        scene_repair_targets = []
+        for scene in script.scenes:
+            if scene.scene_id not in selected:
+                continue
+            original_words = len(scene.spoken_text.split())
+            target_words = max(1, round(original_words * duration_scale))
+            scene_repair_targets.append(
+                {
+                    "scene_id": scene.scene_id,
+                    "original_word_count": original_words,
+                    "target_word_count": target_words,
+                    "minimum_word_count": max(1, target_words - 2),
+                    "maximum_word_count": target_words + 2,
+                }
+            )
         item_input = {
             "script": script.model_dump(mode="json"),
             "measured_timeline": measured_timeline.model_dump(
@@ -831,6 +949,7 @@ class WorkflowEngine:
             "target_seconds": target_seconds,
             "duration_scale": duration_scale,
             "selected_scene_ids": selected_scene_ids,
+            "scene_repair_targets": scene_repair_targets,
             "output_language": self.config.output_language.value,
         }
         item_id = "duration-repair-script"
@@ -854,12 +973,26 @@ class WorkflowEngine:
         )
         if reusable:
             repaired = self.store.load_item_artifact(reusable, RevisedScript)
-            self._validate_duration_revision(repaired, script, set(selected_scene_ids))
+            self._validate_duration_revision(
+                repaired,
+                script,
+                selected,
+                scene_repair_targets=scene_repair_targets,
+            )
             return repaired, reusable.usage
         workspace = self.store.workspace("narration", item_id=item_id)
-        execution = self.executor.structured(task_id, item_input, RevisedScript)
+        execution = self.executor.structured(
+            task_id,
+            item_input,
+            RevisedScript,
+            invariant=lambda value: self._validate_duration_revision(
+                value,
+                script,
+                selected,
+                scene_repair_targets=scene_repair_targets,
+            ),
+        )
         repaired = RevisedScript.model_validate(execution.artifact)
-        self._validate_duration_revision(repaired, script, set(selected_scene_ids))
         atomic_write_json(workspace.work_dir / "provider-response.json", execution.result.raw_response)
         item_usage = _usage_list([execution.result.usage])
         promoted = self.store.promote_item(
@@ -880,6 +1013,8 @@ class WorkflowEngine:
         revision: RevisedScript,
         original: NarrationScript,
         selected_scene_ids: set[str],
+        *,
+        scene_repair_targets: list[dict[str, int | str]] | None = None,
     ) -> None:
         repaired = revision.script
         if [scene.scene_id for scene in repaired.scenes] != [scene.scene_id for scene in original.scenes]:
@@ -889,14 +1024,94 @@ class WorkflowEngine:
             )
         old_by_id = {scene.scene_id: scene for scene in original.scenes}
         for scene in repaired.scenes:
+            original_scene = old_by_id[scene.scene_id]
             if (
                 scene.scene_id not in selected_scene_ids
-                and scene.model_dump(mode="json") != old_by_id[scene.scene_id].model_dump(mode="json")
+                and scene.model_dump(mode="json") != original_scene.model_dump(mode="json")
             ):
                 raise BackendError(
                     "Duration Repair changed an unselected Scene",
                     kind=ErrorKind.INVALID_OUTPUT,
                 )
+            if (
+                scene.scene_id in selected_scene_ids
+                and scene.pause_after_seconds != original_scene.pause_after_seconds
+            ):
+                raise BackendError(
+                    "Duration Repair changed a Scene pause",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                )
+        if scene_repair_targets is not None:
+            repaired_by_id = {scene.scene_id: scene for scene in repaired.scenes}
+            violations: list[str] = []
+            total_actual = 0
+            total_minimum = 0
+            total_maximum = 0
+            severe_scene_error = False
+            for target in scene_repair_targets:
+                scene_id = str(target["scene_id"])
+                actual = len(repaired_by_id[scene_id].spoken_text.split())
+                minimum = int(target["minimum_word_count"])
+                desired = int(target["target_word_count"])
+                maximum = int(target["maximum_word_count"])
+                total_actual += actual
+                total_minimum += minimum
+                total_maximum += maximum
+                if actual < minimum - 1 or actual > maximum + 1:
+                    severe_scene_error = True
+                if actual < minimum:
+                    delta = f"add {minimum - actual}-{maximum - actual} words"
+                elif actual > maximum:
+                    delta = f"remove {actual - maximum}-{actual - minimum} words"
+                else:
+                    continue
+                violations.append(
+                    f"{scene_id} got {actual}, required {minimum}-{maximum} "
+                    f"(target {desired}; {delta})"
+                )
+            total_invalid = not total_minimum - 1 <= total_actual <= total_maximum + 1
+            if violations and (total_invalid or severe_scene_error):
+                if total_actual < total_minimum:
+                    total_delta = (
+                        f"add {total_minimum - total_actual}-{total_maximum - total_actual} words"
+                    )
+                elif total_actual > total_maximum:
+                    total_delta = (
+                        f"remove {total_actual - total_maximum}-{total_actual - total_minimum} words"
+                    )
+                else:
+                    total_delta = "redistribute words between Scenes"
+                details = "; ".join(violations)
+                raise BackendError(
+                    (
+                        f"Duration Repair word counts are invalid: {details}; total got {total_actual}, "
+                        f"required {total_minimum}-{total_maximum} ({total_delta})"
+                    ),
+                    kind=ErrorKind.INVALID_OUTPUT,
+                )
+
+    @staticmethod
+    def _duration_repair_scale(
+        measured_timeline: NarrationTimeline,
+        *,
+        target_seconds: float,
+        selected_scene_ids: set[str],
+    ) -> float:
+        editable_speech_seconds = 0.0
+        fixed_seconds = 0.0
+        for scene in measured_timeline.scenes:
+            if scene.scene_id in selected_scene_ids:
+                editable_speech_seconds += scene.speech_end_seconds - scene.start_seconds
+                fixed_seconds += scene.end_seconds - scene.speech_end_seconds
+            else:
+                fixed_seconds += scene.end_seconds - scene.start_seconds
+        target_speech_seconds = target_seconds - fixed_seconds
+        if editable_speech_seconds <= 0 or target_speech_seconds <= 0:
+            raise MediaError(
+                "Duration Repair has no positive editable speech window",
+                kind=ErrorKind.INVALID_OUTPUT,
+            )
+        return target_speech_seconds / editable_speech_seconds
 
     def _synthesize_script(
         self,
@@ -1204,27 +1419,15 @@ class WorkflowEngine:
                     target_image_backend=target_backend_id,
                 )
                 image_request = ImageRequest.model_validate(execution.artifact)
-                immutable_request_fields = (
-                    image_request.scene_id == visual_brief.scene_id,
-                    image_request.target_backend_id == target_backend_id,
-                    image_request.width == generation_width,
-                    image_request.height == generation_height,
-                    image_request.quality == item_input["image_quality"],
-                    image_request.reference_paths == item_input["reference_paths"],
+                image_request = self._canonical_image_request(
+                    image_request,
+                    scene_id=visual_brief.scene_id,
+                    target_backend_id=target_backend_id,
+                    width=generation_width,
+                    height=generation_height,
+                    quality=item_input["image_quality"],
+                    reference_paths=item_input["reference_paths"],
                 )
-                if not all(immutable_request_fields):
-                    raise BackendError(
-                        "image compiler changed an immutable Scene, Backend, size, quality, or reference field",
-                        kind=ErrorKind.INVALID_OUTPUT,
-                    )
-                if target_backend_id == "local:flux.2-klein-4b" and (
-                    image_request.settings.inference_steps not in {None, 4}
-                    or image_request.settings.guidance_scale not in {None, 1.0}
-                ):
-                    raise BackendError(
-                        "FLUX.2 Klein request must use four steps and guidance 1.0",
-                        kind=ErrorKind.INVALID_OUTPUT,
-                    )
                 atomic_write_json(item_workspace.work_dir / "provider-response.json", execution.result.raw_response)
                 item_usage = _usage_list([execution.result.usage])
                 promoted = self.store.promote_item(
@@ -1244,6 +1447,34 @@ class WorkflowEngine:
         bundle = ImageRequestSet(requests=requests)
         promoted = self.store.complete_fanout_stage("image-prompt-compile", bundle, usage=usage)
         return ImageRequestSet.model_validate(promoted)
+
+    @staticmethod
+    def _canonical_image_request(
+        image_request: ImageRequest,
+        *,
+        scene_id: str,
+        target_backend_id: str,
+        width: int,
+        height: int,
+        quality: str,
+        reference_paths: list[str],
+    ) -> ImageRequest:
+        settings = image_request.settings
+        if target_backend_id == "local:flux.2-klein-4b":
+            settings = settings.model_copy(
+                update={"inference_steps": 4, "guidance_scale": 1.0}
+            )
+        return image_request.model_copy(
+            update={
+                "scene_id": scene_id,
+                "target_backend_id": target_backend_id,
+                "width": width,
+                "height": height,
+                "quality": quality,
+                "reference_paths": reference_paths,
+                "settings": settings,
+            }
+        )
 
     def _images(self, request_set: ImageRequestSet) -> ImageSet:
         input_data = request_set.model_dump(mode="json")
