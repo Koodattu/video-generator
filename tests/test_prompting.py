@@ -16,7 +16,7 @@ def test_image_prompt_compiler_always_uses_english() -> None:
         target_image_backend="local:flux.2-klein-4b",
     )
 
-    assert PROMPT_SET_VERSION == "2026-07-11.v11"
+    assert PROMPT_SET_VERSION == "2026-07-11.v13"
     assert task_output_language("image_prompt_compile", OutputLanguage.FINNISH) is OutputLanguage.ENGLISH
     assert "Source artifact language: fi" in prompt.instructions
     assert "Required ImageRequest prompt language: English" in prompt.instructions

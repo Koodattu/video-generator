@@ -26,6 +26,7 @@ from .errors import BackendError, ErrorKind
 from .prompting import PromptLibrary, task_output_language
 from .registry import BackendRegistry
 from .run_store import RunStore
+from .schema import restricted_json_schema
 from .util import hash_value
 
 
@@ -107,6 +108,7 @@ class TaskExecutor:
         target_image_backend: str | None = None,
         max_output_tokens: int = 8000,
         invariant: Callable[[M], None] | None = None,
+        instruction_suffix: str = "",
     ) -> StructuredExecution:
         backend_id = self.config.task_bindings[task_id]
         backend = self.registry.get(backend_id)
@@ -116,11 +118,14 @@ class TaskExecutor:
             language=self.config.output_language,
             target_image_backend=target_image_backend,
         )
-        schema = self.prompts.schema(task_id)
+        schema = restricted_json_schema(output_model.model_json_schema())
         schema_hash = hash_value(schema)
         request = StructuredTextRequest(
             task_id=task_id,
-            instructions=prompt.instructions,
+            instructions=(
+                prompt.instructions
+                + ("\n\n" + instruction_suffix.strip() if instruction_suffix.strip() else "")
+            ),
             input_data=input_data,
             output_schema=schema,
             output_language=output_language,
@@ -156,7 +161,17 @@ class TaskExecutor:
                 raise error
             return [{"type": "invariant", "msg": error.message, "loc": []}]
 
-        maximum_validation_repairs = 1 if getattr(descriptor, "cloud", False) else 2
+        cloud_length_sensitive_tasks = {
+            "script_draft",
+            "script_revision",
+            "duration_repair",
+        }
+        maximum_validation_repairs = (
+            1
+            if getattr(descriptor, "cloud", False)
+            and task_id not in cloud_length_sensitive_tasks
+            else 2
+        )
         prior_usage: list[UsageRecord] = []
         repair_count = 0
         while True:
@@ -183,7 +198,9 @@ class TaskExecutor:
                     "instructions": (
                         request.instructions
                         + "\n\nThe prior response failed schema or invariant validation. Repair only the output; "
-                        "do not change the task or add commentary."
+                        "do not change the task or add commentary. Treat every validation error as a "
+                        "hard constraint. If an error gives an inclusive numeric range, count using the "
+                        "stated method and return a value comfortably inside that range."
                     ),
                     "input_data": {
                         "original_input": input_data,

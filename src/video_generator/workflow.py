@@ -50,6 +50,7 @@ from .executor import StructuredExecution, TaskExecutor, result_usage
 from .media import (
     AudioProbe,
     MediaTools,
+    adjust_audio_tempo,
     build_timeline,
     caption_track_from_timeline,
     concatenate_audio,
@@ -69,6 +70,7 @@ from .prompting import PromptLibrary, task_output_language
 from .provenance import verify_runtime_snapshot
 from .registry import BackendRegistry
 from .run_store import RunStore
+from .schema import restricted_json_schema
 from .task_models import TASK_OUTPUT_MODELS
 from .util import (
     atomic_write_json,
@@ -80,7 +82,7 @@ from .util import (
 )
 
 
-INTERNAL_REVISION = "media-workflow-v2"
+INTERNAL_REVISION = "media-workflow-v3"
 DetectorFactory.seed = 0
 
 
@@ -110,12 +112,18 @@ class NarrationBundle(WorkflowModel):
     timeline: NarrationTimeline
     items: list[NarrationItem]
     duration_repaired: bool = False
+    tempo_adjustment: float = 1.0
 
 
 class AlignedSceneWords(WorkflowModel):
     scene_id: str
     words: list[WordTiming]
     coverage: float
+
+
+class ExpandedSceneText(WorkflowModel):
+    scene_id: str
+    spoken_text: str = Field(min_length=1, max_length=10000)
 
 
 class CaptionBundle(WorkflowModel):
@@ -613,6 +621,18 @@ class WorkflowEngine:
             "ideation did not return the configured candidate count",
         )
         finding_ids = {finding.finding_id for finding in research.findings}
+        source_to_findings: dict[str, list[str]] = {}
+        for finding in research.findings:
+            for source_id in finding.source_ids:
+                source_to_findings.setdefault(source_id, []).append(finding.finding_id)
+        for candidate in candidates.candidates:
+            normalized_ids = []
+            for reference_id in candidate.research_inspiration_ids:
+                replacements = source_to_findings.get(reference_id, [])
+                for normalized_id in replacements or [reference_id]:
+                    if normalized_id not in normalized_ids:
+                        normalized_ids.append(normalized_id)
+            candidate.research_inspiration_ids = normalized_ids
         unknown = sorted(
             {
                 finding_id
@@ -635,7 +655,8 @@ class WorkflowEngine:
 
     def _script_word_plan(self, outline: StoryOutline) -> dict[str, Any]:
         words_per_second = 2.55 if self.config.output_language.value == "en" else 1.95
-        minimum_duration_fraction = 0.85 if self.config.output_language.value == "en" else 0.60
+        minimum_duration_fraction = 0.85 if self.config.output_language.value == "en" else 0.0
+        maximum_word_tolerance = 1.0 if self.config.output_language.value == "en" else 1.05
         target_total = max(
             len(outline.scenes) * 8,
             round(self.config.duration_seconds * 0.95 * words_per_second),
@@ -651,7 +672,28 @@ class WorkflowEngine:
                     round(target_total * scene.provisional_seconds / self.config.duration_seconds),
                 )
                 allocated += target
-            scene_targets.append({"scene_id": scene.scene_id, "target_word_count": target})
+            scene_targets.append(
+                {
+                    "scene_id": scene.scene_id,
+                    "target_word_count": target,
+                    "minimum_sentence_count": (
+                        2
+                        if self.config.duration_seconds >= 90
+                        and self.config.output_language.value == "en"
+                        else 3
+                        if self.config.duration_seconds >= 90
+                        else 1
+                    ),
+                    "maximum_sentence_count": (
+                        3
+                        if self.config.duration_seconds >= 90
+                        and self.config.output_language.value == "en"
+                        else 4
+                        if self.config.duration_seconds >= 90
+                        else 2
+                    ),
+                }
+            )
         return {
             "target_total_word_count": target_total,
             "minimum_total_word_count": max(
@@ -664,7 +706,11 @@ class WorkflowEngine:
             ),
             "maximum_total_word_count": max(
                 len(outline.scenes) * 8,
-                round(self.config.duration_seconds * words_per_second),
+                round(
+                    self.config.duration_seconds
+                    * words_per_second
+                    * maximum_word_tolerance
+                ),
             ),
             "scene_word_targets": scene_targets,
         }
@@ -1035,6 +1081,54 @@ class WorkflowEngine:
             usage.extend(tts_repair_usage)
             bundle = self._assemble_narration(repaired, repair_items, duration_repaired=True)
             if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
+                pause_fitted_repaired = self._fit_pauses_to_budget(
+                    repaired,
+                    bundle.timeline,
+                    self.config.duration_seconds,
+                )
+                if pause_fitted_repaired is not None:
+                    pause_fitted_bundle = self._assemble_narration(
+                        pause_fitted_repaired,
+                        repair_items,
+                        duration_repaired=True,
+                    )
+                    if duration_is_accepted(
+                        pause_fitted_bundle.timeline,
+                        self.config.duration_seconds,
+                    ):
+                        bundle = pause_fitted_bundle
+            if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
+                tempo_items, tempo = self._tempo_fit_narration_items(
+                    repair_items,
+                    scene_count=len(repaired.scenes),
+                    budget_seconds=self.config.duration_seconds,
+                    output_root=aggregate_workspace.work_dir / "tempo-adjusted",
+                )
+                if tempo_items is not None and tempo is not None:
+                    tempo_bundle = self._assemble_narration(
+                        repaired,
+                        tempo_items,
+                        duration_repaired=True,
+                        tempo_adjustment=tempo,
+                    )
+                    tempo_pause_script = self._fit_pauses_to_budget(
+                        repaired,
+                        tempo_bundle.timeline,
+                        self.config.duration_seconds,
+                    )
+                    if tempo_pause_script is not None:
+                        tempo_bundle = self._assemble_narration(
+                            tempo_pause_script,
+                            tempo_items,
+                            duration_repaired=True,
+                            tempo_adjustment=tempo,
+                        )
+                    if duration_is_accepted(
+                        tempo_bundle.timeline,
+                        self.config.duration_seconds,
+                    ):
+                        bundle = tempo_bundle
+            if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
                 raise MediaError(
                     (
                         f"narration is {bundle.timeline.duration_seconds:.2f}s after the single Duration Repair; "
@@ -1077,7 +1171,7 @@ class WorkflowEngine:
             return None
 
         eligible_indexes = list(range(max(0, len(script.scenes) - 1)))
-        maximum_pause_seconds = 3.0 * len(eligible_indexes)
+        maximum_pause_seconds = 3.25 * len(eligible_indexes)
         if timeline.delivery_duration_seconds < minimum:
             if speech_seconds + maximum_pause_seconds < minimum - 1e-6:
                 return None
@@ -1115,7 +1209,7 @@ class WorkflowEngine:
                 index: remaining * weight_by_index[index] / weight_total for index in active
             }
             saturated = [
-                index for index in active if proposed[index] > 3.0 - allocated[index]
+                index for index in active if proposed[index] > 3.25 - allocated[index]
             ]
             if not saturated:
                 for index in active:
@@ -1123,7 +1217,7 @@ class WorkflowEngine:
                 remaining = 0
                 break
             for index in saturated:
-                capacity = 3.0 - allocated[index]
+                capacity = 3.25 - allocated[index]
                 allocated[index] += capacity
                 remaining -= capacity
                 active.remove(index)
@@ -1133,7 +1227,11 @@ class WorkflowEngine:
         for index in eligible_indexes:
             if abs(delta) <= 0.00005:
                 break
-            adjustment = min(delta, 3.0 - rounded[index]) if delta > 0 else max(delta, -rounded[index])
+            adjustment = (
+                min(delta, 3.25 - rounded[index])
+                if delta > 0
+                else max(delta, -rounded[index])
+            )
             rounded[index] = round(rounded[index] + adjustment, 4)
             delta = round(delta - adjustment, 4)
 
@@ -1144,6 +1242,62 @@ class WorkflowEngine:
         return NarrationScript.model_validate(
             script.model_copy(update={"scenes": fitted_scenes}).model_dump(mode="json")
         )
+
+    @staticmethod
+    def _tempo_fit_rate(
+        *,
+        speech_seconds: float,
+        scene_count: int,
+        budget_seconds: float,
+    ) -> float | None:
+        maximum_pause_seconds = 3.25 * max(0, scene_count - 1)
+        desired_speech_seconds = budget_seconds * 0.90 - maximum_pause_seconds
+        if desired_speech_seconds <= speech_seconds:
+            return None
+        tempo = speech_seconds / desired_speech_seconds
+        if not 0.85 <= tempo < 1.0:
+            return None
+        return tempo
+
+    def _tempo_fit_narration_items(
+        self,
+        items: Sequence[NarrationItem],
+        *,
+        scene_count: int,
+        budget_seconds: float,
+        output_root: Path,
+    ) -> tuple[list[NarrationItem] | None, float | None]:
+        tempo = self._tempo_fit_rate(
+            speech_seconds=sum(item.normalized_duration_seconds for item in items),
+            scene_count=scene_count,
+            budget_seconds=budget_seconds,
+        )
+        if tempo is None:
+            return None, None
+        adjusted_items = []
+        for item in items:
+            destination = output_root / f"{item.speech.scene_id}.wav"
+            probe = adjust_audio_tempo(
+                self.tools,
+                self.project_root / item.normalized_audio.path,
+                destination,
+                tempo=tempo,
+            )
+            adjusted_items.append(
+                item.model_copy(
+                    update={
+                        "normalized_audio": MediaReference(
+                            path=relative_path(destination, self.project_root),
+                            sha256=sha256_file(destination),
+                            mime_type="audio/wav",
+                        ),
+                        "normalized_duration_seconds": probe.duration_seconds,
+                        "normalized_sample_rate": probe.sample_rate,
+                        "normalized_channels": probe.channels,
+                    }
+                )
+            )
+        return adjusted_items, tempo
 
     def _duration_repair(
         self,
@@ -1158,7 +1312,11 @@ class WorkflowEngine:
         backend_id = self.config.task_bindings[task_id]
         descriptor = self.registry.descriptor(backend_id)
         prompt = self.prompts.get(task_id, language=self.config.output_language)
-        schema_hash = hash_value(self.prompts.schema(task_id))
+        schema_hash = hash_value(
+            restricted_json_schema(ExpandedSceneText.model_json_schema())
+            if duration_scale > 1
+            else self.prompts.schema(task_id)
+        )
         selected = set(selected_scene_ids)
         scene_repair_targets = []
         for scene in script.scenes:
@@ -1166,13 +1324,22 @@ class WorkflowEngine:
                 continue
             original_words = len(scene.spoken_text.split())
             target_words = max(1, round(original_words * duration_scale))
+            word_tolerance = 6 if duration_scale > 1 else 2
+            minimum_words = (
+                max(original_words + 1, target_words - word_tolerance)
+                if duration_scale > 1
+                else max(1, target_words - word_tolerance)
+            )
             scene_repair_targets.append(
                 {
                     "scene_id": scene.scene_id,
                     "original_word_count": original_words,
                     "target_word_count": target_words,
-                    "minimum_word_count": max(1, target_words - 2),
-                    "maximum_word_count": target_words + 2,
+                    "minimum_word_count": minimum_words,
+                    "maximum_word_count": target_words + word_tolerance,
+                    "minimum_word_delta": minimum_words - original_words,
+                    "target_word_delta": target_words - original_words,
+                    "maximum_word_delta": target_words + word_tolerance - original_words,
                 }
             )
         item_input = {
@@ -1185,6 +1352,9 @@ class WorkflowEngine:
             "selected_scene_ids": selected_scene_ids,
             "scene_repair_targets": scene_repair_targets,
             "output_language": self.config.output_language.value,
+            "repair_strategy": (
+                "per-scene-lengthening-v1" if duration_scale > 1 else "full-script-v1"
+            ),
         }
         item_id = "duration-repair-script"
         input_hash = hash_run_input(item_input)
@@ -1215,20 +1385,30 @@ class WorkflowEngine:
             )
             return repaired, reusable.usage
         workspace = self.store.workspace("narration", item_id=item_id)
-        execution = self.executor.structured(
-            task_id,
-            item_input,
-            RevisedScript,
-            invariant=lambda value: self._validate_duration_revision(
-                value,
-                script,
-                selected,
+        if duration_scale > 1:
+            repaired, item_usage, provider_response = self._lengthen_duration_by_scene(
+                script=script,
+                measured_timeline=measured_timeline,
+                duration_scale=duration_scale,
                 scene_repair_targets=scene_repair_targets,
-            ),
-        )
-        repaired = RevisedScript.model_validate(execution.artifact)
-        atomic_write_json(workspace.work_dir / "provider-response.json", execution.result.raw_response)
-        item_usage = _usage_list([execution.result.usage])
+                selected_scene_ids=selected,
+            )
+        else:
+            execution = self.executor.structured(
+                task_id,
+                item_input,
+                RevisedScript,
+                invariant=lambda value: self._validate_duration_revision(
+                    value,
+                    script,
+                    selected,
+                    scene_repair_targets=scene_repair_targets,
+                ),
+            )
+            repaired = RevisedScript.model_validate(execution.artifact)
+            item_usage = _usage_list([execution.result.usage])
+            provider_response = execution.result.raw_response
+        atomic_write_json(workspace.work_dir / "provider-response.json", provider_response)
         promoted = self.store.promote_item(
             workspace,
             repaired,
@@ -1241,6 +1421,107 @@ class WorkflowEngine:
             usage=item_usage,
         )
         return RevisedScript.model_validate(promoted), item_usage
+
+    def _lengthen_duration_by_scene(
+        self,
+        *,
+        script: NarrationScript,
+        measured_timeline: NarrationTimeline,
+        duration_scale: float,
+        scene_repair_targets: list[dict[str, int | str]],
+        selected_scene_ids: set[str],
+    ) -> tuple[RevisedScript, list[UsageRecord], dict[str, Any]]:
+        targets = {str(target["scene_id"]): target for target in scene_repair_targets}
+        timeline = {scene.scene_id: scene for scene in measured_timeline.scenes}
+        repaired_scenes = []
+        usage: list[UsageRecord] = []
+        responses: dict[str, Any] = {}
+        for scene in script.scenes:
+            if scene.scene_id not in selected_scene_ids:
+                repaired_scenes.append(scene)
+                continue
+            target = targets[scene.scene_id]
+            single_scene = scene.model_copy(update={"scene_id": "scene-001"})
+            single_script = NarrationScript(title=script.title, scenes=[single_scene])
+            single_target = {**target, "scene_id": "scene-001"}
+            measured_scene = timeline[scene.scene_id]
+            speech_seconds = measured_scene.speech_end_seconds - measured_scene.start_seconds
+            pause_seconds = measured_scene.end_seconds - measured_scene.speech_end_seconds
+            single_input = {
+                "script": single_script.model_dump(mode="json"),
+                "measured_timeline": {
+                    "scene_id": "scene-001",
+                    "speech_seconds": speech_seconds,
+                    "pause_seconds": pause_seconds,
+                },
+                "target_seconds": speech_seconds * duration_scale + pause_seconds,
+                "duration_scale": duration_scale,
+                "selected_scene_ids": ["scene-001"],
+                "scene_repair_targets": [single_target],
+                "output_language": self.config.output_language.value,
+                "source_scene_id": scene.scene_id,
+                "repair_strategy": "single-scene-lengthening-v2",
+            }
+            original_word_count = int(single_target["original_word_count"])
+            minimum_word_count = int(single_target["minimum_word_count"])
+            maximum_word_count = int(single_target["maximum_word_count"])
+            execution = self.executor.structured(
+                "duration_repair",
+                single_input,
+                ExpandedSceneText,
+                invariant=lambda value, repair_target=single_target: (
+                    self._validate_expanded_scene(value, repair_target)
+                ),
+                instruction_suffix=(
+                    "This is exactly one Scene expansion. The original spoken_text has "
+                    f"{original_word_count} whitespace-separated words. Return scene_id "
+                    f"'scene-001' and a complete spoken_text with {minimum_word_count}-"
+                    f"{maximum_word_count} words inclusive. Preserve the useful original "
+                    "sentences, then add enough concrete causal action or consequence to reach "
+                    "that range. Count the final words before returning; copying the original "
+                    "unchanged is invalid."
+                ),
+            )
+            expanded = ExpandedSceneText.model_validate(execution.artifact)
+            repaired_scene = scene.model_copy(
+                update={"spoken_text": expanded.spoken_text}
+            )
+            repaired_scenes.append(repaired_scene)
+            usage.extend(_usage_list([execution.result.usage]))
+            responses[scene.scene_id] = execution.result.raw_response
+        revision = RevisedScript(
+            script=NarrationScript(title=script.title, scenes=repaired_scenes),
+            dispositions=[],
+        )
+        self._validate_duration_revision(
+            revision,
+            script,
+            selected_scene_ids,
+            scene_repair_targets=scene_repair_targets,
+        )
+        return revision, usage, responses
+
+    @staticmethod
+    def _validate_expanded_scene(
+        expanded: ExpandedSceneText,
+        target: dict[str, int | str],
+    ) -> None:
+        if expanded.scene_id != str(target["scene_id"]):
+            raise BackendError(
+                "single-Scene Duration Repair changed the Scene ID",
+                kind=ErrorKind.INVALID_OUTPUT,
+            )
+        actual = len(expanded.spoken_text.split())
+        minimum = int(target["minimum_word_count"])
+        maximum = int(target["maximum_word_count"])
+        if not minimum <= actual <= maximum:
+            raise BackendError(
+                (
+                    f"single-Scene Duration Repair has {actual} words; required inclusive range "
+                    f"is {minimum}-{maximum}"
+                ),
+                kind=ErrorKind.INVALID_OUTPUT,
+            )
 
     @staticmethod
     def _validate_duration_revision(
@@ -1430,7 +1711,12 @@ class WorkflowEngine:
         return [by_id[scene.scene_id] for scene in script.scenes], usage
 
     def _assemble_narration(
-        self, script: NarrationScript, items: Sequence[NarrationItem], *, duration_repaired: bool
+        self,
+        script: NarrationScript,
+        items: Sequence[NarrationItem],
+        *,
+        duration_repaired: bool,
+        tempo_adjustment: float = 1.0,
     ) -> NarrationBundle:
         assembly_root = self.store.root / "work" / "narration" / f"assembly-{os.urandom(4).hex()}"
         assembly_root.mkdir(parents=True, exist_ok=False)
@@ -1458,7 +1744,13 @@ class WorkflowEngine:
             workspace_root=self.project_root,
             fps=self.config.fps,
         )
-        return NarrationBundle(script=script, timeline=timeline, items=list(items), duration_repaired=duration_repaired)
+        return NarrationBundle(
+            script=script,
+            timeline=timeline,
+            items=list(items),
+            duration_repaired=duration_repaired,
+            tempo_adjustment=tempo_adjustment,
+        )
 
     def _captions(self, narration: NarrationBundle) -> CaptionBundle:
         input_data = {

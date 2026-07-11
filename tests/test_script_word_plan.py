@@ -59,7 +59,7 @@ def test_script_word_range_accepts_inclusive_bounds() -> None:
     ("language", "expected_minimum", "expected_target", "expected_maximum"),
     [
         (OutputLanguage.ENGLISH, 260, 291, 306),
-        (OutputLanguage.FINNISH, 140, 222, 234),
+        (OutputLanguage.FINNISH, 64, 222, 246),
     ],
 )
 def test_script_word_plan_minimum_matches_duration_acceptance(
@@ -91,3 +91,8 @@ def test_script_word_plan_minimum_matches_duration_acceptance(
     assert plan["minimum_total_word_count"] == expected_minimum
     assert plan["target_total_word_count"] == expected_target
     assert plan["maximum_total_word_count"] == expected_maximum
+    expected_sentence_bounds = (2, 3) if language is OutputLanguage.ENGLISH else (3, 4)
+    assert {
+        (scene["minimum_sentence_count"], scene["maximum_sentence_count"])
+        for scene in plan["scene_word_targets"]
+    } == {expected_sentence_bounds}

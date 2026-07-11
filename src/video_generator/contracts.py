@@ -387,7 +387,7 @@ class StoryOutline(VersionedContract):
 class ScriptScene(ContractModel):
     scene_id: str
     spoken_text: Annotated[str, Field(min_length=1, max_length=10000)]
-    pause_after_seconds: Annotated[FiniteFloat, Field(ge=0, le=3)] = 0.15
+    pause_after_seconds: Annotated[FiniteFloat, Field(ge=0, le=3.25)] = 0.15
 
 
 class NarrationScript(VersionedContract):

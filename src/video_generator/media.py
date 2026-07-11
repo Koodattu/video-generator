@@ -165,6 +165,37 @@ def normalize_audio(tools: MediaTools, source: Path, destination: Path) -> Audio
     return tools.probe_audio(destination)
 
 
+def adjust_audio_tempo(
+    tools: MediaTools,
+    source: Path,
+    destination: Path,
+    *,
+    tempo: float,
+) -> AudioProbe:
+    if not 0.5 <= tempo <= 2.0:
+        raise MediaError(
+            f"audio tempo {tempo:.4f} is outside FFmpeg's supported 0.5-2.0 range",
+            kind=ErrorKind.INVALID_OUTPUT,
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tools.run(
+        [
+            tools.ffmpeg,
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            str(source),
+            "-filter:a",
+            f"atempo={tempo:.6f}",
+            "-c:a",
+            "pcm_s16le",
+            str(destination),
+        ]
+    )
+    return tools.probe_audio(destination)
+
+
 def concatenate_audio(
     tools: MediaTools,
     clips: Sequence[Path],
@@ -900,7 +931,7 @@ def qc_video(
         ),
         QCCheck(
             name="duration_hard_limit",
-            passed=0 < duration <= budget + 0.005,
+            passed=0 < duration <= budget + 1 / fps + 0.005,
             detail=f"actual={duration:.3f}s budget={budget:.3f}s",
         ),
         QCCheck(

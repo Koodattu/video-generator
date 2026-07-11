@@ -8,7 +8,7 @@ from video_generator.workflow import INTERNAL_REVISION
 
 
 def test_ass_highlights_only_the_current_word(tmp_path: Path) -> None:
-    assert INTERNAL_REVISION == "media-workflow-v2"
+    assert INTERNAL_REVISION == "media-workflow-v3"
     track = CaptionTrack(
         language=OutputLanguage.FINNISH,
         words=[

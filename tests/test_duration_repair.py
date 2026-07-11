@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +9,7 @@ from video_generator.contracts import (
     MediaReference,
     NarrationScript,
     NarrationTimeline,
+    OutputLanguage,
     RevisedScript,
     ScriptScene,
     TimelineScene,
@@ -352,9 +354,128 @@ def test_pause_fit_can_extend_short_narration_to_acceptance_floor() -> None:
     assert [scene.spoken_text for scene in fitted.scenes] == [
         scene.spoken_text for scene in script.scenes
     ]
-    assert sum(scene.pause_after_seconds for scene in fitted.scenes) == pytest.approx(12)
-    assert all(scene.pause_after_seconds == 3 for scene in fitted.scenes[:-1])
+    assert sum(scene.pause_after_seconds for scene in fitted.scenes) == pytest.approx(13)
+    assert all(scene.pause_after_seconds == 3.25 for scene in fitted.scenes[:-1])
     assert fitted.scenes[-1].pause_after_seconds == 0
+
+
+def test_duration_lengthening_repairs_each_scene_independently() -> None:
+    audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text=" ".join(["one"] * 10),
+                pause_after_seconds=1,
+            ),
+            ScriptScene(
+                scene_id="scene-002",
+                spoken_text=" ".join(["two"] * 10),
+                pause_after_seconds=0,
+            ),
+        ],
+    )
+    timeline = NarrationTimeline(
+        narration_audio=audio,
+        duration_seconds=21,
+        delivery_duration_seconds=21,
+        scenes=[
+            TimelineScene(
+                scene_id="scene-001",
+                audio=audio,
+                start_seconds=0,
+                speech_end_seconds=10,
+                end_seconds=11,
+            ),
+            TimelineScene(
+                scene_id="scene-002",
+                audio=audio,
+                start_seconds=11,
+                speech_end_seconds=21,
+                end_seconds=21,
+            ),
+        ],
+    )
+    targets = [
+        {
+            "scene_id": scene_id,
+            "original_word_count": 10,
+            "target_word_count": 15,
+            "minimum_word_count": 13,
+            "maximum_word_count": 17,
+            "minimum_word_delta": 3,
+            "target_word_delta": 5,
+            "maximum_word_delta": 7,
+        }
+        for scene_id in ("scene-001", "scene-002")
+    ]
+
+    class Executor:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def structured(
+            self,
+            task_id,
+            input_data,
+            output_model,
+            *,
+            invariant,
+            instruction_suffix,
+        ):
+            self.requests.append(input_data)
+            assert "whitespace-separated words" in instruction_suffix
+            target_words = int(input_data["scene_repair_targets"][0]["target_word_count"])
+            artifact = output_model(
+                scene_id="scene-001",
+                spoken_text=" ".join(["word"] * target_words),
+            )
+            invariant(artifact)
+            return SimpleNamespace(
+                artifact=artifact,
+                result=SimpleNamespace(usage=None, raw_response={"target_words": target_words}),
+            )
+
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(output_language=OutputLanguage.FINNISH)
+    engine.executor = Executor()
+
+    revision, usage, responses = engine._lengthen_duration_by_scene(
+        script=script,
+        measured_timeline=timeline,
+        duration_scale=1.5,
+        scene_repair_targets=targets,
+        selected_scene_ids={"scene-001", "scene-002"},
+    )
+
+    assert len(engine.executor.requests) == 2
+    assert [scene.scene_id for scene in revision.script.scenes] == ["scene-001", "scene-002"]
+    assert [len(scene.spoken_text.split()) for scene in revision.script.scenes] == [15, 15]
+    assert usage == []
+    assert set(responses) == {"scene-001", "scene-002"}
+
+
+def test_tempo_fit_uses_small_pitch_preserving_slowdown_only() -> None:
+    tempo = WorkflowEngine._tempo_fit_rate(
+        speech_seconds=77.8,
+        scene_count=8,
+        budget_seconds=120,
+    )
+
+    assert tempo == pytest.approx(77.8 / (108 - 22.75))
+    assert 0.90 < tempo < 0.92
+
+
+def test_tempo_fit_rejects_large_slowdown() -> None:
+    assert (
+        WorkflowEngine._tempo_fit_rate(
+            speech_seconds=60,
+            scene_count=8,
+            budget_seconds=120,
+        )
+        is None
+    )
 
 
 def test_duration_acceptance_keeps_an_exact_ceiling_with_an_eighty_five_percent_floor() -> None:

@@ -189,6 +189,47 @@ def test_cloud_structured_output_remains_capped_at_one_validation_repair() -> No
     assert len(requests) == 2
 
 
+@pytest.mark.parametrize("task_id", ["script_draft", "script_revision", "duration_repair"])
+def test_cloud_length_sensitive_output_allows_two_validation_repairs(task_id: str) -> None:
+    requests = []
+
+    class Backend:
+        def complete(self, request):
+            requests.append(request)
+            return StructuredTextResult(data={"value": "ok" if len(requests) == 3 else "bad"})
+
+    backend = Backend()
+    registry = SimpleNamespace(
+        get=lambda backend_id: backend,
+        descriptor=lambda backend_id: SimpleNamespace(reservation_usd=0.0, cloud=True),
+    )
+    store = SimpleNamespace(
+        config=SimpleNamespace(
+            task_bindings={task_id: "cloud:fixture"},
+            output_language=OutputLanguage.ENGLISH,
+        ),
+        reserve_cost=lambda *args, **kwargs: None,
+    )
+    prompts = SimpleNamespace(
+        get=lambda *args, **kwargs: SimpleNamespace(instructions="Return data.", version="fixture"),
+        schema=lambda task_id: {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        },
+    )
+
+    execution = TaskExecutor(registry=registry, store=store, prompts=prompts).structured(
+        task_id,
+        {},
+        _ValidatedOutput,
+    )
+
+    assert execution.artifact == _ValidatedOutput(value="ok")
+    assert len(requests) == 3
+    assert "inclusive numeric range" in requests[1].instructions
+
+
 def test_image_prompt_compile_request_is_english_for_finnish_run() -> None:
     requests = []
 

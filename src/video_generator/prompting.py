@@ -8,7 +8,7 @@ from .schema import restricted_json_schema
 from .task_models import TASK_OUTPUT_MODELS
 
 
-PROMPT_SET_VERSION = "2026-07-11.v11"
+PROMPT_SET_VERSION = "2026-07-11.v13"
 
 
 SHARED_RULES = """
@@ -90,6 +90,11 @@ review comments in spoken_text. Fit each Scene's word envelope and provisional d
 The supplied scene_word_targets and target_total_word_count are the writing plan. The full script
 must contain between minimum_total_word_count and maximum_total_word_count words inclusive. The
 validator counts words as len(spoken_text.split()).
+For every Scene, meet its target_word_count closely and use between its minimum_sentence_count and
+maximum_sentence_count complete spoken sentences. Before returning, count whitespace-separated words
+in every Scene and in the full script. If a Scene is short, add causally useful action, resistance,
+decision, consequence, or setup/payoff detail; do not substitute adjective lists or compress several
+ideas into compounds.
 
 Make every sentence understandable on first hearing. Use concrete verbs, controlled sentence and
 clause length, natural spoken rhythm, and event-driven transitions. Avoid generic throat-clearing,
@@ -164,14 +169,18 @@ durations and duration_scale to shorten or lengthen those passages naturally tow
 unselected text. When shortening, make a deletion-first minimal edit: retain the original sentence
 order and wording, removing only enough nonessential modifiers, clauses, or complete sentences to
 meet the target. Do not paraphrase or rewrite the passage from scratch. When lengthening, restore
-concrete detail from the input rather than adding filler. For every selected Scene, keep
+concrete detail from the input rather than adding filler. A positive minimum_word_delta is an
+explicit requirement to add at least that many whitespace-separated words to that Scene: preserve
+its useful existing text, then insert enough complete, causally relevant spoken sentences. Never
+return an unchanged or shorter Scene when its minimum_word_delta is positive. For every selected Scene, keep
 pause_after_seconds unchanged and meet the supplied
 target_word_count within its inclusive minimum_word_count/maximum_word_count bounds. The validator
 counts words exactly as len(spoken_text.split()): every nonempty whitespace-separated token is one
 word. Count and verify each selected Scene before returning. If correcting an invalid response,
 change the deficient spoken_text by the exact reported add/remove delta; changing only dispositions
-is not a repair. A claimed edit with unchanged word count is not a repair. Return the full script
-plus dispositions describing repaired Scenes.
+is not a repair. A claimed edit with unchanged word count is not a repair. Return exactly the
+supplied output schema. A whole-script repair returns the full script plus dispositions; a bounded
+single-Scene expansion returns only that Scene ID and its complete expanded spoken_text.
 """,
     "visual_plan": """
 Create a provider-neutral Visual Plan after narration timing is final. Define the resolved Style
