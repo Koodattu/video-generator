@@ -20,7 +20,7 @@ from .contracts import (
 )
 from .errors import VideoGeneratorError
 from .media import MediaTools
-from .profiles import BACKEND_DESCRIPTORS
+from .profiles import BACKEND_DESCRIPTORS, image_generation_dimensions
 from .registry import BackendRegistry
 
 
@@ -129,9 +129,25 @@ def estimate_cost(
     image = BACKEND_DESCRIPTORS[config.task_bindings["image_generate"]]
     if "image_generate" in active_tasks and image.cloud:
         quality_factor = 0.6 if config.quality is Quality.DRAFT else 2.0
+        generation_width, generation_height = image_generation_dimensions(
+            image.backend_id,
+            delivery_width=config.delivery_width,
+            delivery_height=config.delivery_height,
+        )
+        pixel_factor = max(
+            1.0,
+            generation_width * generation_height / (2048 * 1152),
+        )
+        reference_factor = 1.75 if image.supports_reference_images else 1.0
         generation_count = scene_count * (2 if config.quality is Quality.FINAL else 1)
         generation_count = max(0, generation_count - completed_calls.get("image_generate", 0))
-        line_items["images"] = float(image.reservation_usd) * quality_factor * generation_count
+        line_items["images"] = (
+            float(image.reservation_usd)
+            * quality_factor
+            * pixel_factor
+            * reference_factor
+            * generation_count
+        )
 
     if "music_generate" in active_tasks and config.music_enabled:
         music = BACKEND_DESCRIPTORS[config.task_bindings["music_generate"]]

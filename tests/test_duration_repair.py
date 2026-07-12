@@ -312,7 +312,7 @@ def test_pause_fit_defers_to_script_repair_when_speech_exceeds_budget() -> None:
     assert WorkflowEngine._fit_pauses_to_budget(script, timeline, 120) is None
 
 
-def test_pause_fit_can_extend_short_narration_to_acceptance_floor() -> None:
+def test_pause_fit_does_not_pad_short_narration_with_silence() -> None:
     audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
     script = NarrationScript(
         title="Fixture",
@@ -348,15 +348,170 @@ def test_pause_fit_can_extend_short_narration_to_acceptance_floor() -> None:
         ],
     )
 
-    fitted = WorkflowEngine._fit_pauses_to_budget(script, timeline, 120)
+    assert WorkflowEngine._fit_pauses_to_budget(script, timeline, 120) is None
+
+
+def test_legacy_pause_fit_can_expand_silence_for_resume_compatibility() -> None:
+    audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id=f"scene-{index:03d}",
+                spoken_text=f"Scene {index} remains unchanged.",
+                pause_after_seconds=0.5 if index < 5 else 0,
+            )
+            for index in range(1, 6)
+        ],
+    )
+    spans = [
+        (0, 18, 18.5),
+        (18.5, 36.5, 37),
+        (37, 55, 55.5),
+        (55.5, 73.5, 74),
+        (74, 92, 92),
+    ]
+    timeline = NarrationTimeline(
+        narration_audio=audio,
+        duration_seconds=92,
+        delivery_duration_seconds=92,
+        scenes=[
+            TimelineScene(
+                scene_id=f"scene-{index:03d}",
+                audio=audio,
+                start_seconds=start,
+                speech_end_seconds=speech_end,
+                end_seconds=end,
+            )
+            for index, (start, speech_end, end) in enumerate(spans, start=1)
+        ],
+    )
+
+    fitted = WorkflowEngine._fit_pauses_to_budget(
+        script,
+        timeline,
+        120,
+        allow_expansion=True,
+    )
 
     assert fitted is not None
-    assert [scene.spoken_text for scene in fitted.scenes] == [
-        scene.spoken_text for scene in script.scenes
+    assert sum(scene.pause_after_seconds for scene in fitted.scenes) == pytest.approx(13, abs=0.001)
+    assert all(scene.pause_after_seconds <= 3.25 for scene in fitted.scenes)
+
+
+def test_legacy_pause_fit_preserves_exact_over_budget_rounding() -> None:
+    audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    pauses = [2.9, 1.3, 2.3, 2.4, 2.4, 2.5, 0]
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id=f"scene-{index:03d}",
+                spoken_text=f"Scene {index} remains unchanged.",
+                pause_after_seconds=pause,
+            )
+            for index, pause in enumerate(pauses, start=1)
+        ],
+    )
+    cursor = 0.0
+    speech_duration = 45.632 / len(pauses)
+    timeline_scenes = []
+    for index, pause in enumerate(pauses, start=1):
+        start = cursor
+        speech_end = start + speech_duration
+        cursor = speech_end + pause
+        timeline_scenes.append(
+            TimelineScene(
+                scene_id=f"scene-{index:03d}",
+                audio=audio,
+                start_seconds=start,
+                speech_end_seconds=speech_end,
+                end_seconds=cursor,
+            )
+        )
+    timeline = NarrationTimeline(
+        narration_audio=audio,
+        duration_seconds=cursor,
+        delivery_duration_seconds=cursor,
+        scenes=timeline_scenes,
+    )
+
+    fitted = WorkflowEngine._fit_pauses_to_budget(
+        script,
+        timeline,
+        51,
+        allow_expansion=True,
+    )
+
+    assert fitted is not None
+    assert [scene.pause_after_seconds for scene in fitted.scenes] == [
+        1.1282,
+        0.5057,
+        0.8946,
+        0.9335,
+        0.9335,
+        0.9724,
+        0,
     ]
-    assert sum(scene.pause_after_seconds for scene in fitted.scenes) == pytest.approx(13)
-    assert all(scene.pause_after_seconds == 3.25 for scene in fitted.scenes[:-1])
-    assert fitted.scenes[-1].pause_after_seconds == 0
+
+
+def test_legacy_tempo_fit_preserves_resume_calculation() -> None:
+    assert WorkflowEngine._legacy_tempo_fit_rate(
+        speech_seconds=88,
+        scene_count=5,
+        budget_seconds=120,
+    ) == pytest.approx(88 / 95)
+
+
+def test_legacy_narration_item_fit_selects_legacy_rate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.continuity_policy_enabled = False
+    calls = []
+
+    def legacy_rate(**kwargs):
+        calls.append(kwargs)
+        return None
+
+    def current_rate(**kwargs):
+        raise AssertionError("current pacing policy should not run for a legacy resume")
+
+    monkeypatch.setattr(engine, "_legacy_tempo_fit_rate", legacy_rate)
+    monkeypatch.setattr(engine, "_tempo_fit_rate", current_rate)
+
+    adjusted, tempo = engine._tempo_fit_narration_items(
+        [SimpleNamespace(normalized_duration_seconds=88.0)],
+        pause_seconds=4,
+        budget_seconds=120,
+        output_root=tmp_path,
+    )
+
+    assert adjusted is None
+    assert tempo is None
+    assert calls == [{"speech_seconds": 88.0, "scene_count": 1, "budget_seconds": 120}]
+
+
+def test_new_scripts_reject_long_authored_pauses() -> None:
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text="The first event changes the situation.",
+                pause_after_seconds=1.2,
+            ),
+            ScriptScene(
+                scene_id="scene-002",
+                spoken_text="The second event resolves it.",
+                pause_after_seconds=0,
+            ),
+        ],
+    )
+
+    with pytest.raises(BackendError, match="0.75-second production maximum"):
+        WorkflowEngine._validate_authored_pauses(script)
 
 
 def test_duration_lengthening_repairs_each_scene_independently() -> None:
@@ -458,24 +613,32 @@ def test_duration_lengthening_repairs_each_scene_independently() -> None:
 
 def test_tempo_fit_uses_small_pitch_preserving_slowdown_only() -> None:
     tempo = WorkflowEngine._tempo_fit_rate(
-        speech_seconds=77.8,
-        scene_count=8,
+        speech_seconds=92,
+        pause_seconds=4,
         budget_seconds=120,
     )
 
-    assert tempo == pytest.approx(77.8 / (108 - 22.75))
-    assert 0.90 < tempo < 0.92
+    assert tempo == pytest.approx(92 / (108 - 4))
+    assert 0.88 < tempo < 0.89
 
 
 def test_tempo_fit_rejects_large_slowdown() -> None:
     assert (
         WorkflowEngine._tempo_fit_rate(
             speech_seconds=60,
-            scene_count=8,
+            pause_seconds=4,
             budget_seconds=120,
         )
         is None
     )
+
+
+def test_tempo_fit_uses_minimum_rate_when_it_reaches_accepted_floor() -> None:
+    assert WorkflowEngine._tempo_fit_rate(
+        speech_seconds=84,
+        pause_seconds=4,
+        budget_seconds=120,
+    ) == pytest.approx(0.85)
 
 
 def test_duration_acceptance_keeps_an_exact_ceiling_with_an_eighty_five_percent_floor() -> None:

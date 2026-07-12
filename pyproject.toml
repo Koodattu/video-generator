@@ -12,12 +12,15 @@ license = { file = "LICENSE" }
 authors = [{ name = "Juha" }]
 dependencies = [
   "ddgs==9.14.4",
+  "fastapi>=0.135,<0.136",
   "langdetect==1.0.9",
   "pydantic>=2.11,<3",
+  "uvicorn>=0.41,<0.42",
 ]
 
 [project.optional-dependencies]
 dev = [
+  "httpx>=0.28,<1",
   "pytest>=8.3,<9",
   "pytest-cov>=6,<7",
 ]

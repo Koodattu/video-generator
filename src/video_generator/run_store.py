@@ -12,6 +12,7 @@ from typing import Any, IO, Iterable, TypeVar
 from pydantic import BaseModel
 
 from .contracts import (
+    CloudCallRecord,
     CreativeBrief,
     PUBLIC_STAGES,
     ResolvedRunConfig,
@@ -53,14 +54,15 @@ class RunExecutionLock:
 
     def __enter__(self) -> "RunExecutionLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+b")
-        handle.seek(0)
-        if handle.read(1) == b"":
-            handle.seek(0)
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
+        handle: IO[bytes] | None = None
         try:
+            handle = self.path.open("a+b")
+            handle.seek(0)
+            if handle.read(1) == b"":
+                handle.seek(0)
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
             if os.name == "nt":
                 import msvcrt
 
@@ -70,7 +72,8 @@ class RunExecutionLock:
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            handle.close()
+            if handle is not None:
+                handle.close()
             raise CheckpointError(
                 "this Run Bundle is already executing in another process",
                 kind=ErrorKind.NOT_READY,
@@ -147,6 +150,37 @@ class RunStore:
                 "Run cost reservation ledger does not match the recorded total",
                 kind=ErrorKind.INVALID_OUTPUT,
             )
+        call_ids = [record.call_id for record in self.manifest.cloud_calls]
+        if len(call_ids) != len(set(call_ids)):
+            raise CheckpointError(
+                "Run cloud-call ledger contains duplicate call IDs",
+                kind=ErrorKind.INVALID_OUTPUT,
+            )
+        if self.manifest.cloud_cost_ledger_version:
+            direct_calls = {
+                record.call_id: record
+                for record in self.manifest.cloud_calls
+                if not record.inherited and not record.legacy
+            }
+            reservations = {
+                usage.call_id: usage
+                for usage in self.manifest.cost_reservations
+                if usage.call_id
+            }
+            if set(direct_calls) != set(reservations):
+                raise CheckpointError(
+                    "Run cloud-call ledger does not match direct cost reservations",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                )
+            if any(
+                abs(float(record.reserved_usd) - float(reservations[call_id].reserved_usd))
+                > 0.000001
+                for call_id, record in direct_calls.items()
+            ):
+                raise CheckpointError(
+                    "Run cloud-call reservation amounts do not match the reservation ledger",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                )
 
     @classmethod
     def create(
@@ -184,6 +218,7 @@ class RunStore:
             config_hash=hash_value(config_data),
             brief_hash=hash_value(brief_data),
             frozen_assets_hash=hash_value(frozen_assets),
+            cloud_cost_ledger_version=1,
         )
         atomic_write_json(root / "manifest.json", manifest.model_dump(mode="json"))
         return cls(root)
@@ -602,7 +637,79 @@ class RunStore:
         self.manifest.warnings.append(f"intentionally stopped after {stage}")
         self._save_manifest()
 
-    def reserve_cost(self, amount: float, *, task_id: str, backend_id: str) -> None:
+    @staticmethod
+    def _legacy_cloud_calls_from_stages(
+        stages: dict[str, StageRecord],
+        *,
+        incurred_in_run_id: str,
+        inherited: bool,
+        pricing_snapshot: str,
+    ) -> list[CloudCallRecord]:
+        calls: list[CloudCallRecord] = []
+        for stage in PUBLIC_STAGES:
+            stage_record = stages.get(stage)
+            if stage_record is None:
+                continue
+            for index, usage in enumerate(stage_record.usage, start=1):
+                if (
+                    float(usage.reserved_usd) <= 0
+                    and usage.estimated_usd is None
+                    and usage.actual_usd is None
+                ):
+                    continue
+                cost_known = usage.estimated_usd is not None or usage.actual_usd is not None
+                calls.append(
+                    CloudCallRecord(
+                        call_id=(
+                            f"legacy-{incurred_in_run_id}-{stage}-{index:03d}"
+                        ),
+                        task_id=usage.task_id,
+                        backend_id=usage.backend_id,
+                        stage=stage,
+                        status="settled" if cost_known else "unresolved",
+                        provider_request_id=usage.provider_request_id,
+                        reserved_usd=usage.reserved_usd,
+                        estimated_usd=usage.estimated_usd,
+                        actual_usd=usage.actual_usd,
+                        billable_units=dict(usage.billable_units),
+                        pricing_snapshot=usage.pricing_snapshot or pricing_snapshot,
+                        cost_basis=(
+                            usage.cost_basis
+                            or "legacy stage usage predates the per-call cost ledger"
+                        ),
+                        incurred_in_run_id=incurred_in_run_id,
+                        inherited=inherited,
+                        legacy=True,
+                        started_at=stage_record.started_at or utc_now(),
+                        completed_at=stage_record.completed_at or utc_now(),
+                        elapsed_seconds=usage.elapsed_seconds,
+                        warnings=list(
+                            dict.fromkeys(
+                                [
+                                    *usage.warnings,
+                                    "legacy usage could not be reconstructed as an exact provider call",
+                                ]
+                            )
+                        ),
+                    )
+                )
+        return calls
+
+    def _bootstrap_legacy_cloud_ledger(self) -> None:
+        if self.manifest.cloud_cost_ledger_version:
+            return
+        self.manifest.cloud_calls.extend(
+            self._legacy_cloud_calls_from_stages(
+                self.manifest.stages,
+                incurred_in_run_id=self.manifest.run_id,
+                inherited=False,
+                pricing_snapshot=self.config.pricing_snapshot,
+            )
+        )
+        self.manifest.cloud_cost_ledger_version = 1
+
+    def reserve_cost(self, amount: float, *, task_id: str, backend_id: str) -> str:
+        self._bootstrap_legacy_cloud_ledger()
         ceiling = float(self.config.cost_ceiling_usd)
         prospective = float(self.manifest.reserved_cost_usd) + amount
         if prospective > ceiling + 1e-9:
@@ -614,13 +721,95 @@ class RunStore:
                 kind=ErrorKind.BUDGET_EXCEEDED,
                 action="Increase cost_ceiling_usd explicitly or choose a lower-cost Run Profile.",
             )
+        call_id = uuid.uuid4().hex
         self.manifest.reserved_cost_usd = prospective
         self.manifest.cost_reservations.append(
             UsageRecord(
                 task_id=task_id,
                 backend_id=backend_id,
+                call_id=call_id,
                 reserved_usd=amount,
                 warnings=["pre-call conservative reservation"],
+            )
+        )
+        running_stage = next(
+            (
+                stage
+                for stage in reversed(PUBLIC_STAGES)
+                if self.manifest.stages.get(stage)
+                and self.manifest.stages[stage].status == "running"
+            ),
+            "",
+        )
+        self.manifest.cloud_calls.append(
+            CloudCallRecord(
+                call_id=call_id,
+                task_id=task_id,
+                backend_id=backend_id,
+                stage=running_stage,
+                reserved_usd=amount,
+                pricing_snapshot=self.config.pricing_snapshot,
+                incurred_in_run_id=self.manifest.run_id,
+                warnings=["pre-call conservative reservation"],
+            )
+        )
+        self._save_manifest()
+        return call_id
+
+    def settle_cost(self, call_id: str, usage: UsageRecord) -> None:
+        record = next((item for item in self.manifest.cloud_calls if item.call_id == call_id), None)
+        if record is None:
+            raise CheckpointError(
+                f"cloud call ledger entry does not exist: {call_id}",
+                kind=ErrorKind.INVALID_OUTPUT,
+            )
+        cost_known = usage.estimated_usd is not None or usage.actual_usd is not None
+        record.status = "settled" if cost_known else "unresolved"
+        record.provider_request_id = usage.provider_request_id
+        record.estimated_usd = usage.estimated_usd
+        record.actual_usd = usage.actual_usd
+        record.billable_units = dict(usage.billable_units)
+        record.pricing_snapshot = usage.pricing_snapshot or self.config.pricing_snapshot
+        record.cost_basis = usage.cost_basis
+        record.elapsed_seconds = usage.elapsed_seconds
+        record.completed_at = utc_now()
+        record.warnings = list(dict.fromkeys([*record.warnings, *usage.warnings]))
+        if not cost_known:
+            record.warnings = list(
+                dict.fromkeys(
+                    [*record.warnings, "provider call completed but billable cost is unresolved"]
+                )
+            )
+        self._save_manifest()
+
+    def mark_cost_unresolved(
+        self,
+        call_id: str,
+        *,
+        elapsed_seconds: float,
+        error: BaseException,
+    ) -> None:
+        record = next((item for item in self.manifest.cloud_calls if item.call_id == call_id), None)
+        if record is None:
+            return
+        record.status = "unresolved"
+        record.elapsed_seconds = elapsed_seconds
+        record.completed_at = utc_now()
+        if isinstance(error, VideoGeneratorError):
+            record.error = {
+                "kind": error.kind.value,
+                "message": error.message,
+                "action": error.action,
+            }
+        else:
+            record.error = {
+                "kind": ErrorKind.INTERNAL.value,
+                "message": str(error) or type(error).__name__,
+                "action": None,
+            }
+        record.warnings = list(
+            dict.fromkeys(
+                [*record.warnings, "provider call failed; billing outcome could not be confirmed"]
             )
         )
         self._save_manifest()
@@ -686,6 +875,27 @@ class RunStore:
                 for path_value in copied_record.output_paths
             }
             child.manifest.stages[stage] = copied_record
+        upstream_stages = {stage for stage, _ in upstream}
+        inherited_calls = [
+            call.model_copy(
+                deep=True,
+                update={
+                    "inherited": True,
+                    "incurred_in_run_id": call.incurred_in_run_id or parent.manifest.run_id,
+                },
+            )
+            for call in parent.manifest.cloud_calls
+            if call.stage in upstream_stages
+        ]
+        if not inherited_calls:
+            inherited_calls = child._legacy_cloud_calls_from_stages(
+                child.manifest.stages,
+                incurred_in_run_id=parent.manifest.run_id,
+                inherited=True,
+                pricing_snapshot=parent.config.pricing_snapshot,
+            )
+        child.manifest.cloud_calls = inherited_calls
+        child.manifest.cloud_cost_ledger_version = 1
         child._save_manifest()
         return child
 

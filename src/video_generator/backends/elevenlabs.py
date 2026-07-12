@@ -239,6 +239,9 @@ class ElevenLabsSpeechBackend(_ElevenLabsClient):
                 provider_request_id=provider_request_id,
                 input_units=float(character_cost or len(request.text)),
                 output_units=duration,
+                billable_units={
+                    "tts_characters": float(character_cost or len(request.text))
+                },
                 reserved_usd=self.descriptor.reservation_usd,
             ),
         )
@@ -268,6 +271,7 @@ class ElevenLabsAlignmentBackend(_ElevenLabsClient):
             audio_path.relative_to(self.run_root)
         except ValueError as exc:
             raise BackendError("alignment input is outside the Run workspace", kind=ErrorKind.UNSUPPORTED) from exc
+        audio_seconds = self.media.probe_audio(audio_path).duration_seconds
         body, content_type = multipart_body({"text": request.transcript}, [("file", audio_path, None)])
         response = self.http.request(
             "POST",
@@ -308,7 +312,8 @@ class ElevenLabsAlignmentBackend(_ElevenLabsClient):
                 task_id="caption_alignment",
                 backend_id=self.descriptor.backend_id,
                 provider_request_id=provider_request_id,
-                input_units=len(request.transcript),
+                input_units=audio_seconds,
+                billable_units={"audio_seconds": audio_seconds},
                 reserved_usd=self.descriptor.reservation_usd,
             ),
         )
@@ -365,6 +370,7 @@ class ElevenLabsMusicBackend(_ElevenLabsClient):
                 backend_id=self.descriptor.backend_id,
                 provider_request_id=provider_request_id,
                 output_units=probe.duration_seconds,
+                billable_units={"music_seconds": probe.duration_seconds},
                 reserved_usd=self.descriptor.reservation_usd,
             ),
         )

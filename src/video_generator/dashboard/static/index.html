@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Video Generator · Run Room</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="run-rail" aria-label="Runs">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32" role="img">
+              <rect x="3" y="5" width="26" height="22" rx="7"></rect>
+              <path d="m13 11 8 5-8 5z"></path>
+            </svg>
+          </span>
+          <span>
+            <strong>Run Room</strong>
+            <small>Video Generator</small>
+          </span>
+        </div>
+
+        <button class="button button-primary new-run-button" id="new-run-button" type="button">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12"></path></svg>
+          New run
+        </button>
+
+        <label class="search-field">
+          <span class="sr-only">Filter runs</span>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5"></circle><path d="m12.5 12.5 4 4"></path></svg>
+          <input id="run-filter" type="search" placeholder="Filter runs">
+        </label>
+
+        <div class="rail-section-label">
+          <span>Recent runs</span>
+          <span id="run-count" class="numeric">0</span>
+        </div>
+        <nav class="run-list" id="run-list" aria-live="polite"></nav>
+
+        <div class="rail-footer">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span>Local control plane</span>
+          <span id="app-version" class="numeric"></span>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section class="empty-state" id="empty-state">
+          <div class="empty-visual" aria-hidden="true">
+            <div class="empty-frame frame-back"></div>
+            <div class="empty-frame frame-mid"></div>
+            <div class="empty-frame frame-front">
+              <svg viewBox="0 0 80 54"><path d="M8 42 26 24l12 11 12-16 22 23"></path><circle cx="22" cy="16" r="5"></circle></svg>
+            </div>
+          </div>
+          <p class="eyebrow">Production workspace</p>
+          <h1>Every scene, model, artifact, and dollar—one place.</h1>
+          <p>Start a run or choose one from the rail to inspect its live pipeline.</p>
+          <button class="button button-primary" id="empty-new-run" type="button">Start a new run</button>
+        </section>
+
+        <section class="run-workspace is-hidden" id="run-workspace">
+          <header class="run-header">
+            <div class="run-heading">
+              <div class="heading-meta">
+                <span class="status-pill" id="run-status">Created</span>
+                <span id="run-id" class="run-id numeric"></span>
+              </div>
+              <h1 id="run-title">Untitled run</h1>
+              <p id="run-subtitle"></p>
+            </div>
+            <div class="header-actions">
+              <div class="header-cost" title="Calculated list-price cost">
+                <span>List-price cost</span>
+                <strong id="header-cost" class="numeric">$0.0000</strong>
+              </div>
+              <button class="button button-secondary is-hidden" id="resume-button" type="button">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5 8 5-8 5z"></path></svg>
+                Resume
+              </button>
+              <button class="button button-danger is-hidden" id="stop-button" type="button">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="6" y="6" width="8" height="8" rx="1"></rect></svg>
+                Stop
+              </button>
+              <button class="icon-button" id="refresh-button" type="button" aria-label="Refresh run">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 7a6.5 6.5 0 1 0 .2 5.4"></path><path d="M16 3v4h-4"></path></svg>
+              </button>
+            </div>
+          </header>
+
+          <nav class="tabs" id="run-tabs" aria-label="Run sections">
+            <button class="tab is-active" type="button" data-tab="overview">Overview</button>
+            <button class="tab" type="button" data-tab="scenes">Scenes <span id="scene-count" class="tab-count numeric">0</span></button>
+            <button class="tab" type="button" data-tab="outputs">Outputs</button>
+            <button class="tab" type="button" data-tab="costs">Costs</button>
+            <button class="tab" type="button" data-tab="artifacts">Artifacts <span id="artifact-count" class="tab-count numeric">0</span></button>
+          </nav>
+
+          <div class="workspace-content" id="workspace-content" aria-live="polite"></div>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="new-run-dialog" id="new-run-dialog">
+      <form method="dialog" id="new-run-form">
+        <header class="dialog-header">
+          <div>
+            <p class="eyebrow">New production</p>
+            <h2>Shape the run</h2>
+            <p>Choose the story, operating envelope, and model for every pipeline task.</p>
+          </div>
+          <button class="icon-button dialog-close" id="dialog-close" type="button" aria-label="Close">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"></path></svg>
+          </button>
+        </header>
+
+        <div class="dialog-body">
+          <section class="form-section story-section">
+            <div class="section-heading">
+              <span class="section-number numeric">01</span>
+              <div><h3>Story direction</h3><p>Give the pipeline a concrete creative north star.</p></div>
+            </div>
+            <div class="form-grid">
+              <label class="field field-wide">
+                <span>Idea direction</span>
+                <textarea id="idea-direction" rows="4" maxlength="2000" placeholder="A shy fox finds a tiny lantern that refuses to go out…"></textarea>
+              </label>
+              <label class="toggle-card field-wide">
+                <input id="surprise-me" type="checkbox">
+                <span class="toggle-switch" aria-hidden="true"></span>
+                <span><strong>Surprise me</strong><small>Let the ideation stage choose the direction.</small></span>
+              </label>
+              <label class="field"><span>Tone</span><input id="tone" maxlength="500" placeholder="Warm, curious, lightly suspenseful"></label>
+              <label class="field"><span>Themes <small>comma separated</small></span><input id="themes" placeholder="small courage, unexpected friendship"></label>
+              <label class="field"><span>Must include</span><input id="must-include" placeholder="a tiny amber lantern"></label>
+              <label class="field"><span>Avoid</span><input id="avoid" placeholder="chosen-one plots, stated morals"></label>
+            </div>
+          </section>
+
+          <section class="form-section">
+            <div class="section-heading">
+              <span class="section-number numeric">02</span>
+              <div><h3>Production envelope</h3><p>Quality, timing, language, and hard spend limits.</p></div>
+            </div>
+            <div class="form-grid three-columns">
+              <label class="field"><span>Profile</span><select id="profile"></select></label>
+              <label class="field"><span>Language</span><select id="output-language"><option value="en">English</option><option value="fi">Finnish</option></select></label>
+              <label class="field"><span>Quality</span><select id="quality"><option value="draft">Draft</option><option value="final">Final + visual review</option></select></label>
+              <label class="field"><span>Duration <small>seconds</small></span><input id="duration-seconds" class="numeric" type="number" min="10" max="3600" step="1"></label>
+              <label class="field"><span>Cost ceiling <small>USD</small></span><input id="cost-ceiling" class="numeric" type="number" min="0" max="10000" step="0.01"></label>
+              <label class="field"><span>Idea candidates</span><input id="idea-candidates" class="numeric" type="number" min="1" max="10" step="1"></label>
+              <label class="field"><span>Visual target <small>seconds</small></span><input id="visual-target" class="numeric" type="number" min="1" max="120" step="1"></label>
+              <label class="field"><span>Research queries</span><input id="research-queries" class="numeric" type="number" min="0" max="20" step="1"></label>
+              <label class="field"><span>Research sources</span><input id="research-sources" class="numeric" type="number" min="0" max="50" step="1"></label>
+              <label class="field field-wide"><span>Style direction</span><input id="style-description" maxlength="1000" placeholder="Playful hand-drawn stick figures, snowy blue paper, warm amber highlights"></label>
+            </div>
+            <div class="toggle-grid">
+              <label class="toggle-card"><input id="offline" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Offline only</strong><small>Reject all active cloud backends.</small></span></label>
+              <label class="toggle-card"><input id="captions-enabled" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Captions</strong><small>Generate a selectable sidecar.</small></span></label>
+              <label class="toggle-card"><input id="animated-captions" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Animated captions</strong><small>Also render a styled burned version.</small></span></label>
+              <label class="toggle-card"><input id="music-enabled" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Music bed</strong><small>Generate and fit instrumental music.</small></span></label>
+            </div>
+          </section>
+
+          <section class="form-section models-section">
+            <div class="section-heading">
+              <span class="section-number numeric">03</span>
+              <div><h3>Models by task</h3><p>The profile is a starting point. Every active step remains explicit.</p></div>
+            </div>
+            <div id="model-grid" class="model-groups"></div>
+          </section>
+
+          <section class="preflight-panel is-hidden" id="preflight-panel" aria-live="polite"></section>
+        </div>
+
+        <footer class="dialog-footer">
+          <p id="form-status">Preflight is local and read-only. It will not call paid cloud models.</p>
+          <div>
+            <button class="button button-secondary" id="preflight-button" type="button">Run preflight</button>
+            <button class="button button-primary" id="start-run-button" type="button" disabled>Start run</button>
+          </div>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

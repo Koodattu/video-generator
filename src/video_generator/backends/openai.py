@@ -55,12 +55,27 @@ def _response_output_text(payload: dict[str, Any]) -> str:
 
 def _usage(payload: dict[str, Any], task_id: str, backend_id: str, reservation: float) -> UsageRecord:
     value = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    input_total = float(value.get("input_tokens") or 0)
+    output_total = float(value.get("output_tokens") or 0)
+    input_details = (
+        value.get("input_tokens_details")
+        if isinstance(value.get("input_tokens_details"), dict)
+        else {}
+    )
+    cached = float(input_details.get("cached_tokens") or 0)
+    cache_write = float(input_details.get("cache_write_tokens") or 0)
     return UsageRecord(
         task_id=task_id,
         backend_id=backend_id,
         provider_request_id=str(payload.get("id") or ""),
-        input_units=float(value.get("input_tokens") or 0),
-        output_units=float(value.get("output_tokens") or 0),
+        input_units=input_total,
+        output_units=output_total,
+        billable_units={
+            "input_tokens": max(0.0, input_total - cached - cache_write),
+            "cached_input_tokens": cached,
+            **({"cache_write_tokens": cache_write} if cache_write else {}),
+            "output_tokens": output_total,
+        },
         reserved_usd=reservation,
     )
 
@@ -342,13 +357,15 @@ class OpenAIWebSearchBackend(_OpenAIClient):
                     language=request.language.value,
                 )
             )
+        usage = _usage(
+            payload, "search", self.descriptor.backend_id, self.descriptor.reservation_usd
+        )
+        usage.billable_units["search_queries"] = float(call_count)
         return SearchResult(
             query=request.query,
             sources=sources,
             provider_request_id=str(payload.get("id") or ""),
-            usage=_usage(
-                payload, "search", self.descriptor.backend_id, self.descriptor.reservation_usd
-            ),
+            usage=usage,
         )
 
     def fetch(self, request: SourceFetchRequest) -> SourceDocument:
@@ -438,6 +455,28 @@ class OpenAIImageBackend(_OpenAIClient):
         width, height = image_dimensions(output_path)
         provider_request_id = response.headers.get("x-request-id", "")
         usage_data = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        input_details = (
+            usage_data.get("input_tokens_details")
+            if isinstance(usage_data.get("input_tokens_details"), dict)
+            else {}
+        )
+        total_input_tokens = float(usage_data.get("input_tokens") or 0)
+        image_tokens = float(input_details.get("image_tokens") or 0)
+        text_tokens = float(
+            input_details.get("text_tokens")
+            or max(0.0, total_input_tokens - image_tokens)
+        )
+        output_tokens = float(usage_data.get("output_tokens") or 0)
+        cached_tokens = float(input_details.get("cached_tokens") or 0)
+        billable_units = {
+            "text_input_tokens": text_tokens,
+            "image_input_tokens": image_tokens,
+            "image_output_tokens": output_tokens,
+        }
+        if cached_tokens:
+            billable_units["unallocated_cached_input_tokens"] = cached_tokens
+        if output_tokens <= 0:
+            billable_units["unreported_image_output"] = 1
         return ImageResult(
             asset=ImageAsset(
                 scene_id=request.scene_id,
@@ -455,8 +494,9 @@ class OpenAIImageBackend(_OpenAIClient):
                 task_id="image_generate",
                 backend_id=self.descriptor.backend_id,
                 provider_request_id=provider_request_id,
-                input_units=float(usage_data.get("input_tokens") or 0),
-                output_units=float(usage_data.get("output_tokens") or 1),
+                input_units=total_input_tokens or text_tokens + image_tokens,
+                output_units=output_tokens,
+                billable_units=billable_units,
                 reserved_usd=self.descriptor.reservation_usd,
             ),
         )

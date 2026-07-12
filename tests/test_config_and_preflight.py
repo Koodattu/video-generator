@@ -6,6 +6,7 @@ import shutil
 import pytest
 
 from video_generator.config import resolve_config
+from video_generator.contracts import Quality
 from video_generator.errors import ConfigurationError
 from video_generator.preflight import _voice_checks, estimate_cost
 
@@ -81,6 +82,26 @@ def test_cost_estimate_can_start_at_a_rerun_stage(resolved_config) -> None:
 
     assert remaining.estimated_usd <= full.estimated_usd
     assert remaining.basis.startswith("planned first attempts from images")
+
+
+def test_cost_estimate_uses_cloud_generation_size_and_continuity_references(
+    resolved_config,
+) -> None:
+    bindings = dict(resolved_config.task_bindings)
+    bindings["image_generate"] = "openai:gpt-image-2"
+    config = resolved_config.model_copy(
+        update={
+            "quality": Quality.FINAL,
+            "delivery_width": 4096,
+            "delivery_height": 2304,
+            "task_bindings": bindings,
+        }
+    )
+
+    estimate = estimate_cost(config, from_stage="images")
+    expected = 0.30 * 2.0 * 1.75 * estimate.scene_count * 2
+
+    assert estimate.line_items["images"] == pytest.approx(expected)
 
 
 @pytest.mark.skipif(

@@ -88,6 +88,41 @@ non-live readiness checks, freezes the report/config/prompts/schemas/profile,
 then creates `runs/<run-id>/`. Runtime cost reservations enforce the hard ceiling before each cloud
 request; no provider call is silently rerouted.
 
+## Run the local dashboard
+
+The FastAPI dashboard is the control plane for creating, supervising, and inspecting Runs. Start it
+from the project root, then open `http://127.0.0.1:8765/`:
+
+```powershell
+video-generator dashboard
+# Or choose another loopback port:
+video-generator dashboard --port 8877
+```
+
+The New Run dialog selects a profile and an explicit Backend for every workflow task, runs the same
+read-only non-live Preflight as the CLI, and creates a frozen Run Bundle before queueing execution.
+The dashboard deliberately serializes Runs through one child-process worker so local GPU memory and
+cloud budgets are not oversubscribed. Progress is streamed from the authoritative atomic manifest;
+closing the browser does not stop the worker. Stop interrupts the complete worker process tree and
+leaves the Run resumable.
+
+Each Run view joins the 19-stage timeline, script Scenes, narration clips, Visual Briefs, compiled
+image prompts, generated images, Visual Reviews, delivery media, costs, logs, and every file below
+the Run directory. Files with recorded stage hashes are distinguished from internal or untracked files.
+The server binds only to `127.0.0.1`; it is not an authenticated multi-user service and should not be
+published through a reverse proxy.
+
+Cloud accounting is append-only per provider attempt. The dashboard separates:
+
+- the conservative ceiling reservation used to prevent accidental overspend;
+- calculated public list-price usage from provider-reported billable units;
+- provider-reported cost when a provider supplies it; and
+- unresolved maximum exposure for calls whose billing outcome is unknown.
+
+The complete dated pricing table is frozen into every new Run. Calculated list price is an estimate,
+not an invoice: subscriptions, free quotas, cached-token rules, regional pricing, discounts, taxes,
+and later provider reconciliation can differ.
+
 ## Prepare the local profile
 
 The local profile uses:
@@ -238,6 +273,24 @@ narration_synthesis = "elevenlabs:eleven_multilingual_v2"
 Every override is validated against its protocol, language, usage purpose, Offline setting, and
 capabilities before a Run is created. English and Finnish use the same workflow contracts; separate
 orchestration code is not duplicated by language.
+
+## Scene continuity and pacing
+
+New Runs plan visuals as one storyboard rather than as isolated prompts. The visual plan freezes each
+recurring character's body form, proportions, face and markings, wardrobe, and non-negotiable identity
+constraints. Every Scene also records the incoming state, outgoing state, persistent elements, and
+the exact current event. Prompt compilation receives adjacent Scenes only as continuity context and is
+instructed never to depict a later event early.
+
+When the selected image Backend supports references, the first accepted image containing a recurring
+character becomes an identity/style reference for later Scenes. References are restricted to the
+characters present in that Scene and are hash-covered as part of the effective image request. They are
+guidance rather than a mathematical identity guarantee, so inspect the Scenes and Visual Review tabs
+before delivery.
+
+Authored inter-Scene pauses in new scripts are capped at 0.75 seconds and normally target 0.15-0.45
+seconds. Short narration is repaired with useful spoken content instead of padding the timeline with
+silence; overlong narration can still shrink pauses and use bounded tempo fitting before script repair.
 
 ## Resume, inspect, and intentionally rerun
 

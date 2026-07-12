@@ -223,6 +223,16 @@ def _command_preflight(args: argparse.Namespace) -> int:
     return _preflight_exit_code(report)
 
 
+def _command_dashboard(args: argparse.Namespace) -> int:
+    from .dashboard import run_dashboard
+
+    project_root = find_project_root(Path.cwd())
+    if not (project_root / "config.toml").is_file():
+        raise ConfigurationError(f"dashboard requires config.toml under {project_root}")
+    run_dashboard(project_root, port=args.port)
+    return 0
+
+
 def _command_generate(args: argparse.Namespace) -> int:
     overrides: dict[str, Any] = {
         "profile": args.profile,
@@ -593,6 +603,13 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--json", action="store_true", help="emit the typed report as JSON")
     preflight.set_defaults(handler=_command_preflight)
 
+    dashboard = commands.add_parser(
+        "dashboard",
+        help="open the local FastAPI control plane for Runs, models, costs, and artifacts",
+    )
+    dashboard.add_argument("--port", type=int, default=8765)
+    dashboard.set_defaults(handler=_command_dashboard)
+
     generate = commands.add_parser("generate", help="run the complete workflow")
     generate.add_argument("--config", type=Path, required=True)
     generate.add_argument("--brief", type=Path, required=True)
@@ -657,6 +674,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
     if getattr(args, "older_than", 0) < 0:
         parser.error("--older-than must be zero or greater")
+    if not 1 <= getattr(args, "port", 8765) <= 65535:
+        parser.error("--port must be between 1 and 65535")
     try:
         return int(args.handler(args))
     except VideoGeneratorError as exc:

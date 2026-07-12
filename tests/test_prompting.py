@@ -5,6 +5,7 @@ from video_generator.prompting import (
     PROMPT_SET_VERSION,
     SHARED_RULES,
     PromptLibrary,
+    build_frozen_assets,
     task_output_language,
 )
 
@@ -16,7 +17,7 @@ def test_image_prompt_compiler_always_uses_english() -> None:
         target_image_backend="local:flux.2-klein-4b",
     )
 
-    assert PROMPT_SET_VERSION == "2026-07-11.v13"
+    assert PROMPT_SET_VERSION == "2026-07-12.v14"
     assert task_output_language("image_prompt_compile", OutputLanguage.FINNISH) is OutputLanguage.ENGLISH
     assert "Source artifact language: fi" in prompt.instructions
     assert "Required ImageRequest prompt language: English" in prompt.instructions
@@ -29,6 +30,15 @@ def test_ordinary_tasks_keep_the_run_language() -> None:
 
     assert task_output_language("script_draft", OutputLanguage.FINNISH) is OutputLanguage.FINNISH
     assert prompt.instructions.endswith("Selected Output Language: fi.")
+
+
+def test_legacy_frozen_visual_plan_keeps_original_run_language() -> None:
+    assets = build_frozen_assets()
+    assets.pop("workflow_policy_version")
+    prompts = PromptLibrary(assets)
+
+    assert prompts.output_language("visual_plan", OutputLanguage.FINNISH) is OutputLanguage.FINNISH
+    assert prompts.output_language("image_prompt_compile", OutputLanguage.FINNISH) is OutputLanguage.ENGLISH
 
 
 def test_craft_rules_remain_task_specific() -> None:

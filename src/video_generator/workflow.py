@@ -66,7 +66,8 @@ from .media import (
     write_ass,
     write_srt,
 )
-from .prompting import PromptLibrary, task_output_language
+from .prompting import PromptLibrary
+from .profiles import image_generation_dimensions
 from .provenance import verify_runtime_snapshot
 from .registry import BackendRegistry
 from .run_store import RunStore
@@ -82,7 +83,9 @@ from .util import (
 )
 
 
-INTERNAL_REVISION = "media-workflow-v8"
+INTERNAL_REVISION = "media-workflow-v9"
+LEGACY_INTERNAL_REVISION = "media-workflow-v8"
+MAX_AUTHORED_SCENE_PAUSE_SECONDS = 0.75
 DetectorFactory.seed = 0
 
 
@@ -135,11 +138,13 @@ class CaptionBundle(WorkflowModel):
 
 class ImageRequestSet(WorkflowModel):
     requests: list[ImageRequest]
+    character_ids_by_scene: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ImageItem(WorkflowModel):
     generated: ImageAsset
     normalized_image: MediaReference
+    request: ImageRequest | None = None
 
 
 class ImageSet(WorkflowModel):
@@ -196,6 +201,11 @@ class WorkflowEngine:
         self.project_root = Path(self.config.project_root).resolve()
         self.stop_after = stop_after
         self.prompts = PromptLibrary(store.frozen_assets)
+        self.workflow_policy_version = self.prompts.workflow_policy_version
+        self.continuity_policy_enabled = self.workflow_policy_version >= 2
+        self.internal_revision = (
+            INTERNAL_REVISION if self.continuity_policy_enabled else LEGACY_INTERNAL_REVISION
+        )
         self.tools = MediaTools.discover()
         raw_descriptors = (
             store.frozen_assets.get("profile", {}).get("backend_descriptors", {})
@@ -299,6 +309,7 @@ class WorkflowEngine:
                     outline,
                     minimum_words=int(script_word_plan["minimum_total_word_count"]),
                     maximum_words=int(script_word_plan["maximum_total_word_count"]),
+                    enforce_pause_limit=self.continuity_policy_enabled,
                 ),
             )
             if self._stop("script-draft"):
@@ -342,6 +353,7 @@ class WorkflowEngine:
                     [scene.scene_id for scene in outline.scenes],
                     minimum_words=int(script_word_plan["minimum_total_word_count"]),
                     maximum_words=int(script_word_plan["maximum_total_word_count"]),
+                    enforce_pause_limit=self.continuity_policy_enabled,
                 ),
             )
             final_script = revised.script
@@ -353,26 +365,34 @@ class WorkflowEngine:
             captions = self._captions(narration)
             if self._stop("captions"):
                 return None
+            visual_plan_input = {
+                "script": narration.script.model_dump(mode="json"),
+                "timeline": narration.timeline.model_dump(mode="json"),
+                "style_id": self.config.style,
+                "style_description": self.config.style_description,
+                "audience": self.config.audience,
+                "delivery": {
+                    "width": self.config.delivery_width,
+                    "height": self.config.delivery_height,
+                    "aspect_ratio": "16:9",
+                },
+            }
+            if self.continuity_policy_enabled:
+                visual_plan_input = {
+                    "brief": self.brief.model_dump(mode="json"),
+                    "outline": outline.model_dump(mode="json"),
+                    **visual_plan_input,
+                }
             visual_plan = self._structured_stage(
                 "visual-plan",
                 "visual_plan",
-                {
-                    "script": narration.script.model_dump(mode="json"),
-                    "timeline": narration.timeline.model_dump(mode="json"),
-                    "style_id": self.config.style,
-                    "style_description": self.config.style_description,
-                    "audience": self.config.audience,
-                    "delivery": {
-                        "width": self.config.delivery_width,
-                        "height": self.config.delivery_height,
-                        "aspect_ratio": "16:9",
-                    },
-                },
+                visual_plan_input,
                 VisualPlan,
-                invariant=lambda value: self._require(
-                    [scene.scene_id for scene in value.scenes]
-                    == [scene.scene_id for scene in narration.script.scenes],
-                    "Visual Plan does not cover every Scene in order",
+                invariant=lambda value: self._validate_visual_plan(
+                    value,
+                    outline=outline,
+                    script=narration.script,
+                    require_continuity=self.continuity_policy_enabled,
                 ),
             )
             if self._stop("visual-plan"):
@@ -462,7 +482,9 @@ class WorkflowEngine:
         if task_id:
             backend_id = self.config.task_bindings[task_id]
             descriptor = self.registry.descriptor(backend_id)
-            output_language = task_output_language(task_id, self.config.output_language)
+            output_language = self.prompts.output_language(
+                task_id, self.config.output_language
+            )
             prompt = self.prompts.get(
                 task_id,
                 language=self.config.output_language,
@@ -487,13 +509,13 @@ class WorkflowEngine:
             "input_hash": hash_run_input(input_data),
             "config_hash": hash_value(self._internal_stage_config(stage)),
             "backend_id": "internal:media",
-            "backend_revision": INTERNAL_REVISION,
+            "backend_revision": self.internal_revision,
             "prompt_version": "",
             "schema_hash": "",
         }
 
     def _internal_stage_config(self, stage: str) -> dict[str, Any]:
-        direct: dict[str, Any] = {"stage": stage, "revision": INTERNAL_REVISION}
+        direct: dict[str, Any] = {"stage": stage, "revision": self.internal_revision}
         if stage == "narration":
             direct.update(
                 duration=self.config.duration_seconds,
@@ -749,6 +771,7 @@ class WorkflowEngine:
         *,
         minimum_words: int,
         maximum_words: int,
+        enforce_pause_limit: bool = True,
     ) -> None:
         cls._require(
             [scene.scene_id for scene in draft.scenes]
@@ -760,6 +783,24 @@ class WorkflowEngine:
             minimum_words=minimum_words,
             maximum_words=maximum_words,
         )
+        if enforce_pause_limit:
+            cls._validate_authored_pauses(draft)
+
+    @staticmethod
+    def _validate_authored_pauses(script: NarrationScript) -> None:
+        excessive = [
+            scene.scene_id
+            for scene in script.scenes[:-1]
+            if scene.pause_after_seconds > MAX_AUTHORED_SCENE_PAUSE_SECONDS
+        ]
+        if excessive:
+            raise BackendError(
+                (
+                    "Narration Script pauses exceed the 0.75-second production maximum: "
+                    + ", ".join(excessive)
+                ),
+                kind=ErrorKind.INVALID_OUTPUT,
+            )
 
     @staticmethod
     def _validate_script_word_range(
@@ -802,6 +843,67 @@ class WorkflowEngine:
                 minimum <= scene.provisional_seconds <= self.config.visual_max_seconds,
                 f"{scene.scene_id} is outside the configured Scene duration bounds",
             )
+
+    @staticmethod
+    def _validate_visual_plan(
+        visual_plan: VisualPlan,
+        *,
+        outline: StoryOutline,
+        script: NarrationScript,
+        require_continuity: bool = True,
+    ) -> None:
+        expected = [scene.scene_id for scene in script.scenes]
+        WorkflowEngine._require(
+            [scene.scene_id for scene in visual_plan.scenes] == expected,
+            "Visual Plan does not cover every Scene in order",
+        )
+        WorkflowEngine._require(
+            [scene.scene_id for scene in outline.scenes] == expected,
+            "Visual Plan input Scene IDs do not match the approved Story Outline",
+        )
+        if not require_continuity:
+            return
+        WorkflowEngine._require(
+            bool(visual_plan.characters),
+            "Visual Plan must define at least one recurring Character Identity for continuity",
+        )
+        character_scene_counts = {
+            character.character_id: sum(
+                character.character_id in scene.character_ids for scene in visual_plan.scenes
+            )
+            for character in visual_plan.characters
+        }
+        minimum_scene_count = min(2, len(visual_plan.scenes))
+        WorkflowEngine._require(
+            any(count >= minimum_scene_count for count in character_scene_counts.values()),
+            "Visual Plan must map at least one Character Identity across Scenes for continuity",
+        )
+        incomplete_characters = [
+            character.character_id
+            for character in visual_plan.characters
+            if not character.body_form.strip()
+            or not character.proportions
+            or not character.face_and_markings
+            or not character.identity_constraints
+        ]
+        WorkflowEngine._require(
+            not incomplete_characters,
+            "Visual Plan Character Identities need fixed body form, proportions, face/markings, "
+            "and identity constraints: "
+            + ", ".join(incomplete_characters),
+        )
+        incomplete_scenes = [
+            scene.scene_id
+            for scene in visual_plan.scenes
+            if not scene.continuity_from_previous
+            or not scene.state_after_scene
+            or (scene.character_ids and not scene.identity_requirements)
+        ]
+        WorkflowEngine._require(
+            not incomplete_scenes,
+            "Visual Briefs need incoming state, resulting state, and character identity locks: "
+            + ", ".join(incomplete_scenes),
+        )
 
     @staticmethod
     def _normalize_outline_durations(
@@ -873,6 +975,7 @@ class WorkflowEngine:
         *,
         minimum_words: int | None = None,
         maximum_words: int | None = None,
+        enforce_pause_limit: bool = True,
     ) -> None:
         if [scene.scene_id for scene in revision.script.scenes] != expected_scene_ids:
             raise BackendError("revision changed Scene IDs or order", kind=ErrorKind.INVALID_OUTPUT)
@@ -916,6 +1019,8 @@ class WorkflowEngine:
                 minimum_words=minimum_words,
                 maximum_words=maximum_words,
             )
+        if enforce_pause_limit:
+            WorkflowEngine._validate_authored_pauses(revision.script)
 
     def _research(self) -> ResearchPack:
         queries = []
@@ -1072,12 +1177,13 @@ class WorkflowEngine:
                 script,
                 bundle.timeline,
                 self.config.duration_seconds,
+                allow_expansion=not self.continuity_policy_enabled,
             )
             if pause_fitted_script is not None:
                 pause_fitted_bundle = self._assemble_narration(
                     pause_fitted_script,
                     items,
-                    duration_repaired=True,
+                    duration_repaired=not self.continuity_policy_enabled,
                 )
                 if duration_is_accepted(
                     pause_fitted_bundle.timeline,
@@ -1111,6 +1217,7 @@ class WorkflowEngine:
                     repaired,
                     bundle.timeline,
                     self.config.duration_seconds,
+                    allow_expansion=not self.continuity_policy_enabled,
                 )
                 if pause_fitted_repaired is not None:
                     pause_fitted_bundle = self._assemble_narration(
@@ -1126,7 +1233,9 @@ class WorkflowEngine:
             if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
                 tempo_items, tempo = self._tempo_fit_narration_items(
                     repair_items,
-                    scene_count=len(repaired.scenes),
+                    pause_seconds=sum(
+                        scene.pause_after_seconds for scene in repaired.scenes
+                    ),
                     budget_seconds=self.config.duration_seconds,
                     output_root=aggregate_workspace.work_dir / "tempo-adjusted",
                 )
@@ -1141,6 +1250,7 @@ class WorkflowEngine:
                         repaired,
                         tempo_bundle.timeline,
                         self.config.duration_seconds,
+                        allow_expansion=not self.continuity_policy_enabled,
                     )
                     if tempo_pause_script is not None:
                         tempo_bundle = self._assemble_narration(
@@ -1183,6 +1293,66 @@ class WorkflowEngine:
 
     @staticmethod
     def _fit_pauses_to_budget(
+        script: NarrationScript,
+        timeline: NarrationTimeline,
+        budget_seconds: float,
+        *,
+        allow_expansion: bool = False,
+    ) -> NarrationScript | None:
+        if allow_expansion:
+            return WorkflowEngine._legacy_fit_pauses_to_budget(
+                script,
+                timeline,
+                budget_seconds,
+            )
+        ceiling = delivery_ceiling(budget_seconds, timeline.fps)
+        speech_seconds = sum(
+            scene.speech_end_seconds - scene.start_seconds for scene in timeline.scenes
+        )
+        if speech_seconds > ceiling + 1e-6:
+            return None
+        # Silence is never added to make short narration satisfy the duration floor. Authored pauses
+        # are only reduced when they alone push otherwise valid speech over the delivery ceiling.
+        if timeline.delivery_duration_seconds <= ceiling + 1e-6:
+            return None
+        eligible_indexes = [
+            index
+            for index in range(max(0, len(script.scenes) - 1))
+            if script.scenes[index].pause_after_seconds > 0
+        ]
+        current_pause_seconds = sum(
+            script.scenes[index].pause_after_seconds for index in eligible_indexes
+        )
+        allowed_pause_seconds = max(0.0, ceiling - speech_seconds - 0.0001)
+        if not eligible_indexes or allowed_pause_seconds >= current_pause_seconds - 0.0005:
+            return None
+        scale = allowed_pause_seconds / current_pause_seconds
+        rounded = {
+            index: round(script.scenes[index].pause_after_seconds * scale, 4)
+            for index in eligible_indexes
+        }
+        delta = round(allowed_pause_seconds - sum(rounded.values()), 4)
+        for index in eligible_indexes:
+            if abs(delta) <= 0.00005:
+                break
+            adjustment = (
+                min(delta, script.scenes[index].pause_after_seconds - rounded[index])
+                if delta > 0
+                else max(delta, -rounded[index])
+            )
+            rounded[index] = round(rounded[index] + adjustment, 4)
+            delta = round(delta - adjustment, 4)
+
+        fitted_scenes = []
+        for index, scene in enumerate(script.scenes):
+            pause = rounded.get(index, 0.0)
+            fitted_scenes.append(scene.model_copy(update={"pause_after_seconds": pause}))
+        return NarrationScript.model_validate(
+            script.model_copy(update={"scenes": fitted_scenes}).model_dump(mode="json")
+        )
+
+    @staticmethod
+    def _legacy_fit_pauses_to_budget(
         script: NarrationScript,
         timeline: NarrationTimeline,
         budget_seconds: float,
@@ -1273,6 +1443,25 @@ class WorkflowEngine:
     def _tempo_fit_rate(
         *,
         speech_seconds: float,
+        pause_seconds: float,
+        budget_seconds: float,
+    ) -> float | None:
+        desired_speech_seconds = budget_seconds * 0.90 - pause_seconds
+        if desired_speech_seconds <= speech_seconds:
+            return None
+        maximum_speech_seconds = speech_seconds / 0.85
+        desired_speech_seconds = min(desired_speech_seconds, maximum_speech_seconds)
+        if desired_speech_seconds + pause_seconds < budget_seconds * 0.85 - 1e-6:
+            return None
+        tempo = speech_seconds / desired_speech_seconds
+        if not 0.85 <= tempo < 1.0:
+            return None
+        return tempo
+
+    @staticmethod
+    def _legacy_tempo_fit_rate(
+        *,
+        speech_seconds: float,
         scene_count: int,
         budget_seconds: float,
     ) -> float | None:
@@ -1289,14 +1478,23 @@ class WorkflowEngine:
         self,
         items: Sequence[NarrationItem],
         *,
-        scene_count: int,
+        pause_seconds: float,
         budget_seconds: float,
         output_root: Path,
     ) -> tuple[list[NarrationItem] | None, float | None]:
-        tempo = self._tempo_fit_rate(
-            speech_seconds=sum(item.normalized_duration_seconds for item in items),
-            scene_count=scene_count,
-            budget_seconds=budget_seconds,
+        speech_seconds = sum(item.normalized_duration_seconds for item in items)
+        tempo = (
+            self._tempo_fit_rate(
+                speech_seconds=speech_seconds,
+                pause_seconds=pause_seconds,
+                budget_seconds=budget_seconds,
+            )
+            if self.continuity_policy_enabled
+            else self._legacy_tempo_fit_rate(
+                speech_seconds=speech_seconds,
+                scene_count=len(items),
+                budget_seconds=budget_seconds,
+            )
         )
         if tempo is None:
             return None, None
@@ -1889,11 +2087,34 @@ class WorkflowEngine:
         promoted = self.store.promote_stage(workspace, bundle, usage=usage)
         return CaptionBundle.model_validate(promoted)
 
+    def _visual_plan_payload(self, visual_plan: VisualPlan) -> dict[str, Any]:
+        payload = visual_plan.model_dump(mode="json")
+        if self.continuity_policy_enabled:
+            return payload
+        for character in payload.get("characters", []):
+            for field_name in (
+                "body_form",
+                "proportions",
+                "face_and_markings",
+                "wardrobe",
+                "identity_constraints",
+            ):
+                character.pop(field_name, None)
+        for scene in payload.get("scenes", []):
+            for field_name in (
+                "continuity_from_previous",
+                "state_after_scene",
+                "identity_requirements",
+                "persistent_elements",
+            ):
+                scene.pop(field_name, None)
+        return payload
+
     def _image_prompts(self, visual_plan: VisualPlan) -> ImageRequestSet:
         target_backend_id = self.config.task_bindings["image_generate"]
         target_descriptor = self.registry.descriptor(target_backend_id)
         input_data = {
-            "visual_plan": visual_plan.model_dump(mode="json"),
+            "visual_plan": self._visual_plan_payload(visual_plan),
             "target_backend_id": target_backend_id,
             "target_revision": target_descriptor.revision,
         }
@@ -1911,18 +2132,40 @@ class WorkflowEngine:
         )
         requests = []
         usage = []
-        if target_backend_id == "local:flux.2-klein-4b":
-            generation_width, generation_height = 1024, 576
-        elif target_backend_id == "deterministic:stick":
-            generation_width, generation_height = self.config.delivery_width, self.config.delivery_height
-        else:
-            generation_width, generation_height = 2048, 1152
-        characters = [character.model_dump(mode="json") for character in visual_plan.characters]
-        for visual_brief in visual_plan.scenes:
+        generation_width, generation_height = image_generation_dimensions(
+            target_backend_id,
+            delivery_width=self.config.delivery_width,
+            delivery_height=self.config.delivery_height,
+        )
+        characters_by_id = {
+            character.character_id: character for character in visual_plan.characters
+        }
+        for index, visual_brief in enumerate(visual_plan.scenes):
+            previous_brief = visual_plan.scenes[index - 1] if index > 0 else None
+            next_brief = (
+                visual_plan.scenes[index + 1]
+                if index + 1 < len(visual_plan.scenes)
+                else None
+            )
+            relevant_characters = (
+                [
+                    characters_by_id[character_id].model_dump(mode="json")
+                    for character_id in visual_brief.character_ids
+                ]
+                if self.continuity_policy_enabled
+                else [
+                    character
+                    for character in self._visual_plan_payload(visual_plan)["characters"]
+                ]
+            )
             item_input = {
-                "visual_brief": visual_brief.model_dump(mode="json"),
+                "visual_brief": (
+                    visual_brief.model_dump(mode="json")
+                    if self.continuity_policy_enabled
+                    else self._visual_plan_payload(visual_plan)["scenes"][index]
+                ),
                 "style_profile": visual_plan.style_profile.model_dump(mode="json"),
-                "characters": characters,
+                "characters": relevant_characters,
                 "target_backend_id": target_backend_id,
                 "target_descriptor": {
                     "model_id": target_descriptor.model_id,
@@ -1934,12 +2177,20 @@ class WorkflowEngine:
                 "image_quality": "low" if self.config.quality is Quality.DRAFT else "high",
                 "reference_paths": [],
             }
+            if self.continuity_policy_enabled:
+                item_input["continuity_context"] = {
+                    "previous_brief": (
+                        previous_brief.model_dump(mode="json") if previous_brief else None
+                    ),
+                    "next_brief": next_brief.model_dump(mode="json") if next_brief else None,
+                    "rule": "Context only: depict the current Visual Brief, never an adjacent action.",
+                }
             item_hash = hash_run_input(item_input)
             item_config_hash = hash_value(
                 {
                     "compiler": self.config.task_bindings["image_prompt_compile"],
                     "target": target_backend_id,
-                    "language": task_output_language(
+                    "language": self.prompts.output_language(
                         "image_prompt_compile", self.config.output_language
                     ).value,
                 }
@@ -2001,7 +2252,17 @@ class WorkflowEngine:
                 image_request = ImageRequest.model_validate(promoted)
                 usage.extend(item_usage)
             requests.append(image_request)
-        bundle = ImageRequestSet(requests=requests)
+        bundle = ImageRequestSet(
+            requests=requests,
+            character_ids_by_scene=(
+                {
+                    brief.scene_id: list(brief.character_ids)
+                    for brief in visual_plan.scenes
+                }
+                if self.continuity_policy_enabled
+                else {}
+            ),
+        )
         promoted = self.store.complete_fanout_stage("image-prompt-compile", bundle, usage=usage)
         return ImageRequestSet.model_validate(promoted)
 
@@ -2060,6 +2321,37 @@ class WorkflowEngine:
                     kind=ErrorKind.INVALID_OUTPUT,
                 )
 
+    @staticmethod
+    def _with_continuity_references(
+        request: ImageRequest,
+        *,
+        character_ids: Sequence[str],
+        character_reference_paths: dict[str, str],
+        supports_reference_images: bool,
+    ) -> ImageRequest:
+        reference_paths = list(request.reference_paths)
+        if supports_reference_images:
+            for character_id in character_ids:
+                known_path = character_reference_paths.get(character_id)
+                if known_path and known_path not in reference_paths:
+                    reference_paths.append(known_path)
+                if len(reference_paths) >= 3:
+                    break
+        if not reference_paths:
+            return request
+        return request.model_copy(
+            update={
+                "reference_paths": reference_paths,
+                "prompt": (
+                    request.prompt
+                    + "\n\nContinuity references are identity/style evidence only. Preserve "
+                    "the same body form, proportions, face, markings, colors, wardrobe, and "
+                    "recurring props. Do not copy a reference pose, framing, expression, action, "
+                    "or background; the current scene instructions win."
+                ),
+            }
+        )
+
     def _images(self, request_set: ImageRequestSet) -> ImageSet:
         input_data = request_set.model_dump(mode="json")
         metadata = self._stage_metadata(stage="images", task_id=None, input_data=input_data)
@@ -2073,8 +2365,23 @@ class WorkflowEngine:
         self.store.begin_stage("images", attempt=self.store.next_attempt("images"), **metadata)
         items = []
         usage = []
+        character_reference_paths: dict[str, str] = {}
         for request in request_set.requests:
-            item_input = request.model_dump(mode="json")
+            effective_request = self._with_continuity_references(
+                request,
+                character_ids=request_set.character_ids_by_scene.get(request.scene_id, []),
+                character_reference_paths=character_reference_paths,
+                supports_reference_images=descriptor.supports_reference_images,
+            )
+            item_input = effective_request.model_dump(mode="json")
+            if effective_request.reference_paths:
+                item_input = {
+                    "request": item_input,
+                    "reference_sha256": [
+                        sha256_file(self.project_root / reference_path)
+                        for reference_path in effective_request.reference_paths
+                    ],
+                }
             item_hash = hash_run_input(item_input)
             config_hash = hash_value(
                 {"backend": backend_id, "width": self.config.delivery_width, "height": self.config.delivery_height}
@@ -2089,14 +2396,16 @@ class WorkflowEngine:
             )
             if reusable_item:
                 item = self.store.load_item_artifact(reusable_item, ImageItem)
+                if item.request is None:
+                    item = item.model_copy(update={"request": effective_request})
                 usage.extend(reusable_item.usage)
             else:
                 workspace = self.store.workspace("images", item_id=request.scene_id)
                 extension = _raw_image_extension(backend_id)
                 raw_path = workspace.work_dir / f"generated{extension}"
                 normalized_path = workspace.work_dir / "normalized.png"
-                result = self.executor.image(request, raw_path)
-                if result.asset.scene_id != request.scene_id:
+                result = self.executor.image(effective_request, raw_path)
+                if result.asset.scene_id != effective_request.scene_id:
                     raise BackendError("Image Backend changed the Scene ID", kind=ErrorKind.INVALID_OUTPUT)
                 normalize_image(
                     self.tools,
@@ -2112,6 +2421,7 @@ class WorkflowEngine:
                         sha256=sha256_file(normalized_path),
                         mime_type="image/png",
                     ),
+                    request=effective_request,
                 )
                 item_usage = _usage_list([result.usage])
                 promoted = self.store.promote_item(
@@ -2125,10 +2435,85 @@ class WorkflowEngine:
                 )
                 item = ImageItem.model_validate(promoted)
                 usage.extend(item_usage)
+            for character_id in request_set.character_ids_by_scene.get(request.scene_id, []):
+                character_reference_paths.setdefault(
+                    character_id, item.normalized_image.path
+                )
             items.append(item)
         bundle = ImageSet(items=items)
         promoted = self.store.complete_fanout_stage("images", bundle, usage=usage)
         return ImageSet.model_validate(promoted)
+
+    def _regenerate_visual_review_image(
+        self,
+        *,
+        item_id: str,
+        request: ImageRequest,
+        reason: str,
+    ) -> tuple[ImageItem, list[UsageRecord]]:
+        backend_id = self.config.task_bindings["image_generate"]
+        descriptor = self.registry.descriptor(backend_id)
+        reference_hashes = [
+            sha256_file(self.project_root / reference_path)
+            for reference_path in request.reference_paths
+        ]
+        regeneration_input_hash = hash_run_input(
+            {
+                "request": request.model_dump(mode="json"),
+                "reference_sha256": reference_hashes,
+            }
+        )
+        regeneration_config_hash = hash_value(
+            {"backend": backend_id, "regeneration": reason}
+        )
+        reusable_item = self.store.reusable_item(
+            "visual-review",
+            item_id,
+            input_hash=regeneration_input_hash,
+            config_hash=regeneration_config_hash,
+            backend_id=backend_id,
+            backend_revision=descriptor.revision,
+        )
+        if reusable_item:
+            replacement = self.store.load_item_artifact(reusable_item, ImageItem)
+            if replacement.request is None:
+                replacement = replacement.model_copy(update={"request": request})
+            return replacement, reusable_item.usage
+
+        workspace = self.store.workspace("visual-review", item_id=item_id)
+        extension = _raw_image_extension(backend_id)
+        raw_path = workspace.work_dir / f"generated{extension}"
+        normalized_path = workspace.work_dir / "normalized.png"
+        result = self.executor.image(request, raw_path)
+        if result.asset.scene_id != request.scene_id:
+            raise BackendError("Image Backend changed the Scene ID", kind=ErrorKind.INVALID_OUTPUT)
+        normalize_image(
+            self.tools,
+            self.project_root / result.asset.image.path,
+            normalized_path,
+            width=self.config.delivery_width,
+            height=self.config.delivery_height,
+        )
+        replacement = ImageItem(
+            generated=result.asset,
+            normalized_image=MediaReference(
+                path=relative_path(normalized_path, self.project_root),
+                sha256=sha256_file(normalized_path),
+                mime_type="image/png",
+            ),
+            request=request,
+        )
+        item_usage = _usage_list([result.usage])
+        promoted = self.store.promote_item(
+            workspace,
+            replacement,
+            input_hash=regeneration_input_hash,
+            config_hash=regeneration_config_hash,
+            backend_id=backend_id,
+            backend_revision=descriptor.revision,
+            usage=item_usage,
+        )
+        return ImageItem.model_validate(promoted), item_usage
 
     def _visual_review(
         self, visual_plan: VisualPlan, requests: ImageRequestSet, images: ImageSet
@@ -2166,14 +2551,19 @@ class WorkflowEngine:
                 failed.append(review[0])
         second_reviews: list[VisualReviewItem] = []
         if failed:
-            image_backend_id = self.config.task_bindings["image_generate"]
-            image_descriptor = self.registry.descriptor(image_backend_id)
             replacements: dict[str, ImageItem] = {}
             regeneration_usage: dict[str, list[UsageRecord]] = {}
+            reference_replacements: dict[str, str] = {}
             for failure in failed:
-                original = request_by_id[failure.scene_id]
+                original_item = final_items[failure.scene_id]
+                original = original_item.request or request_by_id[failure.scene_id]
+                remapped_references = [
+                    reference_replacements.get(path, path)
+                    for path in original.reference_paths
+                ]
                 corrected = original.model_copy(
                     update={
+                        "reference_paths": remapped_references,
                         "prompt": (
                             original.prompt
                             + "\n\nTargeted correction. Preserve all otherwise correct content. "
@@ -2182,66 +2572,65 @@ class WorkflowEngine:
                     }
                 )
                 regeneration_id = f"{failure.scene_id}-regeneration"
-                regeneration_input_hash = hash_run_input(corrected.model_dump(mode="json"))
-                regeneration_config_hash = hash_value({"backend": image_backend_id, "regeneration": 1})
-                reusable_item = self.store.reusable_item(
-                    "visual-review",
-                    regeneration_id,
-                    input_hash=regeneration_input_hash,
-                    config_hash=regeneration_config_hash,
-                    backend_id=image_backend_id,
-                    backend_revision=image_descriptor.revision,
+                replacement, item_usage = self._regenerate_visual_review_image(
+                    item_id=regeneration_id,
+                    request=corrected,
+                    reason="targeted-correction-v2",
                 )
-                if reusable_item:
-                    replacement = self.store.load_item_artifact(reusable_item, ImageItem)
-                    item_usage = reusable_item.usage
-                else:
-                    workspace = self.store.workspace("visual-review", item_id=regeneration_id)
-                    extension = _raw_image_extension(image_backend_id)
-                    raw_path = workspace.work_dir / f"generated{extension}"
-                    normalized_path = workspace.work_dir / "normalized.png"
-                    result = self.executor.image(corrected, raw_path)
-                    if result.asset.scene_id != corrected.scene_id:
-                        raise BackendError("Image Backend changed the Scene ID", kind=ErrorKind.INVALID_OUTPUT)
-                    normalize_image(
-                        self.tools,
-                        self.project_root / result.asset.image.path,
-                        normalized_path,
-                        width=self.config.delivery_width,
-                        height=self.config.delivery_height,
-                    )
-                    replacement = ImageItem(
-                        generated=result.asset,
-                        normalized_image=MediaReference(
-                            path=relative_path(normalized_path, self.project_root),
-                            sha256=sha256_file(normalized_path),
-                            mime_type="image/png",
-                        ),
-                    )
-                    item_usage = _usage_list([result.usage])
-                    promoted = self.store.promote_item(
-                        workspace,
-                        replacement,
-                        input_hash=regeneration_input_hash,
-                        config_hash=regeneration_config_hash,
-                        backend_id=image_backend_id,
-                        backend_revision=image_descriptor.revision,
-                        usage=item_usage,
-                    )
-                    replacement = ImageItem.model_validate(promoted)
                 replacements[failure.scene_id] = replacement
                 regeneration_usage[failure.scene_id] = item_usage
                 final_items[failure.scene_id] = replacement
+                reference_replacements[
+                    original_item.normalized_image.path
+                ] = replacement.normalized_image.path
 
-            for failure in failed:
-                replacement = replacements[failure.scene_id]
-                usage.extend(regeneration_usage[failure.scene_id])
-                second = self._review_image(briefs[failure.scene_id], visual_plan, replacement, pass_number=2)
+            propagated_scene_ids: list[str] = []
+            failed_scene_ids = {failure.scene_id for failure in failed}
+            for brief in visual_plan.scenes:
+                if brief.scene_id in failed_scene_ids:
+                    continue
+                original_item = final_items[brief.scene_id]
+                original = original_item.request or request_by_id[brief.scene_id]
+                remapped_references = [
+                    reference_replacements.get(path, path)
+                    for path in original.reference_paths
+                ]
+                if remapped_references == original.reference_paths:
+                    continue
+                corrected = original.model_copy(
+                    update={
+                        "reference_paths": remapped_references,
+                        "prompt": (
+                            original.prompt
+                            + "\n\nAn upstream identity reference was corrected. Recreate this "
+                            "same scene using the replacement identity evidence while preserving "
+                            "the current action, setting, composition, and emotional beat."
+                        ),
+                    }
+                )
+                replacement, item_usage = self._regenerate_visual_review_image(
+                    item_id=f"{brief.scene_id}-continuity-regeneration",
+                    request=corrected,
+                    reason="replacement-reference-v1",
+                )
+                final_items[brief.scene_id] = replacement
+                replacements[brief.scene_id] = replacement
+                regeneration_usage[brief.scene_id] = item_usage
+                reference_replacements[
+                    original_item.normalized_image.path
+                ] = replacement.normalized_image.path
+                propagated_scene_ids.append(brief.scene_id)
+
+            review_scene_ids = [failure.scene_id for failure in failed] + propagated_scene_ids
+            for scene_id in review_scene_ids:
+                replacement = replacements[scene_id]
+                usage.extend(regeneration_usage[scene_id])
+                second = self._review_image(briefs[scene_id], visual_plan, replacement, pass_number=2)
                 second_reviews.append(second[0])
                 usage.extend(second[1])
                 if not second[0].passed:
                     raise BackendError(
-                        f"regenerated image for {failure.scene_id} failed its final re-review",
+                        f"regenerated image for {scene_id} failed its final re-review",
                         kind=ErrorKind.INVALID_OUTPUT,
                         action="Inspect the Visual Review and explicitly rerun from image-prompt-compile or images.",
                     )
@@ -2262,15 +2651,28 @@ class WorkflowEngine:
         backend_id = self.config.task_bindings["visual_review"]
         descriptor = self.registry.descriptor(backend_id)
         item_id = f"{brief.scene_id}-review-{pass_number}"
+        character_ids = set(brief.character_ids)
+        relevant_characters = [
+            character.model_dump(mode="json")
+            for character in visual_plan.characters
+            if character.character_id in character_ids
+        ]
+        reference_paths = list(image.request.reference_paths) if image.request else []
+        reference_hashes = [
+            sha256_file(self.project_root / reference_path)
+            for reference_path in reference_paths
+        ]
         item_input = {
             "scene_id": brief.scene_id,
             "visual_brief": brief.model_dump(mode="json"),
             "style_profile": visual_plan.style_profile.model_dump(mode="json"),
-            "characters": [character.model_dump(mode="json") for character in visual_plan.characters],
+            "characters": relevant_characters,
             "audience": self.config.audience,
             "pass_number": pass_number,
             "minimum_score": 4,
             "image_sha256": image.normalized_image.sha256,
+            "media_order": ["current_scene", *["identity_reference"] * len(reference_paths)],
+            "reference_image_sha256": reference_hashes,
         }
         prompt = self.prompts.get("visual_review", language=self.config.output_language)
         schema_hash = hash_value(self.prompts.schema("visual_review"))
@@ -2293,7 +2695,10 @@ class WorkflowEngine:
             "visual_review",
             item_input,
             VisualReviewItem,
-            media_inputs=[self.project_root / image.normalized_image.path],
+            media_inputs=[
+                self.project_root / image.normalized_image.path,
+                *[self.project_root / path for path in reference_paths],
+            ],
         )
         item = VisualReviewItem.model_validate(execution.artifact)
         if item.scene_id != brief.scene_id:

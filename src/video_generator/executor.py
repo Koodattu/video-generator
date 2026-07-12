@@ -22,6 +22,7 @@ from .contracts import (
     StructuredTextResult,
     UsageRecord,
 )
+from .costs import calculate_list_price
 from .errors import BackendError, ErrorKind
 from .prompting import PromptLibrary, task_output_language
 from .registry import BackendRegistry
@@ -54,13 +55,42 @@ class TaskExecutor:
         self.store = store
         self.prompts = prompts
         self.config = store.config
+        frozen_assets = getattr(store, "frozen_assets", {})
+        profile = frozen_assets.get("profile") if isinstance(frozen_assets, dict) else None
+        self.pricing_catalog = (
+            profile.get("pricing_catalog")
+            if isinstance(profile, dict) and isinstance(profile.get("pricing_catalog"), dict)
+            else None
+        )
 
-    def _reserve(self, task_id: str, backend_id: str, amount: float | None = None) -> float:
+    def _price_usage(self, usage: UsageRecord) -> UsageRecord:
+        if self.pricing_catalog is None:
+            return usage.model_copy(
+                update={
+                    "estimated_usd": None,
+                    "cost_status": "unpriced",
+                    "pricing_snapshot": self.config.pricing_snapshot,
+                    "cost_basis": "legacy Run has no frozen pricing catalog",
+                    "warnings": list(
+                        dict.fromkeys(
+                            [*usage.warnings, "cost unavailable because this Run predates frozen pricing tables"]
+                        )
+                    ),
+                }
+            )
+        return calculate_list_price(usage, catalog=self.pricing_catalog)
+
+    def _reserve(
+        self, task_id: str, backend_id: str, amount: float | None = None
+    ) -> tuple[float, str]:
         descriptor = self.registry.descriptor(backend_id)
         reservation = descriptor.reservation_usd if amount is None else amount
-        if reservation > 0:
-            self.store.reserve_cost(reservation, task_id=task_id, backend_id=backend_id)
-        return reservation
+        call_id = ""
+        if getattr(descriptor, "cloud", False):
+            call_id = self.store.reserve_cost(
+                reservation, task_id=task_id, backend_id=backend_id
+            )
+        return reservation, call_id
 
     def _call(
         self,
@@ -74,24 +104,64 @@ class TaskExecutor:
     ) -> T:
         invalid_attempts = 0
         transient_attempts = 0
-        total_reserved = 0.0
         attempts = 0
         while True:
-            total_reserved += self._reserve(task_id, backend_id, reservation)
+            attempt_reserved, call_id = self._reserve(task_id, backend_id, reservation)
             attempts += 1
+            started = time.perf_counter()
             try:
                 result = callback()
+                elapsed = time.perf_counter() - started
                 usage = getattr(result, "usage", None)
                 if isinstance(usage, UsageRecord):
-                    usage.reserved_usd = total_reserved
+                    usage = usage.model_copy(
+                        update={
+                            "call_id": call_id,
+                            "reserved_usd": attempt_reserved,
+                            "elapsed_seconds": usage.elapsed_seconds or elapsed,
+                        }
+                    )
+                    if call_id:
+                        usage = self._price_usage(usage)
                     if attempts > 1:
                         usage.warnings.append(f"completed after {attempts} provider attempts")
+                    if call_id:
+                        self.store.settle_cost(call_id, usage)
+                    setattr(result, "usage", usage)
+                elif call_id:
+                    usage = self._price_usage(
+                        UsageRecord(
+                            task_id=task_id,
+                            backend_id=backend_id,
+                            call_id=call_id,
+                            reserved_usd=attempt_reserved,
+                            elapsed_seconds=elapsed,
+                            warnings=["provider response did not include usage metadata"],
+                        )
+                    )
+                    self.store.settle_cost(call_id, usage)
+                    if hasattr(result, "usage"):
+                        setattr(result, "usage", usage)
                 return result
-            except BackendError as exc:
-                if exc.kind is ErrorKind.INVALID_OUTPUT and invalid_attempts < invalid_retries:
+            except BaseException as exc:
+                if call_id:
+                    self.store.mark_cost_unresolved(
+                        call_id,
+                        elapsed_seconds=time.perf_counter() - started,
+                        error=exc,
+                    )
+                if (
+                    isinstance(exc, BackendError)
+                    and exc.kind is ErrorKind.INVALID_OUTPUT
+                    and invalid_attempts < invalid_retries
+                ):
                     invalid_attempts += 1
                     continue
-                if exc.kind is ErrorKind.TRANSIENT and transient_attempts < transient_retries:
+                if (
+                    isinstance(exc, BackendError)
+                    and exc.kind is ErrorKind.TRANSIENT
+                    and transient_attempts < transient_retries
+                ):
                     delay = min(8.0, 0.75 * (2**transient_attempts))
                     transient_attempts += 1
                     time.sleep(delay)
@@ -112,7 +182,11 @@ class TaskExecutor:
     ) -> StructuredExecution:
         backend_id = self.config.task_bindings[task_id]
         backend = self.registry.get(backend_id)
-        output_language = task_output_language(task_id, self.config.output_language)
+        output_language = (
+            self.prompts.output_language(task_id, self.config.output_language)
+            if hasattr(self.prompts, "output_language")
+            else task_output_language(task_id, self.config.output_language)
+        )
         prompt = self.prompts.get(
             task_id,
             language=self.config.output_language,
@@ -221,6 +295,20 @@ class TaskExecutor:
                 result.usage.input_units += usage.input_units
                 result.usage.output_units += usage.output_units
                 result.usage.reserved_usd += usage.reserved_usd
+                result.usage.elapsed_seconds += usage.elapsed_seconds
+                for unit_name, amount in usage.billable_units.items():
+                    result.usage.billable_units[unit_name] = (
+                        result.usage.billable_units.get(unit_name, 0) + amount
+                    )
+                if usage.estimated_usd is not None:
+                    result.usage.estimated_usd = (
+                        (result.usage.estimated_usd or 0) + usage.estimated_usd
+                    )
+                if usage.actual_usd is not None:
+                    result.usage.actual_usd = (
+                        (result.usage.actual_usd or 0) + usage.actual_usd
+                    )
+            result.usage.call_id = ""
             result.usage.warnings.append(
                 f"usage includes {len(prior_usage)} invalid structured response(s)"
             )

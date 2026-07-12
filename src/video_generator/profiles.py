@@ -3,10 +3,10 @@ from __future__ import annotations
 from copy import deepcopy
 
 from .contracts import BackendDescriptor, OutputLanguage, ProtocolName, TASK_IDS
+from .costs import PRICING_SNAPSHOT
 
 
 PROFILE_VERSION = "2026-07-11.v5"
-PRICING_SNAPSHOT = "2026-07-10.conservative-v1"
 
 EXPECTED_LOCAL_MODEL_REVISIONS: dict[str, str] = {
     "local:voxcpm2": "bffb3df5a29440629464e5e839f4d214c8714c3d",
@@ -15,6 +15,19 @@ EXPECTED_LOCAL_MODEL_REVISIONS: dict[str, str] = {
     "local:flux.2-klein-4b": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
     "local:ace-step-1.5-xl-turbo": "d4a0b288b83ebb7e25a8c0b32c573c22e134e8ee",
 }
+
+
+def image_generation_dimensions(
+    backend_id: str,
+    *,
+    delivery_width: int,
+    delivery_height: int,
+) -> tuple[int, int]:
+    if backend_id == "local:flux.2-klein-4b":
+        return 1024, 576
+    if backend_id == "deterministic:stick":
+        return delivery_width, delivery_height
+    return 2048, 1152
 
 
 def _all_languages() -> set[OutputLanguage]:

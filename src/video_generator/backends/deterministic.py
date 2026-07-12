@@ -200,6 +200,21 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
     if task == "script_revision":
         return {"schema_version": 1, "script": data["script"], "dispositions": []}
     if task == "duration_repair":
+        if data.get("repair_strategy") == "single-scene-lengthening-v2":
+            scene = data["script"]["scenes"][0]
+            target = data["scene_repair_targets"][0]
+            desired = int(target["target_word_count"])
+            text = scene["spoken_text"]
+            language = OutputLanguage(data.get("output_language", request.output_language.value))
+            sentence_index = 0
+            while len(text.split()) < desired:
+                text += " " + _fixture_sentence(language, sentence_index)
+                sentence_index += 1
+            return {
+                "schema_version": 1,
+                "scene_id": "scene-001",
+                "spoken_text": " ".join(text.split()[:desired]).rstrip(".,;:") + ".",
+            }
         script = data["script"]
         scale = float(data.get("duration_scale", 1.0))
         selected = set(data.get("selected_scene_ids", []))
@@ -237,6 +252,11 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                     "signature_traits": ["round head", "red triangular scarf"],
                     "color_anchors": ["red scarf"],
                     "recurring_props": ["blue tin lantern"],
+                    "body_form": "small upright stick figure; always bipedal",
+                    "proportions": ["round head", "short straight limbs", "same small scale"],
+                    "face_and_markings": ["two black dot eyes", "no nose", "plain white face"],
+                    "wardrobe": ["red triangular scarf tied at the neck"],
+                    "identity_constraints": ["never quadrupedal", "never remove or recolor the scarf"],
                 }
             ],
             "scenes": [
@@ -251,6 +271,12 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                     "must_show": ["red triangular scarf", "blue tin lantern"],
                     "must_avoid": ["written words", "crowd", "photorealism"],
                     "character_ids": ["character-aino"],
+                    "continuity_from_previous": ["Aino keeps the red scarf and blue tin lantern"],
+                    "state_after_scene": ["Aino and the lantern advance farther along the snowy path"],
+                    "identity_requirements": [
+                        "small upright bipedal stick figure with round white face and red triangular scarf"
+                    ],
+                    "persistent_elements": ["red scarf", "blue tin lantern", "snowy path"],
                 }
                 for scene in script.get("scenes", [])
             ],

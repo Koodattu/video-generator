@@ -4,11 +4,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .contracts import OutputLanguage, ResolvedRunConfig
+from .costs import frozen_pricing_catalog
 from .schema import restricted_json_schema
 from .task_models import TASK_OUTPUT_MODELS
 
 
-PROMPT_SET_VERSION = "2026-07-11.v13"
+PROMPT_SET_VERSION = "2026-07-12.v14"
 
 
 SHARED_RULES = """
@@ -111,6 +112,9 @@ reaction shorthand, setting used only as a mood mirror, generic cinematic fog or
 'not just X but Y' constructions, direct thematic debate, and universal-truth endings. Specific
 details must affect action, status, or consequence rather than decorate the prose.
 
+Use short editorial pauses: normally 0.15-0.45 seconds and never above 0.75 seconds. Duration must
+come from useful spoken story content, never padded silence.
+
 For Finnish, use natural cases, clitics, compounds, number pronunciation, and Finnish spoken syntax;
 do not imitate translated English word order. For English, prefer natural contractions where tone
 allows. End the final Scene with pause_after_seconds equal to zero.
@@ -157,6 +161,8 @@ commentary to spoken text.
 Keep the complete revised script between minimum_total_word_count and maximum_total_word_count
 inclusive, using target_total_word_count and scene_word_targets to preserve proportional pacing.
 The validator counts words as len(spoken_text.split()).
+Keep every non-final pause at 0.75 seconds or less; normally use 0.15-0.45 seconds. Never pad the
+Duration Budget with silence.
 Repair narrative construction before polishing sentences. Do not answer a structural finding with
 decorative sensory language or an explanation of the theme. Preserve intentional withholding and
 make event-based curiosity payoffs legible.
@@ -183,13 +189,28 @@ supplied output schema. A whole-script repair returns the full script plus dispo
 single-Scene expansion returns only that Scene ID and its complete expanded spoken_text.
 """,
     "visual_plan": """
-Create a provider-neutral Visual Plan after narration timing is final. Define the resolved Style
-Profile, a small Character Identity for each recurring character, and exactly one Visual Brief per
-Scene. A Visual Brief describes the single clearest story moment, subjects, visible action, emotion,
-environment, 16:9 composition, must-show traits, and must-avoid elements. Prefer readable silhouettes
-and one focal action. Never place prose, captions, dialogue, letters, labels, signs, logos, or
-watermarks inside an image. Preserve semantic identity through signature traits, props, colors, and
-relationships without demanding pixel-perfect repetition.
+Create one provider-neutral storyboard for the entire finished narration, using the Creative Brief,
+approved Story Outline, Script, and Timeline together. Return exactly one Visual Brief per Scene.
+Choose the decisive visible instant that best represents what is happening in that Scene; do not
+substitute generic atmosphere, a character merely posing, or an event narrated in a different Scene.
+Never reveal a future event early.
+
+Define each recurring Character Identity once as an identity lock. Make body_form unambiguous (for
+example quadruped versus biped), then fix silhouette, apparent age, proportions, face/anatomy,
+markings and exact color placement, attached wardrobe, recurring props, and explicit things that
+must never change. Reuse those facts verbatim across identity_requirements. Do not let species,
+limb use, clothing, markings, scale, or palette drift between Scenes.
+
+Treat adjacent Visual Briefs as a state ledger. continuity_from_previous records visible incoming
+character/object ownership, position, weather, damage, light, and other persistent conditions.
+state_after_scene records the concrete change caused by the current action. persistent_elements
+lists state that carries onward. Respect every Outline continuity_obligation. Transitions must read
+as cause and effect while each image still depicts only its own Scene.
+
+Each Visual Brief describes subjects, one clear visible action, readable emotion, environment, 16:9
+composition, must-show traits, and must-avoid elements. Prefer readable silhouettes and one focal
+action. Never place prose, captions, dialogue, letters, labels, signs, logos, or watermarks inside an
+image.
 
 When style_id is ms_paint_stick: use a white/nearly white raster canvas; round-headed stick characters; thin,
 slightly uneven black lines; crude flat shapes; a deliberately limited palette; sparse naive
@@ -200,8 +221,14 @@ reusable Style Profile without importing Scene content. style_description may re
 style but never override safety, no-text, identity continuity, legibility, or 16:9 composition.
 """,
     "image_prompt_compile": """
-Compile one provider-neutral Visual Brief into one target-Backend Image Request. Regardless of the
-narration or source-artifact language, write both ImageRequest.prompt and
+Compile the current provider-neutral Visual Brief into one target-Backend Image Request. The input
+includes previous/current/next briefs for continuity context; depict only the current Scene and do
+not import an adjacent Scene's action. State the current story event early and concretely. Express
+the incoming state, visible action, and resulting state so the image advances the storyboard. Repeat
+every supplied identity lock exactly and never change anatomy, body form, proportions, markings,
+wardrobe, colors, or recurring props.
+
+Regardless of the narration or source-artifact language, write both ImageRequest.prompt and
 ImageRequest.negative_prompt entirely in English while preserving exact story semantics; retain only
 identity-critical proper names from another language. Combine subject identity, visible
 action, environment, emotion, composition, Style Profile, must-show traits, and must-avoid rules in a
@@ -210,6 +237,10 @@ Do not invent characters, objects, actions, weather, or story events absent from
 If a required detail is missing, do not compensate with unrelated decoration. Use only settings the
 target descriptor supports; preserve the supplied target_backend_id, dimensions, quality, references,
 and seed policy exactly.
+
+When reference_paths are supplied, treat them only as identity and style evidence. Preserve the
+referenced traits, but do not copy their pose, framing, expression, action, or background. The
+current Visual Brief always controls the composition and event.
 """,
     "visual_review": """
 Review only the supplied Scene image against its Visual Brief, Style Profile, Character Identities,
@@ -217,6 +248,9 @@ Audience Profile, and delivery-size legibility. Score subject/action fulfillment
 identity, composition, absence of text/logos/watermarks, and safety. Do not request churn because a
 different picture might be prettier. Regeneration is justified only by a failed explicit requirement
 or score threshold. A regeneration instruction must say what to preserve and exactly what to fix.
+The first media input is the current Scene. Any later media inputs are identity references only;
+compare stable anatomy, proportions, markings, colors, wardrobe, and props, while allowing the
+current Scene to use a different pose, expression, framing, action, and background.
 On pass_number=2 you may report a remaining hard failure, but must not request another regeneration.
 """,
     "music_brief": """
@@ -261,7 +295,7 @@ layout. The textual prompt is provenance; the renderer maps known subjects/actio
 
 
 def task_output_language(task_id: str, run_language: OutputLanguage) -> OutputLanguage:
-    if task_id == "image_prompt_compile":
+    if task_id in {"visual_plan", "image_prompt_compile"}:
         return OutputLanguage.ENGLISH
     return run_language
 
@@ -277,6 +311,20 @@ class PromptLibrary:
     def __init__(self, payload: dict[str, Any] | None = None) -> None:
         self._payload = payload or build_frozen_assets()
 
+    @property
+    def workflow_policy_version(self) -> int:
+        value = self._payload.get("workflow_policy_version", 1)
+        return int(value) if isinstance(value, (int, str)) and str(value).isdigit() else 1
+
+    def output_language(
+        self,
+        task_id: str,
+        run_language: OutputLanguage,
+    ) -> OutputLanguage:
+        if task_id == "visual_plan" and self.workflow_policy_version < 2:
+            return run_language
+        return task_output_language(task_id, run_language)
+
     def get(
         self,
         task_id: str,
@@ -289,7 +337,7 @@ class PromptLibrary:
         except KeyError as exc:
             raise KeyError(f"no frozen prompt for task {task_id}") from exc
         instructions = str(task["instructions"])
-        selected_language = task_output_language(task_id, language)
+        selected_language = self.output_language(task_id, language)
         if task_id == "image_prompt_compile":
             instructions += (
                 f"\n\nSource artifact language: {language.value}. "
@@ -333,6 +381,7 @@ def build_frozen_assets(config: ResolvedRunConfig | None = None) -> dict[str, An
     }
     assets: dict[str, Any] = {
         "prompt_set_version": PROMPT_SET_VERSION,
+        "workflow_policy_version": 2,
         "prompts": prompts,
         "image_targets": TARGET_IMAGE_GUIDANCE,
         "schemas": schemas,
@@ -350,5 +399,6 @@ def build_frozen_assets(config: ResolvedRunConfig | None = None) -> dict[str, An
                 backend_id: BACKEND_DESCRIPTORS[backend_id].model_dump(mode="json")
                 for backend_id in backend_ids
             },
+            "pricing_catalog": frozen_pricing_catalog(),
         }
     return assets

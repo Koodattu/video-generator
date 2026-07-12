@@ -2,9 +2,96 @@ from __future__ import annotations
 
 import pytest
 
-from video_generator.contracts import ImageGenerationSettings, ImageRequest
+from video_generator.contracts import (
+    CharacterIdentity,
+    ImageGenerationSettings,
+    ImageRequest,
+    NarrationScript,
+    OutlineScene,
+    ScriptScene,
+    StyleProfile,
+    StoryOutline,
+    VisualBrief,
+    VisualPlan,
+)
 from video_generator.errors import BackendError, ErrorKind
 from video_generator.workflow import WorkflowEngine, _raw_image_extension
+
+
+def _continuity_inputs() -> tuple[StoryOutline, NarrationScript]:
+    outline = StoryOutline(
+        title="The lantern",
+        concept_summary="Aino carries a lantern through the snow.",
+        scenes=[
+            OutlineScene(
+                scene_id=f"scene-{index:03d}",
+                narrative_purpose="Advance the journey.",
+                change="Aino moves closer to shelter.",
+                emotional_beat="Hope grows.",
+                visual_opportunity="A red scarf and blue lantern cross the snow.",
+                provisional_seconds=10,
+                continuity_obligations=["Keep Aino's scarf and lantern unchanged."],
+            )
+            for index in range(1, 3)
+        ],
+    )
+    script = NarrationScript(
+        title="The lantern",
+        scenes=[
+            ScriptScene(
+                scene_id=f"scene-{index:03d}",
+                spoken_text="Aino follows the lantern through the snow.",
+            )
+            for index in range(1, 3)
+        ],
+    )
+    return outline, script
+
+
+def _visual_briefs(*, character_ids: list[str]) -> list[VisualBrief]:
+    return [
+        VisualBrief(
+            scene_id=f"scene-{index:03d}",
+            story_moment="Aino follows the lantern.",
+            subjects=["Aino", "blue lantern"],
+            action="Aino walks through the snow.",
+            emotion="hopeful",
+            environment="snowy path",
+            composition="wide",
+            must_show=["red scarf", "blue lantern"],
+            must_avoid=["text"],
+            character_ids=character_ids,
+            continuity_from_previous=["Aino has the red scarf and blue lantern."],
+            state_after_scene=["Aino advances along the path."],
+            identity_requirements=(
+                ["small upright figure with a red scarf"] if character_ids else []
+            ),
+        )
+        for index in range(1, 3)
+    ]
+
+
+def _style_profile() -> StyleProfile:
+    return StyleProfile(
+        style_id="ink",
+        description="Simple ink",
+        palette=["black", "white", "red", "blue"],
+        line_style="loose",
+        background="paper",
+        must_avoid=["text"],
+    )
+
+
+def _aino_identity() -> CharacterIdentity:
+    return CharacterIdentity(
+        character_id="character-aino",
+        name="Aino",
+        signature_traits=["red scarf"],
+        body_form="small upright figure",
+        proportions=["round head", "short limbs"],
+        face_and_markings=["two black dot eyes"],
+        identity_constraints=["never remove or recolor the scarf"],
+    )
 
 
 def test_flux_request_uses_host_owned_dimensions_and_sampler_settings() -> None:
@@ -101,3 +188,128 @@ def test_image_prompt_language_validation_accepts_english() -> None:
     )
 
     WorkflowEngine._validate_image_request_language(request)
+
+
+def test_continuity_visual_plan_requires_a_character_identity() -> None:
+    outline, script = _continuity_inputs()
+    plan = VisualPlan(
+        style_profile=_style_profile(),
+        characters=[],
+        scenes=_visual_briefs(character_ids=[]),
+    )
+
+    with pytest.raises(BackendError, match="at least one recurring Character Identity"):
+        WorkflowEngine._validate_visual_plan(plan, outline=outline, script=script)
+
+
+def test_continuity_visual_plan_requires_a_cross_scene_identity_mapping() -> None:
+    outline, script = _continuity_inputs()
+    scenes = _visual_briefs(character_ids=[])
+    scenes[0].character_ids = ["character-aino"]
+    scenes[0].identity_requirements = ["small upright figure with a red scarf"]
+    plan = VisualPlan(
+        style_profile=_style_profile(),
+        characters=[_aino_identity()],
+        scenes=scenes,
+    )
+
+    with pytest.raises(BackendError, match="map at least one Character Identity across Scenes"):
+        WorkflowEngine._validate_visual_plan(plan, outline=outline, script=script)
+
+
+def test_continuity_visual_plan_accepts_a_recurring_identity_mapping() -> None:
+    outline, script = _continuity_inputs()
+    plan = VisualPlan(
+        style_profile=_style_profile(),
+        characters=[_aino_identity()],
+        scenes=_visual_briefs(character_ids=["character-aino"]),
+    )
+
+    WorkflowEngine._validate_visual_plan(plan, outline=outline, script=script)
+
+
+def test_character_reference_is_carried_forward_without_copying_composition() -> None:
+    request = ImageRequest(
+        scene_id="scene-002",
+        target_backend_id="local:flux.2-klein-4b",
+        prompt="The same small orange fox lifts a lantern beside a frozen stream.",
+        width=1024,
+        height=576,
+    )
+
+    effective = WorkflowEngine._with_continuity_references(
+        request,
+        character_ids=["fox"],
+        character_reference_paths={"fox": "runs/run/stages/images/scene-001.png"},
+        supports_reference_images=True,
+    )
+
+    assert effective.reference_paths == ["runs/run/stages/images/scene-001.png"]
+    assert "identity/style evidence only" in effective.prompt
+    assert "Do not copy a reference pose" in effective.prompt
+
+
+def test_character_reference_is_not_added_for_unsupported_backend() -> None:
+    request = ImageRequest(
+        scene_id="scene-002",
+        target_backend_id="deterministic:stick",
+        prompt="A stick figure lifts a lantern beside a frozen stream.",
+        width=1280,
+        height=720,
+    )
+
+    assert WorkflowEngine._with_continuity_references(
+        request,
+        character_ids=["hero"],
+        character_reference_paths={"hero": "first.png"},
+        supports_reference_images=False,
+    ) == request
+
+
+def test_legacy_visual_payload_omits_v14_continuity_fields() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.continuity_policy_enabled = False
+    plan = VisualPlan(
+        style_profile=StyleProfile(
+            style_id="ink",
+            description="Simple ink",
+            palette=["black", "white"],
+            line_style="loose",
+            background="paper",
+            must_avoid=["text"],
+        ),
+        characters=[
+            CharacterIdentity(
+                character_id="fox",
+                name="Fox",
+                signature_traits=["small"],
+                body_form="quadruped",
+                proportions=["short legs"],
+                face_and_markings=["white muzzle"],
+                identity_constraints=["never bipedal"],
+            )
+        ],
+        scenes=[
+            VisualBrief(
+                scene_id="scene-001",
+                story_moment="The fox finds a light.",
+                subjects=["fox", "lantern"],
+                action="The fox approaches.",
+                emotion="curious",
+                environment="snow",
+                composition="wide",
+                must_show=["lantern"],
+                must_avoid=["text"],
+                character_ids=["fox"],
+                continuity_from_previous=["opening state"],
+                state_after_scene=["lantern found"],
+                identity_requirements=["quadruped"],
+            )
+        ],
+    )
+
+    payload = engine._visual_plan_payload(plan)
+
+    assert "body_form" not in payload["characters"][0]
+    assert "continuity_from_previous" not in payload["scenes"][0]
+    assert payload["scenes"][0]["character_ids"] == ["fox"]

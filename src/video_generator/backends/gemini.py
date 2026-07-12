@@ -127,12 +127,60 @@ def _gemini_usage(payload: dict[str, Any], task_id: str, backend_id: str, reserv
         or usage.get("candidatesTokenCount")
         or 0
     )
+    cached_units = float(
+        usage.get("total_cached_tokens")
+        or usage.get("cached_content_token_count")
+        or usage.get("cachedContentTokenCount")
+        or usage.get("cache_read_input_tokens")
+        or 0
+    )
+    thought_units = float(
+        usage.get("total_thought_tokens")
+        or usage.get("thoughts_token_count")
+        or usage.get("thoughtsTokenCount")
+        or 0
+    )
+    image_output_units = 0.0
+    modality_details = (
+        usage.get("output_tokens_by_modality")
+        or usage.get("candidates_tokens_details")
+        or usage.get("candidatesTokensDetails")
+        or usage.get("output_token_details")
+        or []
+    )
+    if isinstance(modality_details, list):
+        for detail in modality_details:
+            if not isinstance(detail, dict):
+                continue
+            if str(detail.get("modality") or "").upper() == "IMAGE":
+                image_output_units += float(
+                    detail.get("tokens")
+                    or detail.get("token_count")
+                    or detail.get("tokenCount")
+                    or 0
+                )
+    raw_grounding_count = (
+        usage.get("grounding_tool_count")
+        or usage.get("groundingToolCount")
+        or 0
+    )
+    if isinstance(raw_grounding_count, dict):
+        raw_grounding_count = raw_grounding_count.get("count") or 0
+    grounding_queries = float(raw_grounding_count)
+    billable_units = {
+        "input_tokens": max(0.0, float(input_units) - cached_units),
+        "cached_input_tokens": cached_units,
+        "output_tokens": max(0.0, float(output_units) - image_output_units) + thought_units,
+        **({"image_output_tokens": image_output_units} if image_output_units else {}),
+        **({"search_queries": grounding_queries} if grounding_queries else {}),
+    }
     return UsageRecord(
         task_id=task_id,
         backend_id=backend_id,
         provider_request_id=str(payload.get("id") or payload.get("name") or ""),
         input_units=float(input_units),
         output_units=float(output_units),
+        billable_units=billable_units,
         reserved_usd=reservation,
     )
 
@@ -336,13 +384,15 @@ class GeminiSearchBackend(_GeminiClient):
                 )
             )
         provider_request_id = str(payload.get("id") or payload.get("name") or "")
+        usage = _gemini_usage(
+            payload, "search", self.descriptor.backend_id, self.descriptor.reservation_usd
+        )
+        usage.billable_units.setdefault("search_queries", float(query_count))
         return SearchResult(
             query=request.query,
             sources=sources,
             provider_request_id=provider_request_id,
-            usage=_gemini_usage(
-                payload, "search", self.descriptor.backend_id, self.descriptor.reservation_usd
-            ),
+            usage=usage,
         )
 
     def fetch(self, request: SourceFetchRequest) -> SourceDocument:
@@ -423,6 +473,28 @@ class GeminiImageBackend(_GeminiClient):
         atomic_write_bytes(output_path, decoded)
         width, height = image_dimensions(output_path)
         provider_request_id = str(payload.get("id") or payload.get("name") or "")
+        usage = _gemini_usage(
+            payload,
+            "image_generate",
+            self.descriptor.backend_id,
+            self.descriptor.reservation_usd,
+        )
+        if not usage.billable_units.get("image_output_tokens"):
+            raw_usage = payload.get("usage") or payload.get("usage_metadata") or {}
+            thought_tokens = (
+                float(
+                    raw_usage.get("total_thought_tokens")
+                    or raw_usage.get("thoughts_token_count")
+                    or 0
+                )
+                if isinstance(raw_usage, dict)
+                else 0.0
+            )
+            # Without a modality split the aggregate output commonly represents the generated
+            # image. Use the documented fixed-image equivalent and retain only explicit thinking
+            # tokens at the text-output rate, avoiding image + text double charging.
+            usage.billable_units["output_tokens"] = thought_tokens
+            usage.billable_units[f"generated_image_{image_size.lower()}"] = 1.0
         return ImageResult(
             asset=ImageAsset(
                 scene_id=request.scene_id,
@@ -436,10 +508,5 @@ class GeminiImageBackend(_GeminiClient):
                 generation_settings={"aspect_ratio": "16:9", "image_size": image_size},
                 provider_request_id=provider_request_id,
             ),
-            usage=_gemini_usage(
-                payload,
-                "image_generate",
-                self.descriptor.backend_id,
-                self.descriptor.reservation_usd,
-            ),
+            usage=usage,
         )

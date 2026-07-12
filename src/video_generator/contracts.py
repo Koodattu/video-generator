@@ -519,6 +519,11 @@ class CharacterIdentity(ContractModel):
     signature_traits: list[str]
     color_anchors: list[str] = Field(default_factory=list)
     recurring_props: list[str] = Field(default_factory=list)
+    body_form: str = ""
+    proportions: list[str] = Field(default_factory=list)
+    face_and_markings: list[str] = Field(default_factory=list)
+    wardrobe: list[str] = Field(default_factory=list)
+    identity_constraints: list[str] = Field(default_factory=list)
 
 
 class StyleProfile(ContractModel):
@@ -541,6 +546,10 @@ class VisualBrief(ContractModel):
     must_show: list[str]
     must_avoid: list[str]
     character_ids: list[str] = Field(default_factory=list)
+    continuity_from_previous: list[str] = Field(default_factory=list)
+    state_after_scene: list[str] = Field(default_factory=list)
+    identity_requirements: list[str] = Field(default_factory=list)
+    persistent_elements: list[str] = Field(default_factory=list)
 
 
 class VisualPlan(VersionedContract):
@@ -839,13 +848,42 @@ class PreflightReport(VersionedContract):
 class UsageRecord(VersionedContract):
     task_id: str
     backend_id: str
+    call_id: str = ""
     provider_request_id: str = ""
     input_units: Annotated[FiniteFloat, Field(ge=0)] = 0
     output_units: Annotated[FiniteFloat, Field(ge=0)] = 0
+    billable_units: dict[str, Annotated[FiniteFloat, Field(ge=0)]] = Field(default_factory=dict)
     reserved_usd: Annotated[FiniteFloat, Field(ge=0)] = 0
+    estimated_usd: Annotated[FiniteFloat, Field(ge=0)] | None = None
     actual_usd: Annotated[FiniteFloat, Field(ge=0)] | None = None
+    cost_status: Literal["not_applicable", "estimated", "reported", "unpriced"] = "unpriced"
+    pricing_snapshot: str = ""
+    cost_basis: str = ""
     elapsed_seconds: Annotated[FiniteFloat, Field(ge=0)] = 0
     peak_vram_mb: Annotated[FiniteFloat, Field(ge=0)] | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class CloudCallRecord(ContractModel):
+    call_id: str
+    task_id: str
+    backend_id: str
+    stage: str = ""
+    status: Literal["reserved", "settled", "unresolved"] = "reserved"
+    provider_request_id: str = ""
+    reserved_usd: Annotated[FiniteFloat, Field(ge=0)] = 0
+    estimated_usd: Annotated[FiniteFloat, Field(ge=0)] | None = None
+    actual_usd: Annotated[FiniteFloat, Field(ge=0)] | None = None
+    billable_units: dict[str, Annotated[FiniteFloat, Field(ge=0)]] = Field(default_factory=dict)
+    pricing_snapshot: str = ""
+    cost_basis: str = ""
+    incurred_in_run_id: str = ""
+    inherited: bool = False
+    legacy: bool = False
+    started_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+    elapsed_seconds: Annotated[FiniteFloat, Field(ge=0)] = 0
+    error: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -882,6 +920,8 @@ class RunManifest(VersionedContract):
     stages: dict[str, StageRecord] = Field(default_factory=dict)
     reserved_cost_usd: FiniteFloat = 0
     cost_reservations: list[UsageRecord] = Field(default_factory=list)
+    cloud_calls: list[CloudCallRecord] = Field(default_factory=list)
+    cloud_cost_ledger_version: Annotated[int, Field(ge=0)] = 0
     warnings: list[str] = Field(default_factory=list)
 
 

@@ -67,6 +67,7 @@ class BraveSearchBackend(Backend):
                 backend_id=self.descriptor.backend_id,
                 provider_request_id=request_id,
                 input_units=1,
+                billable_units={"search_queries": 1},
                 reserved_usd=self.descriptor.reservation_usd,
             ),
         )

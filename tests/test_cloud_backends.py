@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import base64
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,8 +14,15 @@ from video_generator.backends.gemini import (
     GeminiStructuredTextBackend,
     _gemini_usage,
 )
+from video_generator.backends.elevenlabs import ElevenLabsAlignmentBackend
 from video_generator.backends.openai import OpenAIStructuredTextBackend, OpenAIWebSearchBackend
-from video_generator.contracts import ImageRequest, OutputLanguage, SearchRequest, StructuredTextRequest
+from video_generator.contracts import (
+    AlignmentRequest,
+    ImageRequest,
+    OutputLanguage,
+    SearchRequest,
+    StructuredTextRequest,
+)
 from video_generator.errors import BackendError, ErrorKind
 from video_generator.net import HttpResponse
 from video_generator.profiles import BACKEND_DESCRIPTORS, PROFILES
@@ -121,7 +129,17 @@ def test_gemini_usage_reads_current_interactions_fields() -> None:
     usage = _gemini_usage(
         {
             "id": "interaction-1",
-            "usage": {"total_input_tokens": 123, "total_output_tokens": 45},
+            "usage": {
+                "total_input_tokens": 123,
+                "total_cached_tokens": 23,
+                "total_output_tokens": 1745,
+                "total_thought_tokens": 5,
+                "output_tokens_by_modality": [
+                    {"modality": "TEXT", "tokens": 65},
+                    {"modality": "IMAGE", "tokens": 1680},
+                ],
+                "grounding_tool_count": {"type": "google_search", "count": 1},
+            },
         },
         "ideate",
         "gemini:gemini-3.5-flash",
@@ -129,7 +147,47 @@ def test_gemini_usage_reads_current_interactions_fields() -> None:
     )
 
     assert usage.input_units == 123
-    assert usage.output_units == 45
+    assert usage.output_units == 1745
+    assert usage.billable_units == {
+        "input_tokens": 100,
+        "cached_input_tokens": 23,
+        "output_tokens": 70,
+        "image_output_tokens": 1680,
+        "search_queries": 1,
+    }
+
+
+def test_elevenlabs_alignment_prices_the_full_uploaded_audio(tmp_path: Path) -> None:
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fixture-audio")
+    http = StubHttpClient(
+        {
+            "words": [
+                {"text": "hello", "start": 0.5, "end": 2.0, "loss": 0.1},
+            ]
+        }
+    )
+    backend = ElevenLabsAlignmentBackend(
+        "test-key",
+        workspace_root=tmp_path,
+        run_root=tmp_path,
+        http=http,
+    )
+    backend.media = SimpleNamespace(
+        probe_audio=lambda path: SimpleNamespace(duration_seconds=4.5)
+    )
+
+    result = backend.align(
+        AlignmentRequest(
+            scene_id="scene-001",
+            audio_path="audio.wav",
+            transcript="hello",
+            output_language=OutputLanguage.ENGLISH,
+        )
+    )
+
+    assert result.usage is not None
+    assert result.usage.billable_units == {"audio_seconds": 4.5}
 
 
 def test_gemini_rejects_non_completed_interaction(tmp_path: Path) -> None:
