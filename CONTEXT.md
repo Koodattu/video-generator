@@ -5,8 +5,14 @@ This context defines the shared language for producing narrated, still-image vid
 ## Language
 
 **Scene**:
-An ordered narrated portion of a video associated with one primary visual. Scene lengths intentionally vary with the content.
+An ordered editorial and narration portion of a video. In `scene_locked` mode it owns one visual; in
+`cadenced` mode it contains one or more timed Shots. Scene lengths intentionally vary with the content.
 _Avoid_: Segment, slide
+
+**Shot**:
+A generated still image with an immutable frame-aligned interval and parent Scene. Shots are visual
+units only; they do not split the script or TTS checkpoint.
+_Avoid_: Scene, slide
 
 **Duration Budget**:
 The maximum running time allotted to a video, which the finished video should approach without exceeding. The accepted proximity band is a production rule rather than part of the term.
@@ -28,8 +34,20 @@ _Avoid_: Model zoo, automatic winner, LLM mode
 The declared relationship between a video's narrative and real-world evidence. `fiction` is an invented story for which research is creative input only; `factual` contains claims intended to be supported by captured sources.
 _Avoid_: Genre, hybrid
 
+**Content Format**:
+The editorial structure selected independently from Content Mode. `narrative` follows a causal story
+arc, `explainer` builds a cumulative answer, and `mythbuster` fairly states and corrects a misconception.
+Myth-buster Runs require factual mode.
+_Avoid_: Content Mode, Visual Style
+
+**Narration Delivery**:
+The measurable speaking-rate and pause envelope plus an optional performance direction. `slow`,
+`standard`, and `fast` are quantitative presets rather than prompt adjectives alone.
+_Avoid_: Voice Profile, Duration Budget
+
 **Visual Brief**:
-A provider-neutral description of what a Scene should depict, including its subject, action, mood, composition, and continuity requirements.
+A provider-neutral description of what a Scene or Shot should depict, including its subject, action,
+mood, composition, and continuity requirements.
 _Avoid_: Image prompt, generation prompt
 
 **Style Profile**:
@@ -88,6 +106,11 @@ _Avoid_: Prompt, concept, script
 One proposed story direction produced from the Creative Brief and available research. It competes with other candidates and is not yet an outline or script.
 _Avoid_: Idea, draft
 
+**Explainer Candidate**:
+One proposed explanatory direction with a modern anchor, central question, thesis, evidence progression,
+human angle, landing, and visual opportunities. It competes with other candidates before outlining.
+_Avoid_: Story Candidate, outline
+
 **Story Concept**:
 The Story Candidate chosen by the selector as the basis for outlining and scriptwriting.
 _Avoid_: Winner, selected idea
@@ -96,9 +119,29 @@ _Avoid_: Winner, selected idea
 A compact collection of researched inspiration and retained source metadata prepared for ideation. It may include motifs, surprising details, settings, vocabulary, cultural cautions, and clichés to avoid, but it is not a story or evidence that fiction must reproduce literally.
 _Avoid_: Research dump, source list, context
 
+**Evidence Record**:
+One bounded factual proposition linked to retained Source IDs, confidence, limitations, and time
+sensitivity. It defines what later factual narration may claim; plausibility or model memory does not.
+_Avoid_: Citation, Research Finding
+
+**Claim Inventory**:
+The complete list of externally verifiable assertions in an approved factual Narration Script, preserving
+their exact spoken wording, Scene IDs, qualifications, and claimed Evidence links.
+_Avoid_: Script summary, source list
+
+**Factual Review**:
+An independent claim-by-claim comparison against Evidence Records that also searches for claims omitted
+from the inventory. Any unsupported, under-qualified, or uncovered claim blocks narration.
+_Avoid_: Story Review, fact-checking prompt
+
 **Story Outline**:
 The structured story arc and ordered Scene plan derived from the Story Concept before narration prose is written. It assigns each Scene a narrative purpose, emotional beat, visual opportunity, and provisional share of the Duration Budget.
 _Avoid_: Script, scene list, storyboard
+
+**Explainer Outline**:
+The ordered explanatory arc produced before narration prose. Each Scene has an editorial role, one key
+point, relevant Evidence or Research IDs, a visual opportunity, and a provisional Duration share.
+_Avoid_: Story Outline, script, slide deck
 
 **Narration Script**:
 The approved text organized into ordered Scenes and intended to be spoken verbatim by the Narrator Voice. It excludes visual directions, research citations, review commentary, and formatting that should not be spoken aloud.
@@ -129,8 +172,9 @@ The presentation rule for movement and transitions between Scene visuals.
 _Avoid_: Transition preset, animation
 
 **Visual Cadence**:
-The soft planning target for how often a new Scene visual appears while allowing narrative boundaries to justify variation.
-_Avoid_: Fixed interval, image duration
+The configured rhythm of generated stills. Scene cadence shapes editorial section length; in `cadenced`
+mode the Shot target and bounds control image changes independently after narration timing is final.
+_Avoid_: TTS chunk size, transition effect
 
 **Cost Ceiling**:
 The maximum estimated cloud spend permitted for a Run. The harness must not knowingly begin a Backend call whose configured worst-case cost would exceed the remaining ceiling.

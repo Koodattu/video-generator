@@ -18,10 +18,10 @@ from video_generator.backends.elevenlabs import ElevenLabsAlignmentBackend
 from video_generator.backends.openai import OpenAIStructuredTextBackend, OpenAIWebSearchBackend
 from video_generator.contracts import (
     AlignmentRequest,
-    ImageRequest,
     OutputLanguage,
     SearchRequest,
     StructuredTextRequest,
+    TimedImageRequest,
 )
 from video_generator.errors import BackendError, ErrorKind
 from video_generator.net import HttpResponse
@@ -291,8 +291,9 @@ def test_gemini_image_uses_current_jpeg_response_format(
     )
 
     result = backend.generate(
-        ImageRequest(
+        TimedImageRequest(
             scene_id="scene-001",
+            shot_id="shot-001",
             target_backend_id="gemini:gemini-3.1-flash-image",
             prompt="A fox beside an amber lantern, no text.",
             width=2048,
@@ -310,6 +311,7 @@ def test_gemini_image_uses_current_jpeg_response_format(
     }
     assert result.asset.image.mime_type == "image/jpeg"
     assert result.asset.image.path.endswith("generated.jpg")
+    assert result.asset.shot_id == "shot-001"
 
 
 def test_registry_applies_frozen_descriptor_to_adapter(tmp_path: Path, resolved_config) -> None:

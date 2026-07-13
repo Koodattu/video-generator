@@ -498,6 +498,7 @@ class GeminiImageBackend(_GeminiClient):
         return ImageResult(
             asset=ImageAsset(
                 scene_id=request.scene_id,
+                shot_id=getattr(request, "shot_id", None),
                 image=MediaReference(
                     path=relative_path(output_path, self.workspace_root),
                     sha256=sha256_file(output_path),

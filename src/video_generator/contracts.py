@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -35,6 +36,38 @@ class ContentMode(StrEnum):
     FACTUAL = "factual"
 
 
+class ContentFormat(StrEnum):
+    NARRATIVE = "narrative"
+    EXPLAINER = "explainer"
+    MYTHBUSTER = "mythbuster"
+
+
+class NarrationPace(StrEnum):
+    SLOW = "slow"
+    STANDARD = "standard"
+    FAST = "fast"
+
+
+class VisualShotMode(StrEnum):
+    SCENE_LOCKED = "scene_locked"
+    CADENCED = "cadenced"
+
+
+MAX_CADENCED_SHOTS = 72
+
+
+def estimated_cadenced_shot_count(
+    duration_seconds: float,
+    visual_target_seconds: float,
+    shot_target_seconds: float,
+) -> int:
+    scene_count = max(1, math.ceil(duration_seconds / visual_target_seconds)) + 1
+    return max(
+        scene_count,
+        math.ceil(duration_seconds / shot_target_seconds) + math.ceil(scene_count / 2),
+    )
+
+
 class FailurePolicy(StrEnum):
     STRICT = "strict"
     OMIT_WITH_WARNING = "omit_with_warning"
@@ -60,6 +93,7 @@ TASK_IDS: tuple[str, ...] = (
     "review_spoken",
     "review_constraints",
     "script_revision",
+    "claim_inventory",
     "factual_review",
     "narration_synthesis",
     "duration_repair",
@@ -107,6 +141,7 @@ TASK_PROTOCOL: dict[str, ProtocolName] = {
     "review_spoken": ProtocolName.STRUCTURED_TEXT,
     "review_constraints": ProtocolName.STRUCTURED_TEXT,
     "script_revision": ProtocolName.STRUCTURED_TEXT,
+    "claim_inventory": ProtocolName.STRUCTURED_TEXT,
     "factual_review": ProtocolName.STRUCTURED_TEXT,
     "narration_synthesis": ProtocolName.SPEECH,
     "duration_repair": ProtocolName.STRUCTURED_TEXT,
@@ -128,6 +163,27 @@ class VoiceSettings(ContractModel):
     authorization: Literal["self", "explicit_permission"] = "self"
 
 
+class NarrationDeliverySpec(ContractModel):
+    pace: NarrationPace = NarrationPace.STANDARD
+    target_words_per_second: Annotated[FiniteFloat, Field(gt=0, le=8)]
+    minimum_words_per_second: Annotated[FiniteFloat, Field(gt=0, le=8)]
+    maximum_words_per_second: Annotated[FiniteFloat, Field(gt=0, le=8)]
+    target_pause_seconds: Annotated[FiniteFloat, Field(ge=0, le=3)]
+    maximum_pause_seconds: Annotated[FiniteFloat, Field(ge=0, le=3)]
+    tempo_multiplier: Annotated[FiniteFloat, Field(ge=0.75, le=1.35)] = 1.0
+    description: Annotated[str, Field(max_length=500)] = ""
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> "NarrationDeliverySpec":
+        if self.minimum_words_per_second > self.target_words_per_second:
+            raise ValueError("minimum narration rate must not exceed the target rate")
+        if self.target_words_per_second > self.maximum_words_per_second:
+            raise ValueError("target narration rate must not exceed the maximum rate")
+        if self.target_pause_seconds > self.maximum_pause_seconds:
+            raise ValueError("target narration pause must not exceed the maximum pause")
+        return self
+
+
 class RawRunConfig(VersionedContract):
     profile: Literal[
         "local",
@@ -140,6 +196,9 @@ class RawRunConfig(VersionedContract):
     duration_seconds: Annotated[FiniteFloat, Field(ge=10, le=3600)] = 90
     quality: Quality = Quality.DRAFT
     content_mode: ContentMode = ContentMode.FICTION
+    content_format: ContentFormat = ContentFormat.NARRATIVE
+    narration_pace: NarrationPace = NarrationPace.STANDARD
+    narration_delivery: Annotated[str, Field(max_length=500)] = ""
     audience: Literal["family_safe_general"] = "family_safe_general"
     style: Annotated[str, Field(min_length=1, max_length=120)] = "ms_paint_stick"
     style_description: Annotated[str, Field(max_length=1000)] = ""
@@ -154,6 +213,10 @@ class RawRunConfig(VersionedContract):
     visual_target_seconds: Annotated[FiniteFloat, Field(gt=0, le=120)] = 15
     visual_min_seconds: Annotated[FiniteFloat, Field(gt=0, le=120)] = 8
     visual_max_seconds: Annotated[FiniteFloat, Field(gt=0, le=180)] = 25
+    visual_shot_mode: VisualShotMode = VisualShotMode.SCENE_LOCKED
+    shot_target_seconds: Annotated[FiniteFloat, Field(gt=0, le=120)] = 3
+    shot_min_seconds: Annotated[FiniteFloat, Field(gt=0, le=120)] = 2
+    shot_max_seconds: Annotated[FiniteFloat, Field(gt=0, le=180)] = 5
     music_enabled: bool = False
     captions_enabled: bool = True
     animated_captions: bool = False
@@ -162,14 +225,34 @@ class RawRunConfig(VersionedContract):
 
     @model_validator(mode="after")
     def validate_combinations(self) -> "RawRunConfig":
-        if self.content_mode is ContentMode.FACTUAL:
+        if self.content_format is ContentFormat.MYTHBUSTER and self.content_mode is not ContentMode.FACTUAL:
+            raise ValueError("mythbuster format requires content_mode = 'factual'")
+        if self.content_mode is ContentMode.FACTUAL and (
+            self.offline or self.research_query_limit == 0 or self.research_source_limit == 0
+        ):
             raise ValueError(
-                "factual mode is not available until claim/evidence capture and factual review are implemented"
+                "factual mode requires live bounded research with nonzero query and source limits"
             )
         if self.visual_min_seconds > self.visual_target_seconds:
             raise ValueError("visual_min_seconds must not exceed visual_target_seconds")
         if self.visual_target_seconds > self.visual_max_seconds:
             raise ValueError("visual_target_seconds must not exceed visual_max_seconds")
+        if self.shot_min_seconds > self.shot_target_seconds:
+            raise ValueError("shot_min_seconds must not exceed shot_target_seconds")
+        if self.shot_target_seconds > self.shot_max_seconds:
+            raise ValueError("shot_target_seconds must not exceed shot_max_seconds")
+        if self.visual_shot_mode is VisualShotMode.CADENCED:
+            estimated_shots = estimated_cadenced_shot_count(
+                float(self.duration_seconds),
+                float(self.visual_target_seconds),
+                float(self.shot_target_seconds),
+            )
+            if estimated_shots > MAX_CADENCED_SHOTS:
+                raise ValueError(
+                    f"cadenced mode estimates {estimated_shots} visual Shots; the current "
+                    f"single-plan limit is {MAX_CADENCED_SHOTS}. Increase shot_target_seconds, "
+                    "shorten the Run, or use scene_locked mode"
+                )
         if self.animated_captions and not self.captions_enabled:
             raise ValueError("animated_captions requires captions_enabled")
         unknown = sorted(set(self.task_overrides) - set(TASK_IDS))
@@ -186,6 +269,10 @@ class CreativeBrief(VersionedContract):
     must_include: Annotated[list[str], Field(max_length=20)] = Field(default_factory=list)
     avoid: Annotated[list[str], Field(max_length=20)] = Field(default_factory=list)
     research_focus: Annotated[list[str], Field(max_length=20)] = Field(default_factory=list)
+    modern_anchor: Annotated[str, Field(max_length=500)] = ""
+    central_question: Annotated[str, Field(max_length=1000)] = ""
+    misconception: Annotated[str, Field(max_length=1000)] = ""
+    desired_takeaway: Annotated[str, Field(max_length=1000)] = ""
 
     @field_validator("themes", "must_include", "avoid", "research_focus")
     @classmethod
@@ -216,6 +303,10 @@ class ResolvedRunConfig(VersionedContract):
     duration_seconds: FiniteFloat
     quality: Quality
     content_mode: ContentMode
+    content_format: ContentFormat = ContentFormat.NARRATIVE
+    narration_pace: NarrationPace = NarrationPace.STANDARD
+    narration_delivery: str = ""
+    narration_delivery_spec: NarrationDeliverySpec | None = None
     audience: str
     style: str
     style_description: str
@@ -230,6 +321,10 @@ class ResolvedRunConfig(VersionedContract):
     visual_target_seconds: FiniteFloat
     visual_min_seconds: FiniteFloat
     visual_max_seconds: FiniteFloat
+    visual_shot_mode: VisualShotMode = VisualShotMode.SCENE_LOCKED
+    shot_target_seconds: FiniteFloat = 3
+    shot_min_seconds: FiniteFloat = 2
+    shot_max_seconds: FiniteFloat = 5
     music_enabled: bool
     captions_enabled: bool
     animated_captions: bool
@@ -274,6 +369,15 @@ class ResearchFinding(ContractModel):
     source_ids: list[str] = Field(default_factory=list)
 
 
+class EvidenceRecord(ContractModel):
+    evidence_id: Annotated[str, Field(min_length=1, max_length=120)]
+    supported_statement: Annotated[str, Field(min_length=1, max_length=4000)]
+    source_ids: Annotated[list[str], Field(min_length=1, max_length=20)]
+    confidence: Literal["low", "medium", "high"]
+    time_sensitive: bool = False
+    limitations: list[str] = Field(default_factory=list)
+
+
 class ResearchPack(VersionedContract):
     queries: list[str] = Field(default_factory=list)
     sources: list[ResearchSource] = Field(default_factory=list)
@@ -305,6 +409,28 @@ class ResearchPack(VersionedContract):
         return self
 
 
+class FactualResearchPack(ResearchPack):
+    evidence: Annotated[list[EvidenceRecord], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def validate_evidence_references(self) -> "FactualResearchPack":
+        evidence_ids = [item.evidence_id for item in self.evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("Evidence IDs must be unique")
+        source_ids = {source.source_id for source in self.sources}
+        unknown = sorted(
+            {
+                source_id
+                for item in self.evidence
+                for source_id in item.source_ids
+                if source_id not in source_ids
+            }
+        )
+        if unknown:
+            raise ValueError(f"Evidence references unknown Source IDs: {', '.join(unknown)}")
+        return self
+
+
 class StoryCandidate(ContractModel):
     candidate_id: str
     title: str
@@ -326,6 +452,34 @@ class CandidateSet(VersionedContract):
     @field_validator("candidates")
     @classmethod
     def unique_candidates(cls, values: list[StoryCandidate]) -> list[StoryCandidate]:
+        ids = [item.candidate_id.strip() for item in values]
+        if not values or any(not item_id for item_id in ids) or len(ids) != len(set(ids)):
+            raise ValueError("candidate IDs must be nonempty and unique")
+        return values
+
+
+class ExplainerCandidate(ContractModel):
+    candidate_id: str
+    title: str
+    modern_anchor: str
+    central_question: str
+    misconception: str = ""
+    thesis: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    evidence_ladder: list[str] = Field(default_factory=list)
+    human_angle: str
+    landing_direction: str
+    visual_opportunities: list[str] = Field(default_factory=list)
+    accuracy_risks: list[str] = Field(default_factory=list)
+    duration_fit: str
+
+
+class ExplainerCandidateSet(VersionedContract):
+    candidates: list[ExplainerCandidate]
+
+    @field_validator("candidates")
+    @classmethod
+    def unique_candidates(cls, values: list[ExplainerCandidate]) -> list[ExplainerCandidate]:
         ids = [item.candidate_id.strip() for item in values]
         if not values or any(not item_id for item_id in ids) or len(ids) != len(set(ids)):
             raise ValueError("candidate IDs must be nonempty and unique")
@@ -359,6 +513,33 @@ class SelectionReport(VersionedContract):
         return self
 
 
+class ExplainerCandidateScore(ContractModel):
+    candidate_id: str
+    duration_fit: Annotated[int, Field(ge=1, le=5)]
+    hook_strength: Annotated[int, Field(ge=1, le=5)]
+    evidence_strength: Annotated[int, Field(ge=1, le=5)]
+    progression: Annotated[int, Field(ge=1, le=5)]
+    visual_strength: Annotated[int, Field(ge=1, le=5)]
+    spoken_suitability: Annotated[int, Field(ge=1, le=5)]
+    audience_fit: Annotated[int, Field(ge=1, le=5)]
+    rationale: str
+
+
+class ExplainerSelectionReport(VersionedContract):
+    scores: list[ExplainerCandidateScore]
+    chosen_candidate_id: str
+    rationale: str
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "ExplainerSelectionReport":
+        score_ids = [score.candidate_id for score in self.scores]
+        if not score_ids or len(score_ids) != len(set(score_ids)):
+            raise ValueError("selection scores must contain unique candidate IDs")
+        if self.chosen_candidate_id not in score_ids:
+            raise ValueError("chosen candidate must have a score")
+        return self
+
+
 class OutlineScene(ContractModel):
     scene_id: str
     narrative_purpose: str
@@ -377,6 +558,45 @@ class StoryOutline(VersionedContract):
     @field_validator("scenes")
     @classmethod
     def validate_scene_ids(cls, scenes: list[OutlineScene]) -> list[OutlineScene]:
+        expected = [f"scene-{index:03d}" for index in range(1, len(scenes) + 1)]
+        actual = [scene.scene_id for scene in scenes]
+        if not scenes or actual != expected:
+            raise ValueError(f"scene IDs must be contiguous and ordered: {expected}")
+        return scenes
+
+
+class ExplainerOutlineScene(ContractModel):
+    scene_id: str
+    arc_role: Literal[
+        "modern_hook",
+        "extreme_contrast",
+        "question",
+        "misconception",
+        "correction",
+        "evidence",
+        "human_tangent",
+        "synthesis",
+        "landing",
+    ]
+    purpose: str
+    key_point: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    visual_opportunity: str
+    provisional_seconds: Annotated[FiniteFloat, Field(gt=0)]
+    continuity_obligations: list[str] = Field(default_factory=list)
+
+
+class ExplainerOutline(VersionedContract):
+    title: str
+    thesis: str
+    modern_anchor: str
+    misconception: str = ""
+    landing_callback: str
+    scenes: list[ExplainerOutlineScene]
+
+    @field_validator("scenes")
+    @classmethod
+    def validate_scene_ids(cls, scenes: list[ExplainerOutlineScene]) -> list[ExplainerOutlineScene]:
         expected = [f"scene-{index:03d}" for index in range(1, len(scenes) + 1)]
         actual = [scene.scene_id for scene in scenes]
         if not scenes or actual != expected:
@@ -449,6 +669,65 @@ class RevisedScript(VersionedContract):
         if any(not item for item in ids) or len(ids) != len(set(ids)):
             raise ValueError("revision dispositions must have nonempty unique Finding IDs")
         return values
+
+
+class ScriptClaim(ContractModel):
+    claim_id: Annotated[str, Field(min_length=1, max_length=120)]
+    scene_id: Annotated[str, Field(pattern=r"^scene-\d{3}$")]
+    exact_text: Annotated[str, Field(min_length=1, max_length=4000)]
+    evidence_ids: Annotated[list[str], Field(max_length=20)] = Field(default_factory=list)
+    qualification: Annotated[str, Field(max_length=2000)] = ""
+
+
+class ClaimInventory(VersionedContract):
+    claims: Annotated[list[ScriptClaim], Field(min_length=1)]
+    coverage_notes: Annotated[str, Field(max_length=4000)] = ""
+
+    @field_validator("claims")
+    @classmethod
+    def unique_claims(cls, values: list[ScriptClaim]) -> list[ScriptClaim]:
+        ids = [item.claim_id for item in values]
+        if any(not item for item in ids) or len(ids) != len(set(ids)):
+            raise ValueError("claim IDs must be nonempty and unique")
+        return values
+
+
+class FactualClaimReview(ContractModel):
+    claim_id: str
+    verdict: Literal["supported", "needs_qualification", "unsupported"]
+    evidence_ids: list[str] = Field(default_factory=list)
+    rationale: Annotated[str, Field(min_length=1, max_length=4000)]
+
+
+class FactualReviewReport(VersionedContract):
+    passed: bool
+    claims: list[FactualClaimReview]
+    uncovered_claims: list[str] = Field(default_factory=list)
+    summary: Annotated[str, Field(max_length=4000)] = ""
+
+    @model_validator(mode="after")
+    def validate_review(self) -> "FactualReviewReport":
+        ids = [item.claim_id for item in self.claims]
+        if len(ids) != len(set(ids)):
+            raise ValueError("factual review Claim IDs must be unique")
+        if self.passed and (
+            self.uncovered_claims or any(item.verdict != "supported" for item in self.claims)
+        ):
+            raise ValueError("a passed factual review cannot contain uncovered or unsupported claims")
+        return self
+
+
+class FactualRevisedScript(RevisedScript):
+    claim_inventory: ClaimInventory
+    factual_review: FactualReviewReport
+
+    @model_validator(mode="after")
+    def validate_claim_review_coverage(self) -> "FactualRevisedScript":
+        inventory_ids = {item.claim_id for item in self.claim_inventory.claims}
+        review_ids = {item.claim_id for item in self.factual_review.claims}
+        if inventory_ids != review_ids:
+            raise ValueError("factual review must cover every inventoried claim exactly once")
+        return self
 
 
 class MediaReference(ContractModel):
@@ -578,6 +857,54 @@ class VisualPlan(VersionedContract):
         return self
 
 
+class TimedVisualShot(VisualBrief):
+    shot_id: Annotated[str, Field(pattern=r"^shot-\d{3,}$")]
+    narration_excerpt: Annotated[str, Field(min_length=1, max_length=4000)]
+    start_seconds: Annotated[FiniteFloat, Field(ge=0)]
+    end_seconds: Annotated[FiniteFloat, Field(gt=0)]
+
+    @model_validator(mode="after")
+    def validate_span(self) -> "TimedVisualShot":
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("visual Shot end must follow its start")
+        return self
+
+
+class TimedVisualPlan(VersionedContract):
+    style_profile: StyleProfile
+    characters: list[CharacterIdentity] = Field(default_factory=list)
+    duration_seconds: Annotated[FiniteFloat, Field(gt=0)]
+    shots: list[TimedVisualShot]
+
+    @model_validator(mode="after")
+    def validate_visual_plan(self) -> "TimedVisualPlan":
+        expected = [f"shot-{index:03d}" for index in range(1, len(self.shots) + 1)]
+        if not self.shots or [shot.shot_id for shot in self.shots] != expected:
+            raise ValueError("Timed Visual Plan Shot IDs must be contiguous and ordered")
+        character_ids = [character.character_id for character in self.characters]
+        if len(set(character_ids)) != len(character_ids):
+            raise ValueError("Character Identity IDs must be unique")
+        known_characters = set(character_ids)
+        unknown = sorted(
+            {
+                character_id
+                for shot in self.shots
+                for character_id in shot.character_ids
+                if character_id not in known_characters
+            }
+        )
+        if unknown:
+            raise ValueError(f"Visual Shots reference unknown Character IDs: {', '.join(unknown)}")
+        previous = 0.0
+        for shot in self.shots:
+            if abs(shot.start_seconds - previous) > 0.002:
+                raise ValueError("Timed Visual Plan Shots must be contiguous and start at zero")
+            previous = shot.end_seconds
+        if abs(previous - self.duration_seconds) > 0.002:
+            raise ValueError("Timed Visual Plan duration must equal its final Shot end")
+        return self
+
+
 class ImageGenerationSettings(ContractModel):
     inference_steps: Annotated[int, Field(ge=1, le=100)] | None = None
     guidance_scale: Annotated[FiniteFloat, Field(ge=0, le=30)] | None = None
@@ -609,8 +936,13 @@ class ImageRequest(VersionedContract):
         return self
 
 
+class TimedImageRequest(ImageRequest):
+    shot_id: Annotated[str, Field(pattern=r"^shot-\d{3,}$")]
+
+
 class ImageAsset(VersionedContract):
     scene_id: str
+    shot_id: Annotated[str, Field(pattern=r"^shot-\d{3,}$")] | None = None
     image: MediaReference
     width: PositiveInt
     height: PositiveInt
@@ -647,8 +979,12 @@ class VisualReviewItem(ContractModel):
         return self
 
 
+class TimedVisualReviewItem(VisualReviewItem):
+    shot_id: Annotated[str, Field(pattern=r"^shot-\d{3,}$")]
+
+
 class VisualReviewReport(VersionedContract):
-    items: list[VisualReviewItem]
+    items: list[VisualReviewItem | TimedVisualReviewItem]
     pass_number: Annotated[int, Field(ge=1, le=2)] = 1
 
 
@@ -714,6 +1050,7 @@ class MusicAsset(VersionedContract):
 
 class RenderScene(ContractModel):
     scene_id: str
+    shot_id: Annotated[str, Field(pattern=r"^shot-\d{3,}$")] | None = None
     image_path: str
     start_seconds: Annotated[FiniteFloat, Field(ge=0)]
     end_seconds: Annotated[FiniteFloat, Field(gt=0)]
@@ -745,10 +1082,18 @@ class RenderPlan(VersionedContract):
         if not self.scenes:
             raise ValueError("Render Plan requires at least one Scene")
         previous = 0.0
+        visual_ids = []
         for scene in self.scenes:
             if abs(scene.start_seconds - previous) > 0.002:
                 raise ValueError("Render Plan Scenes must be contiguous and start at zero")
             previous = scene.end_seconds
+            visual_ids.append(scene.shot_id or scene.scene_id)
+        if len(visual_ids) != len(set(visual_ids)):
+            raise ValueError("Render Plan visual IDs must be unique")
+        if any(scene.shot_id for scene in self.scenes) and not all(
+            scene.shot_id for scene in self.scenes
+        ):
+            raise ValueError("Render Plan cannot mix Scene and Shot visual identities")
         if abs(previous - self.duration_seconds) > 0.002:
             raise ValueError("Render Plan duration must equal its final Scene end")
         if self.caption_mode == "none" and (self.caption_srt_path or self.caption_ass_path):
@@ -828,6 +1173,7 @@ class CostEstimate(VersionedContract):
     projected_total_usd: Annotated[FiniteFloat, Field(ge=0)]
     ceiling_usd: Annotated[FiniteFloat, Field(ge=0)]
     scene_count: PositiveInt
+    visual_shot_count: PositiveInt | None = None
     line_items: dict[str, Annotated[FiniteFloat, Field(ge=0)]] = Field(default_factory=dict)
     basis: str
 
@@ -984,6 +1330,7 @@ class SpeechRequest(ContractModel):
     text: str
     output_language: OutputLanguage
     voice: VoiceSettings
+    delivery: NarrationDeliverySpec | None = None
     output_path: str
     preceding_text: str = ""
     following_text: str = ""

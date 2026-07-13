@@ -299,7 +299,7 @@ function renderOverview() {
   metrics.append(
     metric("Pipeline", `${summary.completed_stage_count}/${summary.total_stage_count}`, summary.current_stage ? `Now: ${titleCase(summary.current_stage)}` : "All stages accounted for"),
     metric("Calculated cost", formatMoney(detail.cost.calculated_list_price_usd), detail.cost.ledger_available ? `${detail.cost.call_count} cloud calls tracked` : "Unavailable or local-only run"),
-    metric("Target duration", formatSeconds(summary.duration_seconds), `${detail.scenes.length} scene${detail.scenes.length === 1 ? "" : "s"}`),
+    metric("Target duration", formatSeconds(summary.duration_seconds), `${detail.scenes.length} visual${detail.scenes.length === 1 ? "" : "s"}`),
     metric("Artifacts", String(detail.files.length), `${formatBytes(detail.files.reduce((sum, item) => sum + Number(item.size_bytes || 0), 0))} on disk`),
   );
   root.append(metrics);
@@ -328,6 +328,8 @@ function renderOverview() {
   briefPanel.append(definitionList([
     ["Tone", detail.brief.tone],
     ["Themes", listText(detail.brief.themes)],
+    ["Modern anchor", detail.brief.modern_anchor],
+    ["Central question", detail.brief.central_question],
     ["Must include", listText(detail.brief.must_include)],
     ["Avoid", listText(detail.brief.avoid)],
   ]));
@@ -338,6 +340,9 @@ function renderOverview() {
     ["Profile", detail.config.profile],
     ["Language", String(detail.config.output_language || "").toUpperCase()],
     ["Quality", titleCase(detail.config.quality)],
+    ["Content", `${titleCase(detail.config.content_mode)} · ${titleCase(detail.config.content_format)}`],
+    ["Narration", titleCase(detail.config.narration_pace)],
+    ["Visual cadence", titleCase(detail.config.visual_shot_mode)],
     ["Cost ceiling", formatMoney(detail.config.cost_ceiling_usd, 2)],
     ["Created", formatDate(summary.created_at)],
   ]));
@@ -372,25 +377,26 @@ function sceneFact(label, value) {
 }
 
 function renderScenes() {
-  if (!state.detail.scenes.length) return emptyPanel("No scene artifacts yet", "Visual briefs, prompts, images, timing, and reviews will join here by stable Scene ID as the run advances.");
+  if (!state.detail.scenes.length) return emptyPanel("No visual artifacts yet", "Briefs, prompts, images, timing, and reviews will join here by stable Scene or Shot ID as the run advances.");
   const grid = element("div", "scene-grid");
   for (const scene of state.detail.scenes) {
+    const visualId = scene.shot_id || scene.scene_id;
     const card = element("article", "scene-card");
     const imageWrap = element("div", "scene-image-wrap");
     if (scene.image_url) {
       const image = document.createElement("img");
       image.src = scene.image_url;
-      image.alt = `Generated image for ${scene.scene_id}`;
+      image.alt = `Generated image for ${visualId}`;
       image.loading = "lazy";
       imageWrap.append(image);
     } else {
       imageWrap.append(element("div", "scene-image-placeholder", "Image not generated yet"));
     }
-    imageWrap.append(element("span", "scene-badge numeric", scene.scene_id));
+    imageWrap.append(element("span", "scene-badge numeric", visualId));
 
     const body = element("div", "scene-card-body");
     const heading = element("div", "scene-card-heading");
-    heading.append(element("h2", null, titleCase(scene.scene_id)));
+    heading.append(element("h2", null, titleCase(visualId)));
     if (scene.timing) {
       heading.append(element("span", "scene-time numeric", `${formatSeconds(scene.timing.start_seconds)} → ${formatSeconds(scene.timing.end_seconds)}`));
     }
@@ -401,6 +407,7 @@ function renderScenes() {
     facts.append(
       sceneFact("Visible action", scene.visual_brief?.action),
       sceneFact("Story moment", scene.visual_brief?.story_moment),
+      sceneFact("Parent section", scene.shot_id ? scene.scene_id : null),
       sceneFact("Incoming continuity", listText(scene.visual_brief?.continuity_from_previous)),
       sceneFact("State after", listText(scene.visual_brief?.state_after_scene)),
     );
@@ -635,14 +642,22 @@ function formPayload() {
       themes: splitList(byId("themes").value),
       must_include: splitList(byId("must-include").value),
       avoid: splitList(byId("avoid").value),
-      research_focus: [],
+      research_focus: splitList(byId("research-focus").value),
+      modern_anchor: byId("modern-anchor").value.trim(),
+      central_question: byId("central-question").value.trim(),
+      misconception: byId("misconception").value.trim(),
+      desired_takeaway: byId("desired-takeaway").value.trim(),
     },
     options: {
       profile: byId("profile").value,
       output_language: byId("output-language").value,
       duration_seconds: Number(byId("duration-seconds").value),
       quality: byId("quality").value,
-      style: defaults.style,
+      content_mode: byId("content-mode").value,
+      content_format: byId("content-format").value,
+      narration_pace: byId("narration-pace").value,
+      narration_delivery: byId("narration-delivery").value.trim(),
+      style: byId("style-id").value.trim(),
       style_description: byId("style-description").value.trim(),
       offline: byId("offline").checked,
       cost_ceiling_usd: Number(byId("cost-ceiling").value),
@@ -652,6 +667,10 @@ function formPayload() {
       visual_target_seconds: Number(byId("visual-target").value),
       visual_min_seconds: Number(defaults.visual_min_seconds),
       visual_max_seconds: Number(defaults.visual_max_seconds),
+      visual_shot_mode: byId("visual-shot-mode").value,
+      shot_target_seconds: Number(byId("shot-target").value),
+      shot_min_seconds: Number(defaults.shot_min_seconds),
+      shot_max_seconds: Number(defaults.shot_max_seconds),
       music_enabled: byId("music-enabled").checked,
       captions_enabled: byId("captions-enabled").checked,
       animated_captions: byId("animated-captions").checked,
@@ -686,14 +705,16 @@ function syncActiveTasks() {
   const quality = byId("quality").value;
   const music = byId("music-enabled").checked;
   const captions = byId("captions-enabled").checked;
+  const cadencedVisuals = byId("visual-shot-mode").value === "cadenced";
+  const factual = byId("content-mode").value === "factual";
   const offline = byId("offline").checked;
   const research = Number(byId("research-queries").value || 0) > 0;
   document.querySelectorAll(".model-task").forEach((row) => {
     const task = row.dataset.taskId;
-    const inactive = task === "factual_review"
+    const inactive = (["claim_inventory", "factual_review"].includes(task) && !factual)
       || (task === "visual_review" && quality !== "final")
       || (["music_brief", "music_generate"].includes(task) && !music)
-      || (task === "caption_alignment" && !captions)
+      || (task === "caption_alignment" && !captions && !cadencedVisuals)
       || (task === "search" && (offline || !research));
     row.classList.toggle("is-inactive", inactive);
   });
@@ -745,13 +766,24 @@ function applyDefaults() {
   byId("profile").value = defaults.profile;
   byId("output-language").value = defaults.output_language;
   byId("quality").value = defaults.quality;
+  byId("content-mode").value = defaults.content_mode;
+  byId("content-format").value = defaults.content_format;
+  byId("narration-pace").value = defaults.narration_pace;
+  byId("narration-delivery").value = defaults.narration_delivery || "";
   byId("duration-seconds").value = defaults.duration_seconds;
   byId("cost-ceiling").value = defaults.cost_ceiling_usd;
   byId("idea-candidates").value = defaults.idea_candidates;
   byId("visual-target").value = defaults.visual_target_seconds;
+  byId("visual-target").min = defaults.visual_min_seconds;
+  byId("visual-target").max = defaults.visual_max_seconds;
+  byId("visual-shot-mode").value = defaults.visual_shot_mode;
+  byId("shot-target").value = defaults.shot_target_seconds;
+  byId("shot-target").min = defaults.shot_min_seconds;
+  byId("shot-target").max = defaults.shot_max_seconds;
   byId("research-queries").value = defaults.research_query_limit;
   byId("research-sources").value = defaults.research_source_limit;
   byId("style-description").value = defaults.style_description || "";
+  byId("style-id").value = defaults.style;
   byId("offline").checked = Boolean(defaults.offline);
   byId("captions-enabled").checked = Boolean(defaults.captions_enabled);
   byId("animated-captions").checked = Boolean(defaults.animated_captions);
@@ -768,6 +800,43 @@ function validateStoryDirection() {
     return false;
   }
   direction.setCustomValidity("");
+  const contentMode = byId("content-mode");
+  const mythbusterNeedsFacts = byId("content-format").value === "mythbuster" && contentMode.value !== "factual";
+  const factualNeedsResearch = contentMode.value === "factual" && (
+    byId("offline").checked
+    || Number(byId("research-queries").value || 0) === 0
+    || Number(byId("research-sources").value || 0) === 0
+  );
+  contentMode.setCustomValidity(
+    mythbusterNeedsFacts
+      ? "Myth-buster format requires factual content mode."
+      : factualNeedsResearch
+        ? "Factual content requires live research with nonzero query and source limits."
+        : "",
+  );
+  if (mythbusterNeedsFacts || factualNeedsResearch) {
+    contentMode.reportValidity();
+    return false;
+  }
+  const shotTarget = byId("shot-target");
+  const sceneCount = Math.max(1, Math.ceil(
+    Number(byId("duration-seconds").value) / Number(byId("visual-target").value),
+  )) + 1;
+  const estimatedShots = Math.max(
+    sceneCount,
+    Math.ceil(Number(byId("duration-seconds").value) / Number(shotTarget.value))
+      + Math.ceil(sceneCount / 2),
+  );
+  const oversizedCadence = byId("visual-shot-mode").value === "cadenced" && estimatedShots > 72;
+  shotTarget.setCustomValidity(
+    oversizedCadence
+      ? `This cadence estimates ${estimatedShots} images; the current limit is 72.`
+      : "",
+  );
+  if (oversizedCadence) {
+    shotTarget.reportValidity();
+    return false;
+  }
   return byId("new-run-form").reportValidity();
 }
 
@@ -778,7 +847,7 @@ function renderPreflight(report, payload, revision) {
   const summary = element("div", "preflight-summary");
   summary.append(
     element("strong", null, report.ready ? "Ready to run" : "Action required"),
-    element("span", "numeric", `${formatMoney(report.cost.projected_total_usd, 2)} projected reservation · ${report.cost.scene_count} scenes`),
+    element("span", "numeric", `${formatMoney(report.cost.projected_total_usd, 2)} projected reservation · ${report.cost.scene_count} sections · ${report.cost.visual_shot_count || report.cost.scene_count} images`),
   );
   panel.append(summary);
   const checks = element("div", "preflight-checks");

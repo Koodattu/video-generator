@@ -26,12 +26,16 @@ from .views import (
 from .. import __version__
 from ..config import load_environment, load_raw_config, resolve_config
 from ..contracts import (
+    ContentFormat,
+    ContentMode,
     CreativeBrief,
+    NarrationPace,
     OutputLanguage,
     PUBLIC_STAGES,
     Quality,
     TASK_IDS,
     TASK_PROTOCOL,
+    VisualShotMode,
 )
 from ..errors import CheckpointError, ConfigurationError, VideoGeneratorError
 from ..preflight import run_preflight
@@ -52,6 +56,7 @@ TASK_GROUPS: dict[str, tuple[str, ...]] = {
         "review_spoken",
         "review_constraints",
         "script_revision",
+        "claim_inventory",
         "factual_review",
         "duration_repair",
     ),
@@ -101,6 +106,10 @@ class RunOptions(DashboardModel):
     output_language: OutputLanguage = OutputLanguage.FINNISH
     duration_seconds: Annotated[FiniteFloat, Field(ge=10, le=3600)] = 90
     quality: Quality = Quality.DRAFT
+    content_mode: ContentMode = ContentMode.FICTION
+    content_format: ContentFormat = ContentFormat.NARRATIVE
+    narration_pace: NarrationPace = NarrationPace.STANDARD
+    narration_delivery: Annotated[str, Field(max_length=500)] = ""
     style: Annotated[str, Field(min_length=1, max_length=120)] = "ms_paint_stick"
     style_description: Annotated[str, Field(max_length=1000)] = ""
     offline: bool = False
@@ -111,6 +120,10 @@ class RunOptions(DashboardModel):
     visual_target_seconds: Annotated[FiniteFloat, Field(gt=0, le=120)] = 15
     visual_min_seconds: Annotated[FiniteFloat, Field(gt=0, le=120)] = 8
     visual_max_seconds: Annotated[FiniteFloat, Field(gt=0, le=180)] = 25
+    visual_shot_mode: VisualShotMode = VisualShotMode.SCENE_LOCKED
+    shot_target_seconds: Annotated[FiniteFloat, Field(gt=0, le=120)] = 3
+    shot_min_seconds: Annotated[FiniteFloat, Field(gt=0, le=120)] = 2
+    shot_max_seconds: Annotated[FiniteFloat, Field(gt=0, le=180)] = 5
     music_enabled: bool = False
     captions_enabled: bool = True
     animated_captions: bool = False

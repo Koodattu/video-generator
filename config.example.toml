@@ -12,8 +12,12 @@ duration_seconds = 90
 
 # Draft: 1280x720. Final: 1920x1080. Both are 16:9 at 30 fps.
 quality = "draft"
-# fiction is the main path; factual is enabled only after claim/evidence checks exist.
+# Independent content axes. mythbuster requires factual mode.
 content_mode = "fiction"
+content_format = "narrative" # narrative, explainer, or mythbuster
+narration_pace = "standard" # slow, standard, or fast
+# Optional tone/delivery direction; quantitative pace and pause limits still come from narration_pace.
+narration_delivery = ""
 audience = "family_safe_general"
 
 # Built-in starting style. You may use another stable style ID and describe it below.
@@ -37,6 +41,14 @@ research_source_limit = 10
 visual_target_seconds = 15
 visual_min_seconds = 8
 visual_max_seconds = 25
+
+# scene_locked preserves one image per editorial Scene. cadenced creates a frame-aligned Shot plan
+# after narration and may generate several still images inside one Scene. A single cadenced plan is
+# currently capped at 72 generated Shots and oversized configurations are rejected before the Run.
+visual_shot_mode = "scene_locked"
+shot_target_seconds = 3
+shot_min_seconds = 2
+shot_max_seconds = 5
 
 # Music is supported but off by default because it adds a large local model or cloud cost.
 music_enabled = false

@@ -91,6 +91,84 @@ def test_dashboard_lists_run_without_exposing_voice_configuration(dashboard_run)
         assert any(item["path"] == "previews/identity.svg" for item in detail.json()["files"])
 
 
+def test_dashboard_normalizes_multi_format_defaults_for_legacy_runs(dashboard_run) -> None:
+    config_path = dashboard_run.config_path
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    for field in ("content_format", "narration_pace", "visual_shot_mode"):
+        config.pop(field, None)
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    detail = run_detail(
+        dashboard_run.root.parents[1],
+        dashboard_run.root,
+        FakeSupervisor(dashboard_run.root.parents[1]),
+    )
+
+    assert detail["config"]["content_format"] == "narrative"
+    assert detail["config"]["narration_pace"] == "standard"
+    assert detail["config"]["visual_shot_mode"] == "scene_locked"
+
+
+def test_dashboard_joins_cadenced_visuals_by_shot_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = {
+        "narration": {
+            "script": {
+                "scenes": [{"scene_id": "scene-001", "spoken_text": "One complete section."}]
+            },
+            "timeline": {
+                "scenes": [
+                    {
+                        "scene_id": "scene-001",
+                        "start_seconds": 0,
+                        "end_seconds": 6,
+                        "audio": {"path": "missing.wav"},
+                    }
+                ]
+            },
+        },
+        "visual-plan": {
+            "shots": [
+                {
+                    "shot_id": "shot-001",
+                    "scene_id": "scene-001",
+                    "narration_excerpt": "One complete",
+                    "start_seconds": 0,
+                    "end_seconds": 3,
+                },
+                {
+                    "shot_id": "shot-002",
+                    "scene_id": "scene-001",
+                    "narration_excerpt": "section.",
+                    "start_seconds": 3,
+                    "end_seconds": 6,
+                },
+            ]
+        },
+        "image-prompt-compile": {
+            "requests": [
+                {"shot_id": "shot-001", "scene_id": "scene-001"},
+                {"shot_id": "shot-002", "scene_id": "scene-001"},
+            ]
+        },
+        "images": {"items": []},
+        "visual-review": {},
+    }
+    monkeypatch.setattr(
+        dashboard_views,
+        "_stage_artifact",
+        lambda run_root, manifest, stage: artifacts.get(stage, {}),
+    )
+
+    visuals = dashboard_views.scene_views(tmp_path, tmp_path, {"run_id": "run-1"})
+
+    assert [item["visual_id"] for item in visuals] == ["shot-001", "shot-002"]
+    assert {item["scene_id"] for item in visuals} == {"scene-001"}
+    assert [item["script"]["spoken_text"] for item in visuals] == ["One complete", "section."]
+
+
 def test_dashboard_initial_models_include_project_task_overrides(dashboard_run) -> None:
     (dashboard_run.root.parents[1] / "config.toml").write_text(
         (

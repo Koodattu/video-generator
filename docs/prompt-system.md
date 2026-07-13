@@ -21,6 +21,7 @@ prompts/
   review-spoken/v1/
   review-constraints/v1/
   revise-script/v1/
+  claim-inventory/v1/
   duration-repair/v1/
   visual-plan/v1/
   image-prompt-compile/
@@ -63,7 +64,7 @@ an event-based unanswered question, renews or complicates it once around the mid
 off, recontextualizes an earlier moment, or leaves deliberate ending residue. This is a flexible
 narrative design target, not a mandate for clickbait, a twist, a subplot, or nonlinear chronology.
 
-## Story workflow
+## Editorial workflow
 
 ### Research
 
@@ -78,27 +79,37 @@ It stops when it has sufficient diversity or reaches the hard limit. It does not
 
 ### Ideation
 
-The ideation task returns a bounded Candidate Set. Five is the default and 1–10 is accepted. Each Story Candidate includes a premise, protagonist desire, obstacle, turn, ending direction, emotional promise, research inspirations by ID, visual opportunities, originality risks, and expected duration fit.
+The ideation task returns a bounded format-specific Candidate Set. Five is the default and 1–10 is
+accepted. Narrative candidates describe premise, pressure, turn, ending direction, emotional promise,
+research inspirations, and visual opportunities. Explainer candidates instead describe a modern anchor,
+central question, thesis, evidence ladder, human angle, landing, and accuracy risks.
 
 Candidates must be meaningfully different. Renaming the protagonist or changing only the location does not count as another candidate.
 
 ### Selection
 
-The selector scores every candidate on a fixed scale for:
+For v3 formats the selector receives the Creative Brief and bounded Research Pack as well as the
+Candidate Set, so evidence strength and research responsibility are evaluated against the source
+artifact rather than a candidate's self-description. The selector scores every candidate on a fixed
+format-specific scale. Shared criteria include:
 
 - fit to the Duration Budget;
-- originality without randomness for its own sake;
-- complete story potential;
+- originality or hook strength without randomness for its own sake;
+- complete narrative or explanatory progression;
 - strength and variety of simple visuals;
 - suitability for spoken narration;
 - family-safe general-audience fit;
 - responsible use of research.
 
-It returns scores and a concise evidence-based rationale, then chooses one Story Concept. It cannot generate a replacement candidate during selection.
+It returns scores and a concise evidence-based rationale, then chooses one supplied concept. It cannot
+generate a replacement candidate during selection.
 
 ### Outline
 
-The outline task builds the whole causal and emotional arc before prose. Each stable Scene includes its narrative purpose, what changes, emotional beat, visual opportunity, provisional seconds, and continuity obligations. The Scene plan should follow the configured Visual Cadence while prioritizing natural story boundaries.
+The outline task builds the whole causal or explanatory arc before prose. Each stable Scene includes its
+purpose, what changes, emotional or logical beat, visual opportunity, provisional seconds, and continuity
+obligations. Scene boundaries follow natural editorial structure; cadenced visual timing is planned later
+without fragmenting the outline.
 
 The sum of provisional Scene seconds equals the Duration Budget. That allocation guides writing; it is not accepted as measured timing.
 
@@ -142,7 +153,7 @@ After TTS, the repair task receives measured Scene durations, the acceptable rem
 
 The image model never receives the Narration Script and a vague request to “make a matching image.” The visual pipeline has four layers:
 
-1. `VisualBrief`: what this Scene means and depicts;
+1. `VisualBrief`: what this Scene or timed Shot means and depicts;
 2. `StyleProfile`: how every image should look;
 3. `CharacterIdentity`: which signature traits must persist;
 4. `ImageRequest`: the Backend-specific compiled prompt, references, size, seed, and settings.
@@ -226,7 +237,11 @@ The music model does not receive private voice audio. The rendered result is lis
 
 ## Factual review
 
-Factual mode adds a separate claim inventory. Each externally verifiable assertion in the Narration Script references one or more Evidence IDs from the Research Pack. The factual reviewer returns `supported`, `partially_supported`, `unsupported`, or `time_sensitive`, with source linkage. Unsupported claims block TTS. Fiction mode instead checks only that the story does not accidentally present unsafe real-world claims as sourced fact.
+Factual mode adds a separate claim inventory. Each externally verifiable assertion in the Narration
+Script preserves exact spoken wording and references Evidence IDs from the Research Pack. The independent
+reviewer returns `supported`, `needs_qualification`, or `unsupported`, and also reports claims missed by
+the inventory. Anything except complete supported coverage blocks TTS. A Script changed by measured
+Duration Repair is inventoried and reviewed again before resynthesis.
 
 ## Evaluation and versioning
 

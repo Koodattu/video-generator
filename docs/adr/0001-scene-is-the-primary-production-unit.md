@@ -1,3 +1,5 @@
 # Scene is the primary production unit
 
+Status: superseded in part by ADR 0012 for cadenced visual Runs.
+
 The pipeline will author and synthesize an ordered set of variable-length Scenes, each with one narration passage and one primary visual. The finished narration for a Scene determines its duration, which makes visual timing inherent and enables per-Scene caching, retries, and resumption without requiring speech-to-text for Scene cuts. This trades some continuity between separately synthesized passages for simpler and more reliable orchestration; contextual synthesis can preserve continuity. Alignment is required when an enabled caption path lacks trustworthy TTS word timing, but it is not a prerequisite for visual timing.

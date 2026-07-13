@@ -41,6 +41,18 @@ def test_legacy_frozen_visual_plan_keeps_original_run_language() -> None:
     assert prompts.output_language("image_prompt_compile", OutputLanguage.FINNISH) is OutputLanguage.ENGLISH
 
 
+def test_default_config_keeps_the_legacy_prompt_and_schema_pack(resolved_config) -> None:
+    baseline = build_frozen_assets()
+    configured = build_frozen_assets(resolved_config)
+
+    assert configured["prompt_set_version"] == baseline["prompt_set_version"]
+    assert configured["workflow_policy_version"] == baseline["workflow_policy_version"]
+    assert configured["prompts"] == baseline["prompts"]
+    assert configured["schemas"] == baseline["schemas"]
+    assert "claim_inventory" not in baseline["prompts"]
+    assert "review_type" in baseline["schemas"]["factual_review"]["properties"]
+
+
 def test_craft_rules_remain_task_specific() -> None:
     assert "midpoint" not in SHARED_RULES
     outline = PromptLibrary().get("outline", language=OutputLanguage.ENGLISH)

@@ -3,13 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .contracts import OutputLanguage, ResolvedRunConfig
+from .contracts import (
+    ContentFormat,
+    ContentMode,
+    NarrationPace,
+    OutputLanguage,
+    ResolvedRunConfig,
+    VisualShotMode,
+)
 from .costs import frozen_pricing_catalog
 from .schema import restricted_json_schema
-from .task_models import TASK_OUTPUT_MODELS
+from .task_models import task_output_models
 
 
 PROMPT_SET_VERSION = "2026-07-12.v14"
+MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-13.v15"
 
 
 SHARED_RULES = """
@@ -167,6 +175,13 @@ Repair narrative construction before polishing sentences. Do not answer a struct
 decorative sensory language or an explanation of the theme. Preserve intentional withholding and
 make event-based curiosity payoffs legible.
 """,
+    "claim_inventory": """
+Extract every externally verifiable assertion from the approved Narration Script. Preserve the exact
+spoken wording and Scene ID for each claim. Link only Evidence IDs that directly support that exact
+assertion; leave evidence_ids empty when support is missing or only inferential. Do not treat opinions,
+clearly signposted speculation, or fictional framing as factual claims. Do not repair, soften, or omit a
+claim to make coverage appear complete. The inventory is an audit artifact, not narration.
+""",
     "duration_repair": """
 Perform the single allowed measured Duration Repair. Change only selected_scene_ids, preserving every
 Scene ID, order, narrative purpose, fact, continuity obligation, tone, and payoff. Use measured Scene
@@ -272,6 +287,181 @@ contract is promoted.
 }
 
 
+FACTUAL_RESEARCH_INSTRUCTIONS = """
+Create an auditable Factual Research Pack using only the supplied bounded search results and excerpts.
+Retain source metadata and paraphrase findings conservatively. Create one Evidence Record per claimable
+proposition, with stable Evidence IDs and direct Source ID links. Split compound propositions when one
+source supports only part of them. Record uncertainty, conflicts, time sensitivity, and limitations.
+Never fill a gap from memory, treat a search snippet as stronger than its source text, or issue more
+queries. The later Script may use only claims supported by these Evidence Records.
+"""
+
+
+FACTUAL_REVIEW_INSTRUCTIONS = """
+Independently verify every inventoried claim against the supplied Evidence Records and their source
+metadata. Use supported only when the exact spoken assertion is directly entailed by cited evidence;
+use needs_qualification when scope, certainty, attribution, or time sensitivity must be narrowed; use
+unsupported when support is absent or contradictory. List any factual assertions in the Script that the
+inventory missed under uncovered_claims. Set passed=true only when every inventoried claim is supported
+and uncovered_claims is empty. Do not rewrite the Script or reward plausible but uncited knowledge.
+"""
+
+
+FACTUAL_NARRATIVE_TASK_INSTRUCTIONS: dict[str, str] = {
+    "ideate": """
+Produce exactly candidate_count meaningfully different factual narrative concepts from the Creative
+Brief and Factual Research Pack. Each concept needs a documented focal person, group, place, process,
+or event; a clear driving question; real pressure or uncertainty; an evidence-grounded turn; an ending
+direction; and concrete still-image opportunities. Use Research Finding IDs as provenance anchors and
+name accuracy risks honestly. Do not invent scenes, motives, quotations, chronology, or composite
+characters. Do not select a winner or write an outline.
+""",
+    "select": """
+Score every supplied factual narrative candidate exactly once on the fixed rubric. Prefer a complete,
+evidence-grounded causal arc that fits the Duration Budget and can be understood on one hearing. Penalize
+invented drama, unsupported motive, false certainty, distorted chronology, decorative research, weak
+visual progression, or an ending that outruns the evidence. Choose exactly one supplied candidate ID
+without rewriting it.
+""",
+    "outline": """
+Turn the selected concept into one complete factual Story Outline with contiguous Scene IDs. Use the
+bounded Factual Research Pack as the authority. Each Scene needs one narrative purpose, one documented
+change or explanatory step, an honest emotional beat, a primary visual opportunity, and continuity
+obligations. Allocate the full Duration Budget within the supplied Scene-count and duration bounds.
+Never invent an event, quotation, motive, causal link, character, or sensory detail. Preserve uncertainty,
+conflicting accounts, attribution, and chronology. Open on concrete documented pressure or contrast and
+land on what the evidence actually changes, not a universal moral. Do not write narration prose.
+""",
+    "script_draft": """
+Write only the words the Narrator Voice will speak verbatim. Preserve every Outline Scene ID and order,
+and meet the supplied total and per-Scene word envelopes. Use only claims directly supported by the
+bounded Evidence Records; keep qualifications, attribution, dates, scope, and uncertainty intact. Do not
+invent dialogue, internal thoughts, motives, composite scenes, causal links, or sensory detail. Write no
+citations, headings, markdown, stage directions, or visual notes in spoken_text. Make the documented arc
+clear on one hearing, with concrete language and natural spoken rhythm. End the final Scene with
+pause_after_seconds equal to zero.
+""",
+    "review_story": """
+Review the factual narrative structure only: driving question, chronology, causal clarity, evidence-led
+progression, unsupported drama or motive, misleading compression, fairness to uncertainty or conflicting
+accounts, repetition, and whether the ending is earned. Check every challenged assertion against the
+bounded Factual Research Pack. Identify exact Scene evidence and actionable findings without rewriting.
+Set review_type exactly to "story" and passed=false for any blocking finding.
+""",
+    "review_constraints": """
+Review hard constraints: Creative Brief inclusions/exclusions, Audience Profile, Scene ID/order, evidence
+boundaries, attribution, uncertainty, chronology, duration risk, single-language narration, and absence of
+non-spoken markup. Invented events, quotations, motives, causal links, or unsupported factual assertions
+are blocking. Identify exact Scene evidence without rewriting and set review_type exactly to
+"constraints".
+""",
+    "script_revision": """
+Produce one complete revised factual Narration Script after reconciling all review reports. Preserve Scene
+IDs, order, documented events, chronology, attribution, uncertainty, and the evidence-grounded narrative
+arc. Resolve conflicts in this order: safety and factual support, chronology and causal clarity, spoken
+clarity, Duration Budget, then style. Return exactly one disposition for every required_finding_id and no
+others. Do not add claims, quotations, motives, composite events, citations, commentary, or visual
+directions. Keep the complete Script within the supplied total and per-Scene word envelopes.
+""",
+}
+
+
+EXPLAINER_TASK_INSTRUCTIONS: dict[str, str] = {
+    "ideate": """
+Produce exactly candidate_count distinct explainer concepts. Each needs a relatable modern anchor, a
+central question, a precise thesis, an escalating evidence ladder, a human angle, a landing that returns
+to the anchor, and concrete still-image opportunities. For mythbuster format, identify the misconception
+fairly before correcting it and make every correction traceable to supplied Evidence IDs. For general
+explainer format, a misconception is optional. Do not invent evidence, select a winner, or write prose.
+""",
+    "select": """
+Score every supplied explainer candidate exactly once on the fixed rubric: duration fit, hook strength,
+evidence strength, escalation, visual strength, spoken suitability, and audience fit. Prefer a clear
+question with a cumulative answer over a fact list. Penalize sensational framing that outruns evidence,
+a straw-man misconception, repetition, or a landing unrelated to the hook. Choose exactly one supplied
+candidate ID without rewriting it.
+""",
+    "outline": """
+Turn the selected concept into a complete spoken-video Explainer Outline with contiguous Scene IDs.
+Return between minimum_scene_count and maximum_scene_count Scenes, aiming for target_scene_count, and
+allocate the full Duration Budget across them. Each Scene has one arc role, one key point, relevant
+Evidence IDs, a concrete visual opportunity, and continuity obligations. Keep provisional durations
+within the supplied Scene bounds, using only the documented opening/closing exception.
+
+Open on the modern anchor, establish the central question or contrast immediately, then escalate evidence
+from understandable to surprising. Mythbuster format must represent the misconception accurately, pivot
+to the correction early, and land back on the anchor. Use a human tangent only when it adds emotional
+meaning without interrupting the argument. Do not write narration prose or add unsupported facts.
+""",
+    "script_draft": """
+Write only the words the single Narrator Voice will speak verbatim. Preserve every Outline Scene ID and
+order. Use the supplied scene_word_targets and total word envelope exactly; count whitespace-separated
+words before returning. Fit each Scene's provisional duration and sentence bounds. Write no headings,
+citations, markdown, stage directions, visual notes, or review comments in spoken_text.
+
+Make the argument understandable on one hearing. Start directly on the modern anchor, question, or
+contrast; do not announce an agenda. Move one logical step per Scene, define unfamiliar terms in plain
+language, and make each evidence step earn the next. For factual content, state no assertion beyond the
+Evidence IDs attached to that Outline Scene and preserve uncertainty. For mythbuster format, represent
+the misconception fairly, pivot cleanly, escalate from intuitive to surprising evidence, and return to
+the anchor in the landing. Direct address is useful when it genuinely places the viewer in the idea, not
+as repetitive engagement bait. End the final Scene with pause_after_seconds equal to zero.
+""",
+    "review_story": """
+Review the draft's editorial structure only: hook relevance, question clarity, logical progression,
+fairness of any misconception, evidence escalation, unsupported leaps, human relevance, repetition, and
+whether the landing resolves and returns to the anchor. Identify exact Scene evidence and actionable,
+severity-calibrated findings without rewriting. Set review_type exactly to "story" and passed=false for
+any blocking finding.
+""",
+    "review_constraints": """
+Review hard constraints: Creative Brief inclusions/exclusions, Audience Profile, Scene ID/order, outline
+roles, evidence boundaries, duration risk, single-language narration, required setup/payoff, and absence
+of non-spoken markup. Unsupported or overstated factual assertions, safety violations, and missing
+required format beats are blocking. Identify exact Scene evidence without rewriting and set review_type
+exactly to "constraints".
+""",
+    "script_revision": """
+Produce one complete revised Narration Script after reconciling all review reports. Preserve Scene IDs,
+order, format arc, modern anchor, thesis, evidence meaning, and landing callback. Resolve conflicts in
+this order: safety and factual support, logical coherence, spoken clarity, Duration Budget, then style.
+Return exactly one disposition for every required_finding_id and no other IDs. Rejection requires a
+concise reason. Keep the complete Script within the supplied total and per-Scene word envelopes. Do not
+add claims, evidence, commentary, citations, or visual directions while revising.
+""",
+}
+
+
+CADENCED_TASK_INSTRUCTIONS: dict[str, str] = {
+    "visual_plan": """
+Create a provider-neutral Timed Visual Plan from the finished narration and canonical_shot_schedule.
+Return exactly one Shot for every supplied Shot ID, preserving its parent Scene ID, narration excerpt,
+start time, end time, order, and total duration exactly. Supply only the visual content fields. Every
+Shot must be understandable as a still image and match what is being said during that span; never reveal
+later information early. Prefer concrete, literal cognitive anchors for explainers and mythbusters.
+Narrative formats may use expressive imagery, but it must still depict the current spoken moment.
+
+Define recurring Character Identities once, keep their stable traits locked, and maintain visible state
+across adjacent Shots. Each Shot needs one focal action, readable silhouettes, sparse composition, and
+explicit no-text constraints. Apply the selected style_id and style_description consistently. All images
+are generated by the configured image model; do not describe or request programmatic drawing code.
+""",
+    "image_prompt_compile": """
+Compile the current Timed Visual Shot into one target-Backend Timed Image Request. Preserve shot_id,
+scene_id, target Backend, dimensions, quality, reference paths, settings, and seed policy exactly. Depict
+only the supplied narration span, with the focal subject and action early in the prompt. Use adjacent
+Shots only for identity and state continuity; never import their events. Write prompt and negative_prompt
+entirely in English, repeat identity/style/no-text constraints, and invent no unsupported details.
+""",
+    "visual_review": """
+Review only the supplied Shot image against its Timed Visual Shot, Style Profile, Character Identities,
+Audience Profile, and delivery-size legibility. Preserve both shot_id and scene_id. Score explicit
+fulfillment, style, identity, composition, absence of text/logos/watermarks, and safety. Request
+regeneration only for a concrete failed requirement, and say exactly what to preserve and fix.
+""",
+}
+
+
 TARGET_IMAGE_GUIDANCE: dict[str, str] = {
     "openai:gpt-image-2": """
 Target guidance for GPT Image 2: use a concise natural-language prompt with the focal action early.
@@ -298,6 +488,67 @@ def task_output_language(task_id: str, run_language: OutputLanguage) -> OutputLa
     if task_id in {"visual_plan", "image_prompt_compile"}:
         return OutputLanguage.ENGLISH
     return run_language
+
+
+def _uses_legacy_prompt_pack(config: ResolvedRunConfig | None) -> bool:
+    return config is None or (
+        config.content_mode is ContentMode.FICTION
+        and config.content_format is ContentFormat.NARRATIVE
+        and config.narration_pace is NarrationPace.STANDARD
+        and not config.narration_delivery
+        and config.visual_shot_mode is VisualShotMode.SCENE_LOCKED
+    )
+
+
+def _task_instructions(task_id: str, config: ResolvedRunConfig | None) -> str:
+    instructions = TASK_INSTRUCTIONS[task_id].strip()
+    if config is None or _uses_legacy_prompt_pack(config):
+        return instructions
+    if task_id == "research" and config.content_mode is ContentMode.FACTUAL:
+        instructions = FACTUAL_RESEARCH_INSTRUCTIONS.strip()
+    if task_id == "factual_review" and config.content_mode is ContentMode.FACTUAL:
+        instructions = FACTUAL_REVIEW_INSTRUCTIONS.strip()
+    if (
+        config.content_mode is ContentMode.FACTUAL
+        and config.content_format is ContentFormat.NARRATIVE
+    ):
+        instructions = FACTUAL_NARRATIVE_TASK_INSTRUCTIONS.get(task_id, instructions).strip()
+    if config.content_format is not ContentFormat.NARRATIVE:
+        instructions = EXPLAINER_TASK_INSTRUCTIONS.get(task_id, instructions).strip()
+    if config.visual_shot_mode is VisualShotMode.CADENCED:
+        instructions = CADENCED_TASK_INSTRUCTIONS.get(task_id, instructions).strip()
+
+    context_tasks = {
+        "ideate",
+        "select",
+        "outline",
+        "script_draft",
+        "review_story",
+        "review_spoken",
+        "review_constraints",
+        "script_revision",
+        "claim_inventory",
+        "factual_review",
+        "duration_repair",
+        "visual_plan",
+    }
+    if task_id in context_tasks:
+        instructions += (
+            f"\n\nConfigured Content Mode: {config.content_mode.value}. "
+            f"Configured Editorial Format: {config.content_format.value}."
+        )
+    if task_id in {"script_draft", "review_spoken", "script_revision", "duration_repair"}:
+        delivery = config.narration_delivery_spec
+        if delivery is not None:
+            instructions += (
+                f"\n\nNarration Delivery: {delivery.description} "
+                f"Target {delivery.target_words_per_second:.3f} words/second, accepted range "
+                f"{delivery.minimum_words_per_second:.3f}-{delivery.maximum_words_per_second:.3f}; "
+                f"target authored pause {delivery.target_pause_seconds:.2f}s and hard maximum "
+                f"{delivery.maximum_pause_seconds:.2f}s. Pacing must come from useful spoken content "
+                "and delivery, never filler or artificial silence."
+            )
+    return instructions
 
 
 @dataclass(frozen=True)
@@ -368,20 +619,23 @@ class PromptLibrary:
 
 
 def build_frozen_assets(config: ResolvedRunConfig | None = None) -> dict[str, Any]:
+    legacy_pack = _uses_legacy_prompt_pack(config)
+    prompt_set_version = PROMPT_SET_VERSION if legacy_pack else MULTI_FORMAT_PROMPT_SET_VERSION
+    output_models = task_output_models(config)
     prompts = {
         task_id: {
-            "version": f"{PROMPT_SET_VERSION}:{task_id}",
-            "instructions": SHARED_RULES + "\n\n" + TASK_INSTRUCTIONS[task_id].strip(),
+            "version": f"{prompt_set_version}:{task_id}",
+            "instructions": SHARED_RULES + "\n\n" + _task_instructions(task_id, config),
         }
-        for task_id in TASK_INSTRUCTIONS
+        for task_id in output_models
     }
     schemas = {
         task_id: restricted_json_schema(model.model_json_schema(mode="validation"))
-        for task_id, model in TASK_OUTPUT_MODELS.items()
+        for task_id, model in output_models.items()
     }
     assets: dict[str, Any] = {
-        "prompt_set_version": PROMPT_SET_VERSION,
-        "workflow_policy_version": 2,
+        "prompt_set_version": prompt_set_version,
+        "workflow_policy_version": 2 if legacy_pack else 3,
         "prompts": prompts,
         "image_targets": TARGET_IMAGE_GUIDANCE,
         "schemas": schemas,

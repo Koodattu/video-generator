@@ -735,36 +735,45 @@ def render_video(
             )
         frame_durations.append(frame_count / plan.fps)
         previous_end_frame = end_frame
-    command = [tools.ffmpeg, "-y", "-v", "error"]
+    concat_path = base_path.with_suffix(".ffconcat")
+    concat_lines = ["ffconcat version 1.0"]
+
+    def concat_file_line(path: Path) -> str:
+        escaped_path = path.resolve().as_posix().replace("'", r"'\''")
+        return f"file '{escaped_path}'"
+
     for scene, duration in zip(plan.scenes, frame_durations, strict=True):
-        command.extend(
+        concat_lines.extend(
             [
-                "-loop",
-                "1",
-                "-framerate",
-                str(plan.fps),
-                "-t",
-                f"{duration:.6f}",
-                "-i",
-                str(workspace_root / scene.image_path),
+                concat_file_line(workspace_root / scene.image_path),
+                f"duration {duration:.6f}",
             ]
         )
-    narration_index = len(plan.scenes)
+    concat_lines.append(concat_file_line(workspace_root / plan.scenes[-1].image_path))
+    atomic_write_text(concat_path, "\n".join(concat_lines) + "\n")
+    command = [
+        tools.ffmpeg,
+        "-y",
+        "-v",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_path),
+    ]
+    narration_index = 1
     command.extend(["-i", str(workspace_root / plan.narration_path)])
     music_index = None
     if plan.music_path:
         music_index = narration_index + 1
         command.extend(["-i", str(workspace_root / plan.music_path)])
-    filters = []
-    video_labels = []
-    for index, (scene, duration) in enumerate(zip(plan.scenes, frame_durations, strict=True)):
-        filters.append(
-            f"[{index}:v]trim=duration={duration:.6f},setpts=PTS-STARTPTS,"
-            f"scale={plan.width}:{plan.height}:force_original_aspect_ratio=increase,"
-            f"crop={plan.width}:{plan.height},setsar=1,fps={plan.fps}[v{index}]"
-        )
-        video_labels.append(f"[v{index}]")
-    filters.append("".join(video_labels) + f"concat=n={len(video_labels)}:v=1:a=0[outv]")
+    filters = [
+        f"[0:v]setpts=PTS-STARTPTS,"
+        f"scale={plan.width}:{plan.height}:force_original_aspect_ratio=increase,"
+        f"crop={plan.width}:{plan.height},setsar=1,fps={plan.fps}[outv]"
+    ]
     filters.append(
         f"[{narration_index}:a]atrim=duration={plan.duration_seconds:.6f},asetpts=PTS-STARTPTS,"
         f"apad,atrim=duration={plan.duration_seconds:.6f}[narr]"
@@ -808,7 +817,10 @@ def render_video(
             str(base_path),
         ]
     )
-    tools.run(command, timeout=1800)
+    try:
+        tools.run(command, timeout=1800)
+    finally:
+        concat_path.unlink(missing_ok=True)
     outputs = []
     if plan.caption_srt_path:
         srt = workspace_root / plan.caption_srt_path

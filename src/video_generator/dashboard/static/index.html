@@ -93,7 +93,7 @@
 
           <nav class="tabs" id="run-tabs" aria-label="Run sections">
             <button class="tab is-active" type="button" data-tab="overview">Overview</button>
-            <button class="tab" type="button" data-tab="scenes">Scenes <span id="scene-count" class="tab-count numeric">0</span></button>
+            <button class="tab" type="button" data-tab="scenes">Visuals <span id="scene-count" class="tab-count numeric">0</span></button>
             <button class="tab" type="button" data-tab="outputs">Outputs</button>
             <button class="tab" type="button" data-tab="costs">Costs</button>
             <button class="tab" type="button" data-tab="artifacts">Artifacts <span id="artifact-count" class="tab-count numeric">0</span></button>
@@ -110,7 +110,7 @@
           <div>
             <p class="eyebrow">New production</p>
             <h2>Shape the run</h2>
-            <p>Choose the story, operating envelope, and model for every pipeline task.</p>
+            <p>Choose the content, pacing, visual cadence, and model for every pipeline task.</p>
           </div>
           <button class="icon-button dialog-close" id="dialog-close" type="button" aria-label="Close">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15"></path></svg>
@@ -121,7 +121,7 @@
           <section class="form-section story-section">
             <div class="section-heading">
               <span class="section-number numeric">01</span>
-              <div><h3>Story direction</h3><p>Give the pipeline a concrete creative north star.</p></div>
+              <div><h3>Content direction</h3><p>Give the pipeline a concrete creative or editorial north star.</p></div>
             </div>
             <div class="form-grid">
               <label class="field field-wide">
@@ -137,6 +137,11 @@
               <label class="field"><span>Themes <small>comma separated</small></span><input id="themes" placeholder="small courage, unexpected friendship"></label>
               <label class="field"><span>Must include</span><input id="must-include" placeholder="a tiny amber lantern"></label>
               <label class="field"><span>Avoid</span><input id="avoid" placeholder="chosen-one plots, stated morals"></label>
+              <label class="field"><span>Research focus <small>comma separated</small></span><input id="research-focus" placeholder="snow crystal friction, cold-weather acoustics"></label>
+              <label class="field"><span>Modern anchor</span><input id="modern-anchor" maxlength="500" placeholder="The squeak under your winter boot"></label>
+              <label class="field field-wide"><span>Central question</span><input id="central-question" maxlength="1000" placeholder="Why does very cold snow sound different?"></label>
+              <label class="field"><span>Misconception</span><input id="misconception" maxlength="1000" placeholder="The sound only comes from boot weight"></label>
+              <label class="field"><span>Desired takeaway</span><input id="desired-takeaway" maxlength="1000" placeholder="Hear the next step as a tiny material experiment"></label>
             </div>
           </section>
 
@@ -149,13 +154,20 @@
               <label class="field"><span>Profile</span><select id="profile"></select></label>
               <label class="field"><span>Language</span><select id="output-language"><option value="en">English</option><option value="fi">Finnish</option></select></label>
               <label class="field"><span>Quality</span><select id="quality"><option value="draft">Draft</option><option value="final">Final + visual review</option></select></label>
+              <label class="field"><span>Content mode</span><select id="content-mode"><option value="fiction">Fiction</option><option value="factual">Factual + evidence gate</option></select></label>
+              <label class="field"><span>Editorial format</span><select id="content-format"><option value="narrative">Narrative</option><option value="explainer">Explainer</option><option value="mythbuster">Myth-buster</option></select></label>
+              <label class="field"><span>Narration pace</span><select id="narration-pace"><option value="slow">Slow</option><option value="standard">Standard</option><option value="fast">Fast</option></select></label>
               <label class="field"><span>Duration <small>seconds</small></span><input id="duration-seconds" class="numeric" type="number" min="10" max="3600" step="1"></label>
               <label class="field"><span>Cost ceiling <small>USD</small></span><input id="cost-ceiling" class="numeric" type="number" min="0" max="10000" step="0.01"></label>
               <label class="field"><span>Idea candidates</span><input id="idea-candidates" class="numeric" type="number" min="1" max="10" step="1"></label>
-              <label class="field"><span>Visual target <small>seconds</small></span><input id="visual-target" class="numeric" type="number" min="1" max="120" step="1"></label>
+              <label class="field"><span>Section target <small>seconds</small></span><input id="visual-target" class="numeric" type="number" min="1" max="120" step="1"></label>
+              <label class="field"><span>Visual cadence</span><select id="visual-shot-mode"><option value="scene_locked">One image per section</option><option value="cadenced">Timed image sequence</option></select></label>
+              <label class="field"><span>Image target <small>seconds</small></span><input id="shot-target" class="numeric" type="number" min="2" max="120" step="0.5"></label>
               <label class="field"><span>Research queries</span><input id="research-queries" class="numeric" type="number" min="0" max="20" step="1"></label>
               <label class="field"><span>Research sources</span><input id="research-sources" class="numeric" type="number" min="0" max="50" step="1"></label>
-              <label class="field field-wide"><span>Style direction</span><input id="style-description" maxlength="1000" placeholder="Playful hand-drawn stick figures, snowy blue paper, warm amber highlights"></label>
+              <label class="field"><span>Visual style ID</span><input id="style-id" maxlength="120" placeholder="editorial_doodle" required></label>
+              <label class="field field-wide"><span>Style direction</span><input id="style-description" maxlength="1000" placeholder="Minimal black ink doodles, white paper, one red accent, no text"></label>
+              <label class="field field-wide"><span>Narration direction</span><input id="narration-delivery" maxlength="500" placeholder="Authoritative and energetic, but never breathless or theatrical"></label>
             </div>
             <div class="toggle-grid">
               <label class="toggle-card"><input id="offline" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Offline only</strong><small>Reject all active cloud backends.</small></span></label>

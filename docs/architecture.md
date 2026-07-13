@@ -15,9 +15,9 @@ flowchart TD
     A["config.toml + brief.toml + .env"] --> B["Resolve configuration"]
     B --> C["Read-only Preflight"]
     C --> D["Bounded research"]
-    D --> E["Generate Story Candidates"]
-    E --> F["Score and select Story Concept"]
-    F --> G["Build Story Outline and Scenes"]
+    D --> E["Generate format-specific Candidates"]
+    E --> F["Score and select one Concept"]
+    F --> G["Build narrative or explainer Outline"]
     G --> H["Draft spoken Narration Script"]
     H --> I1["Story and originality review"]
     H --> I2["Spoken-language review"]
@@ -25,17 +25,26 @@ flowchart TD
     I1 --> J["One consolidated revision"]
     I2 --> J
     I3 --> J
-    J --> K["Deterministic validation"]
+    J --> FA{"Factual Run?"}
+    FA -- Yes --> FI["Inventory exact spoken Claims"]
+    FI --> FR["Independent Evidence review"]
+    FR -- Passed --> K["Deterministic validation"]
+    FR -- Blocked --> FB["Stop before TTS"]
+    FA -- No --> K
     K --> L["Synthesize narration per Scene"]
     L --> M{"Within accepted band and delivery ceiling?"}
     M -- No --> N["One targeted Duration Repair"]
-    N --> L
+    N --> RA{"Factual Script changed?"}
+    RA -- Yes --> RR["Re-inventory and re-review"]
+    RR -- Passed --> L
+    RR -- Blocked --> FB
+    RA -- No --> L
     M -- Yes --> O["Final Narration Timeline"]
     O --> P["Caption alignment when needed"]
-    O --> Q["Visual Plan"]
+    O --> Q["Scene or timed-Shot Visual Plan"]
     O --> R["Optional Music Brief"]
     Q --> Q1["Backend-bound image prompt compilation"]
-    Q1 --> S["Generate Scene images"]
+    Q1 --> S["Generate still images"]
     S --> T["Visual Review when required"]
     T --> T1{"Regeneration required?"}
     T1 -- No --> U["Deterministic Render Plan"]
@@ -57,7 +66,7 @@ Only research may iterate through tool calls, and it has hard query/source limit
 The intended user-controlled files are:
 
 - `config.toml`: Run Profile, Output Language, duration, quality, feature switches, Voice Profile references, and advanced task overrides;
-- `brief.toml`: story direction and creative boundaries;
+- `brief.toml`: editorial direction, optional anchor/question fields, and creative boundaries;
 - `local-llm.toml`: one audited local GGUF/runtime/context/speculation benchmark variant;
 - `.env`: credentials only.
 
@@ -103,7 +112,7 @@ The runner manager should batch adjacent calls, while accepting bounded reloads 
 3. only when duration misses: release TTS, reload the `duration_repair` LLM, then reload TTS for the changed Scenes;
 4. after the final Narration Timeline, load the assigned text Backend(s) for `visual_plan`, `image_prompt_compile`, and optional `music_brief`, grouping only tasks that actually share a model;
 5. load alignment only if captions need it;
-6. load the image model for all initial Scene images;
+6. load the image model for all initial Scene or Shot images;
 7. load the vision reviewer when required;
 8. if review requests corrections, reload the image model for one regeneration batch, then reload the reviewer to assess those images once more;
 9. load the music model when music is enabled;
@@ -119,19 +128,29 @@ The Structured Text adapter starts one stock `llama-server.exe` on a dynamically
 
 Context and speculative decoding are launch properties. The selected `local-llm.toml` therefore freezes one context tier and one `none` or `draft-mtp` variant. A larger context is a bounded relaunch/evaluation case, not a per-request toggle or an automatic 256K promise.
 
-## Scene, narration, and duration
+## Editorial Scenes, visual Shots, narration, and duration
 
-A Scene combines one variable-length spoken passage and one primary visual. Scene planning targets a new visual about every 15 seconds, normally between 8 and 25 seconds, with justified opening/closing exceptions. This yields roughly 4–8 images for a 90-second Run and 30–50 for ten minutes.
+A Scene is the stable editorial and TTS unit: one variable-length spoken passage with a narrative or
+explanatory purpose. In `scene_locked` mode it also owns one image. In `cadenced` mode a deterministic
+post-narration allocator divides each Scene into frame-aligned Shots, each with its own `shot_id`, parent
+`scene_id`, narration excerpt, and exact start/end time. This keeps robust TTS checkpoints while allowing
+new generated stills every few seconds.
 
 TTS runs per Scene because this gives natural checkpoint and regeneration boundaries. The Speech contract may include surrounding text context for continuity, while provider-specific continuation controls remain inside the adapter. Each returned clip is probed, conservatively boundary-trimmed if required, normalized, and concatenated. Declared pauses are explicit timeline data, not invisible padding.
 
-The Duration Budget is both goal and hard content-timeline limit. Before narration acceptance, the media layer rounds the maximum usable clock down to the nearest 30 fps frame boundary. Encoded-file QC permits at most one video frame of AAC/container padding beyond that timeline. A successful narration uses at least 85% of the configured budget and ends at or before the delivery ceiling. Measured audio, not word-count prediction, decides acceptance. One Duration Repair may alter and resynthesize selected Scenes while preserving Scene IDs and order. If repaired narration is still short, a final pitch-preserving tempo fit may slow it only as far as 0.85× and only when bounded Scene pauses can place the result inside the accepted band; otherwise the Run stops. The pipeline never speeds speech, truncates narration, or silently drops content.
+The Duration Budget is both goal and hard content-timeline limit. Narration pace resolves to quantitative
+word-rate, pause, and pitch-preserving tempo targets before synthesis. Measured audio, not word-count
+prediction, decides acceptance. One Duration Repair may alter and resynthesize selected Scenes while
+preserving IDs and order. Factual repairs are claim-inventoried and reviewed again before resynthesis.
+The pipeline never truncates narration or silently drops content.
 
 FFmpeg is capped to the same delivery ceiling. The visual stream may outlast narration by less than one frame so the final spoken audio is not cut, but the delivered file never exceeds `duration_seconds`.
 
 ## Captions
 
-Captions are enabled by default. Cloud TTS character timing is normalized into word timing when available. Local TTS uses an Alignment Backend only when captions are enabled; Scene cuts need only clip durations.
+Captions are enabled by default. Cloud TTS character timing is normalized into word timing when available.
+Local TTS uses an Alignment Backend when captions are enabled or cadenced Shots need narration-grounded
+boundaries. Alignment may therefore run with caption delivery disabled.
 
 For local alignment, the exact Narration Script remains canonical. faster-whisper or Parakeet can
 propose recognized words and timestamps, but deterministic reconciliation maps those timings back
@@ -148,7 +167,10 @@ Animated captions are a presentation transform over the same timing data, not a 
 
 ## Images and continuity
 
-Visual planning happens after the Narration Timeline is final. It creates a provider-neutral Visual Plan containing the resolved Style Profile, recurring Character Identities, and one Visual Brief per Scene. The separately assigned `image_prompt_compile` Structured Text task then uses versioned target-Backend instructions to create each validated Image Request. The Run records both the compiler Backend/model and the Image Backend; they need not come from the same provider.
+Visual planning happens after the Narration Timeline is final. It creates either a provider-neutral
+scene-locked Visual Plan or a Timed Visual Plan whose canonical Shot IDs and times cannot be changed by
+the model. The separately assigned `image_prompt_compile` task creates a validated Image Request per
+Scene or Shot. `scene_id` remains the editorial parent; `shot_id` is the unique fan-out/render key.
 
 Generative models are the intended production path. The deterministic stick renderer is an explicitly selected Backend for contract tests and emergency manual choice; it is never a silent substitution for a failed image call.
 
@@ -160,7 +182,11 @@ Generated images are normalized deterministically to the Delivery Format. For ex
 
 Fiction research is inspiration: motifs, settings, vocabulary, unexpected details, cultural cautions, and clichés to avoid. The default bounds are five search queries and ten retained sources. Full webpage dumps are not copied into every later prompt.
 
-Factual mode is a stricter branch, not a vague fiction/fact hybrid. It additionally requires evidence records, atomic claim IDs, claim-to-source links, and a source-grounded factual review before TTS. Factual mode must remain disabled in the implementation until those artifacts and checks exist. In Offline Runs it requires supplied source material and may not claim currentness.
+Factual mode is a stricter branch, not a vague fiction/fact hybrid. It requires live bounded sources,
+Evidence Records, atomic Claim IDs, claim-to-evidence links, and an independent source-grounded review
+before TTS. Unsupported, uncovered, or under-qualified claims block narration. Because supplied offline
+evidence ingestion is not yet implemented, Offline factual Runs are rejected rather than presented as
+verified.
 
 Search is its own supporting Backend binding. Provider-native OpenAI web search, Gemini grounding, and an independent search API are separate implementations. Query limits are enforced from actual calls and persisted source metadata, not trusted to prompt wording alone. v0 does not fetch arbitrary result pages: it retains only provider-grounded URLs and bounded excerpts returned by the selected Search Backend. A future factual mode may add a separately audited, address-pinned fetch contract.
 
@@ -172,7 +198,9 @@ The Music Backend declares its observed duration limit. The media layer trims, f
 
 ## Rendering and media QC
 
-The deterministic Render Plan contains no model decisions. FFmpeg holds each normalized image for its Scene interval, applies hard cuts, combines the master narration and optional Music Bed, and writes H.264/AAC MP4 with `yuv420p`, 30 fps, and fast-start metadata.
+The deterministic Render Plan contains no model decisions. FFmpeg holds each normalized image for its
+Scene or Shot interval, applies hard cuts, combines the master narration and optional Music Bed, and
+writes H.264/AAC MP4 with `yuv420p`, 30 fps, and fast-start metadata.
 
 Preflight checks FFmpeg capabilities rather than assuming a version string is sufficient: H.264 encoding, AAC, `mov_text`, SRT, ASS/libass when animated captions are requested, and ffprobe. An installed build is not declared supported until those probes pass; the first real render remains the final integration check.
 
@@ -270,7 +298,6 @@ One reusable structured-task executor serves the text roles, and one static regi
 - arbitrary provider plugins or user-authored workflows;
 - multi-speaker dialogue or mid-Run language switching;
 - portrait/square delivery, video-generation models, camera motion, or transitions beyond hard cuts;
-- multiple images within one Scene;
 - concurrent local GPU models, multi-GPU scheduling, or VRAM bin-packing;
 - pixel-perfect recurring characters;
 - automatic commercial-rights conclusions;

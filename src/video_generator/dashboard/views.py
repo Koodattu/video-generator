@@ -345,6 +345,19 @@ def _by_scene(values: Any, *, nested_scene_key: str = "scene_id") -> dict[str, d
     return result
 
 
+def _by_visual(values: Any) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    if not isinstance(values, list):
+        return result
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        visual_id = item.get("shot_id") or item.get("scene_id")
+        if isinstance(visual_id, str):
+            result[visual_id] = item
+    return result
+
+
 def _media_url(project_root: Path, run_root: Path, run_id: str, value: Any) -> str | None:
     if not isinstance(value, dict) or not isinstance(value.get("path"), str):
         return None
@@ -372,28 +385,50 @@ def scene_views(
     scripts = _by_scene(script.get("scenes"))
     timeline = narration.get("timeline") if isinstance(narration.get("timeline"), dict) else {}
     timings = _by_scene(timeline.get("scenes"))
-    briefs = _by_scene(visual_plan.get("scenes"))
-    requests = _by_scene(prompt_set.get("requests"))
+    visual_values = visual_plan.get("shots") or visual_plan.get("scenes")
+    briefs = _by_visual(visual_values)
+    requests = _by_visual(prompt_set.get("requests"))
     final_image_bundle = review.get("images") if isinstance(review.get("images"), dict) else images
     image_items: dict[str, dict[str, Any]] = {}
     for item in final_image_bundle.get("items") or []:
         if not isinstance(item, dict):
             continue
         generated = item.get("generated") if isinstance(item.get("generated"), dict) else {}
-        if isinstance(generated.get("scene_id"), str):
-            image_items[generated["scene_id"]] = item
+        visual_id = generated.get("shot_id") or generated.get("scene_id")
+        if isinstance(visual_id, str):
+            image_items[visual_id] = item
     report = review.get("report") if isinstance(review.get("report"), dict) else {}
-    review_items = _by_scene(report.get("items"))
-    scene_ids = list(dict.fromkeys([*scripts, *briefs, *requests, *image_items]))
+    review_items = _by_visual(report.get("items"))
+    visual_ids = list(dict.fromkeys([*briefs, *requests, *image_items])) or list(scripts)
     result = []
-    for scene_id in scene_ids:
-        image_item = image_items.get(scene_id, {})
+    for visual_id in visual_ids:
+        image_item = image_items.get(visual_id, {})
         normalized = image_item.get("normalized_image")
+        brief = briefs.get(visual_id, {})
+        request = image_item.get("request") or requests.get(visual_id) or {}
+        scene_id = str(brief.get("scene_id") or request.get("scene_id") or visual_id)
+        shot_id = brief.get("shot_id") or request.get("shot_id")
         timing = timings.get(scene_id)
+        if isinstance(shot_id, str) and isinstance(brief, dict):
+            timing = {
+                "scene_id": scene_id,
+                "shot_id": shot_id,
+                "start_seconds": brief.get("start_seconds"),
+                "end_seconds": brief.get("end_seconds"),
+                "audio": timing.get("audio") if isinstance(timing, dict) else None,
+            }
+        script_item = scripts.get(scene_id)
+        if isinstance(shot_id, str) and isinstance(script_item, dict):
+            script_item = {
+                **script_item,
+                "spoken_text": brief.get("narration_excerpt") or script_item.get("spoken_text"),
+            }
         result.append(
             {
+                "visual_id": visual_id,
                 "scene_id": scene_id,
-                "script": scripts.get(scene_id),
+                "shot_id": shot_id,
+                "script": script_item,
                 "timing": timing,
                 "audio_url": _media_url(
                     project_root,
@@ -401,11 +436,11 @@ def scene_views(
                     run_id,
                     timing.get("audio") if isinstance(timing, dict) else None,
                 ),
-                "visual_brief": briefs.get(scene_id),
-                "image_request": image_item.get("request") or requests.get(scene_id),
+                "visual_brief": brief or None,
+                "image_request": request or None,
                 "image": normalized,
                 "image_url": _media_url(project_root, run_root, run_id, normalized),
-                "review": review_items.get(scene_id),
+                "review": review_items.get(visual_id),
             }
         )
     return result
@@ -465,9 +500,15 @@ def run_detail(project_root: Path, run_root: Path, supervisor: RunSupervisor) ->
     config = _read_optional(run_root / "inputs" / "config.resolved.json")
     brief = _read_optional(run_root / "inputs" / "brief.json")
     safe_config = {
-        key: value
-        for key, value in config.items()
-        if key not in {"voice", "project_root"}
+        "content_mode": "fiction",
+        "content_format": "narrative",
+        "narration_pace": "standard",
+        "visual_shot_mode": "scene_locked",
+        **{
+            key: value
+            for key, value in config.items()
+            if key not in {"voice", "project_root"}
+        },
     }
     files = artifact_entries(run_root, manifest)
     return {

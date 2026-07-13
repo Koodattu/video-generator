@@ -10,11 +10,15 @@ from pydantic import ValidationError
 from .contracts import (
     ContentMode,
     CreativeBrief,
+    NarrationDeliverySpec,
+    NarrationPace,
+    OutputLanguage,
     ProtocolName,
     Quality,
     RawRunConfig,
     ResolvedRunConfig,
     TASK_PROTOCOL,
+    VisualShotMode,
 )
 from .errors import ConfigurationError
 from .profiles import BACKEND_DESCRIPTORS, PRICING_SNAPSHOT, PROFILE_VERSION, resolve_profile
@@ -77,6 +81,40 @@ def find_project_root(start: Path) -> Path:
         if (directory / "pyproject.toml").is_file():
             return directory
     return candidate
+
+
+def resolve_narration_delivery(
+    output_language: OutputLanguage,
+    pace: NarrationPace,
+    custom_direction: str = "",
+) -> NarrationDeliverySpec:
+    base_words_per_second = 2.55 if output_language is OutputLanguage.ENGLISH else 1.95
+    pace_factor = {
+        NarrationPace.SLOW: 0.86,
+        NarrationPace.STANDARD: 1.0,
+        NarrationPace.FAST: 1.18,
+    }[pace]
+    target = round(base_words_per_second * pace_factor, 3)
+    pause_target, pause_maximum = {
+        NarrationPace.SLOW: (0.45, 1.1),
+        NarrationPace.STANDARD: (0.25, 0.75),
+        NarrationPace.FAST: (0.08, 0.3),
+    }[pace]
+    description = custom_direction.strip() or {
+        NarrationPace.SLOW: "Measured and reflective, with deliberate emphasis and room to absorb ideas.",
+        NarrationPace.STANDARD: "Natural and engaged, with concise pauses and clear emphasis.",
+        NarrationPace.FAST: "Urgent and tightly edited, with energetic delivery and almost no dead air.",
+    }[pace]
+    return NarrationDeliverySpec(
+        pace=pace,
+        target_words_per_second=target,
+        minimum_words_per_second=round(target * 0.88, 3),
+        maximum_words_per_second=round(target * 1.12, 3),
+        target_pause_seconds=pause_target,
+        maximum_pause_seconds=pause_maximum,
+        tempo_multiplier=pace_factor,
+        description=description,
+    )
 
 
 def load_raw_config(path: Path) -> RawRunConfig:
@@ -153,14 +191,16 @@ def resolve_config(
     active_tasks = set(TASK_PROTOCOL)
     if raw.offline or raw.research_query_limit == 0:
         active_tasks.discard("search")
-    if not raw.captions_enabled or BACKEND_DESCRIPTORS[bindings["narration_synthesis"]].supports_word_timing:
+    if (
+        not raw.captions_enabled and raw.visual_shot_mode is VisualShotMode.SCENE_LOCKED
+    ) or BACKEND_DESCRIPTORS[bindings["narration_synthesis"]].supports_word_timing:
         active_tasks.discard("caption_alignment")
     if raw.quality is Quality.DRAFT:
         active_tasks.discard("visual_review")
     if not raw.music_enabled:
         active_tasks -= {"music_brief", "music_generate"}
     if raw.content_mode is ContentMode.FICTION:
-        active_tasks.discard("factual_review")
+        active_tasks -= {"claim_inventory", "factual_review"}
     if raw.offline:
         cloud_bindings = sorted(
             {
@@ -207,6 +247,14 @@ def resolve_config(
         duration_seconds=raw.duration_seconds,
         quality=raw.quality,
         content_mode=raw.content_mode,
+        content_format=raw.content_format,
+        narration_pace=raw.narration_pace,
+        narration_delivery=raw.narration_delivery,
+        narration_delivery_spec=resolve_narration_delivery(
+            raw.output_language,
+            raw.narration_pace,
+            raw.narration_delivery,
+        ),
         audience=raw.audience,
         style=raw.style,
         style_description=raw.style_description,
@@ -221,6 +269,10 @@ def resolve_config(
         visual_target_seconds=raw.visual_target_seconds,
         visual_min_seconds=raw.visual_min_seconds,
         visual_max_seconds=raw.visual_max_seconds,
+        visual_shot_mode=raw.visual_shot_mode,
+        shot_target_seconds=raw.shot_target_seconds,
+        shot_min_seconds=raw.shot_min_seconds,
+        shot_max_seconds=raw.shot_max_seconds,
         music_enabled=raw.music_enabled,
         captions_enabled=raw.captions_enabled,
         animated_captions=raw.animated_captions,
@@ -238,14 +290,16 @@ def active_task_ids(config: ResolvedRunConfig) -> set[str]:
     if config.offline or config.research_query_limit == 0:
         task_ids.discard("search")
     speech = BACKEND_DESCRIPTORS[config.task_bindings["narration_synthesis"]]
-    if not config.captions_enabled or speech.supports_word_timing:
+    if (
+        not config.captions_enabled and config.visual_shot_mode is VisualShotMode.SCENE_LOCKED
+    ) or speech.supports_word_timing:
         task_ids.discard("caption_alignment")
     if config.quality is Quality.DRAFT:
         task_ids.discard("visual_review")
     if not config.music_enabled:
         task_ids -= {"music_brief", "music_generate"}
     if config.content_mode is ContentMode.FICTION:
-        task_ids.discard("factual_review")
+        task_ids -= {"claim_inventory", "factual_review"}
     return task_ids
 
 

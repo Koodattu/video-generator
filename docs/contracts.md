@@ -6,7 +6,8 @@ This is the provider boundary for v0. It is intentionally a small static system,
 
 1. Workflow Tasks exchange validated, provider-neutral artifacts.
 2. Provider SDK objects never enter artifacts. Provider-specific prompt syntax appears only in explicitly Backend-bound request artifacts, never in upstream provider-neutral domain artifacts.
-3. Every Scene keeps the same stable ID, such as `scene-001`, from outline through delivery.
+3. Every Scene keeps the same stable ID, such as `scene-001`, from outline through delivery; cadenced
+   visuals add immutable `shot-001` IDs without replacing their parent Scene IDs.
 4. All timing derives from one final Narration Timeline.
 5. Large media travels by workspace-relative file reference, never as base64 in JSON or logs.
 6. Every artifact and Backend descriptor has an explicit schema version.
@@ -22,16 +23,20 @@ The durable artifact set is deliberately finite.
 | Artifact | Required content | Produced by |
 | --- | --- | --- |
 | `ResolvedRunConfig` | Secret-free effective settings, frozen Run Profile, Backend assignments, limits, pricing snapshot | configuration resolver |
-| `CreativeBrief` | Idea direction, tone, themes, inclusions, exclusions, research focus | input normalization |
+| `CreativeBrief` | Idea direction, tone, themes, constraints, research focus, and optional anchor/question/misconception/landing fields | input normalization |
 | `ResearchPack` | Queries, retained sources, compact findings, cautions, clichés; evidence records in factual mode | research |
 | `CandidateSet` | Bounded Story Candidates | ideation |
-| `SelectionReport` | Rubric scores, concise rationale, chosen candidate ID | selection |
+| `ExplainerCandidateSet` | Bounded concepts with modern anchor, question, thesis, evidence ladder, and landing | ideation |
+| `SelectionReport` / `ExplainerSelectionReport` | Format-specific rubric scores, concise rationale, chosen candidate ID | selection |
 | `StoryOutline` | Ordered Scenes with purpose, emotional beat, visual opportunity, provisional duration share | outlining |
+| `ExplainerOutline` | Ordered Scenes with arc role, key point, Evidence IDs, visual opportunity, and provisional duration share | outlining |
 | `NarrationScript` | Spoken text per stable Scene ID | script workflow |
 | `ReviewReport` | Findings by rubric, severity, Scene ID, and actionable recommendation | review tasks |
+| `ClaimInventory` / `FactualReviewReport` | Exact spoken claims, Evidence links, independent verdicts, and uncovered-claim list | factual gate |
 | `NarrationTimeline` | Final narration asset, exact total duration, Scene start/end times, optional word timings | narration assembly |
 | `VisualPlan` | Character Identities, resolved Style Profile, one Visual Brief per Scene | visual planning |
-| `ImageRequest` | Backend-specific compiled prompt and generation settings linked to one Visual Brief | prompt compiler |
+| `TimedVisualPlan` | Resolved Style Profile and canonical, frame-aligned generated-image Shots linked to parent Scenes | visual planning |
+| `ImageRequest` / `TimedImageRequest` | Backend-specific compiled prompt and generation settings linked to one Scene or Shot | prompt compiler |
 | `VisualReviewReport` | Brief/style/identity scores and one targeted regeneration instruction | visual review |
 | `CaptionTrack` | Canonical words and monotonic time spans | timing normalization |
 | `MusicBrief` | Instrumental intent, mood arc, exclusions, requested duration | music planning |
@@ -51,7 +56,12 @@ scene.end = scene.start + normalized_audio_duration + declared_pause_after
 timeline.duration = final_scene.end
 ```
 
-Scene visuals use these boundaries. Music is fitted to this duration. Caption words must stay inside their Scene and the Timeline. Before narration acceptance, the media layer computes `delivery_ceiling = floor(duration_budget × fps) / fps`. The Narration Timeline must end at or before that ceiling. The final video stream rounds the Timeline duration up to a frame boundary, so it may outlast narration by less than one frame, but it remains at or below the delivery ceiling and never exceeds the configured Duration Budget.
+Scene-locked visuals use these boundaries; cadenced Shots use frame-aligned intervals derived from them.
+Music is fitted to this duration. Caption words must stay inside their Scene and the Timeline. Before
+narration acceptance, the media layer computes `delivery_ceiling = floor(duration_budget × fps) / fps`.
+The Narration Timeline must end at or before that ceiling. The final video stream rounds the Timeline
+duration up to a frame boundary, so it may outlast narration by less than one frame, but it remains at or
+below the delivery ceiling and never exceeds the configured Duration Budget.
 
 Duration Repair may change and resynthesize selected Scene text once. It may not add, remove, or reorder Scenes in v0. The final Narration Timeline is created only after that repair opportunity has completed. Visual planning and music generation therefore cannot become stale because of a later script-length change.
 
@@ -124,10 +134,11 @@ A Run Profile maps each fixed Workflow Task ID to exactly one compatible Backend
 | `review_spoken` | Structured Text | always |
 | `review_constraints` | Structured Text | always |
 | `script_revision` | Structured Text | always |
+| `claim_inventory` | Structured Text | factual mode; repeated after any Duration Repair |
 | `factual_review` | Structured Text | factual mode only |
 | `narration_synthesis` | Speech | always |
 | `duration_repair` | Structured Text | measured narration misses its accepted band |
-| `caption_alignment` | Alignment | captions are enabled and TTS timing is insufficient |
+| `caption_alignment` | Alignment | captions or cadenced Shots need timing and TTS timing is insufficient |
 | `visual_plan` | Structured Text | always |
 | `image_prompt_compile` | Structured Text | always; output is bound to the selected Image Backend |
 | `image_generate` | Image | always |
@@ -137,7 +148,9 @@ A Run Profile maps each fixed Workflow Task ID to exactly one compatible Backend
 
 `image_prompt_compile` is a real, separately selectable Workflow Task rather than hidden string concatenation. It receives provider-neutral visual artifacts plus a bounded descriptor for the target Image Backend and emits a validated Image Request for that Backend. Its own Backend/model, instructions, and output hash are persisted. A deterministic compiler Backend may implement the same task for simple/test renderers.
 
-Deterministic validation, audio normalization, rendering, and media QC are internal stages rather than model tasks. Factual mode must remain unavailable until the `factual_review` evidence/claim contract is implemented.
+Deterministic validation, shot allocation, audio normalization, rendering, and media QC are internal
+stages rather than model tasks. The production image path always uses the configured Image Backend;
+the deterministic stick Backend exists only as an explicit test/manual backend and is never a fallback.
 
 ## Local runner boundary
 
@@ -157,7 +170,11 @@ There is no VRAM bin-packing. One GPU model family owns the card at a time. A si
 
 ## Item checkpoints
 
-Stages that fan out over Scenes do not wait for the whole batch before preserving valid work. Each TTS, image-generation, visual-review, and regeneration item writes to its own work directory, validates, and atomically promotes an item manifest and media hash. The aggregate stage becomes complete only when every required item is promoted. Resume reuses valid items and schedules only missing or invalid items; stage-level hashes still determine downstream completion.
+Stages that fan out do not wait for the whole batch before preserving valid work. TTS items key by Scene;
+image generation, visual review, and regeneration key by Scene or Shot according to visual mode. Every
+item writes to its own work directory, validates, and atomically promotes a manifest and media hash. The
+aggregate stage becomes complete only when every required item is promoted. Resume reuses valid items
+and schedules only missing or invalid items; stage-level hashes still determine downstream completion.
 
 ## Run immutability and rerun
 

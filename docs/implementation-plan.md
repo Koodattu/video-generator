@@ -16,7 +16,7 @@ The v0 release is complete only when:
 - `local`, `cloud-openai`, `cloud-gemini`, and `hybrid-local-first` have explicit, inspectable mappings and pass their applicable conformance tests;
 - 30-second smoke Runs and 60–90-second English and Finnish Runs complete for every profile;
 - a successful output uses 90–100% of its Duration Budget and never exceeds the configured hard limit after frame-grid quantization;
-- every Scene has one generated image, measured narration timing, and stable provenance;
+- every planned visual Scene or Shot has one generated image, measured timing, and stable provenance;
 - captions are enabled by default and produce SRT plus an embedded selectable track;
 - optional burned ASS captions produce a separate file from the same Caption Track;
 - optional instrumental music works in each profile or fails according to its declared Failure Policy;
@@ -27,7 +27,9 @@ The v0 release is complete only when:
 - FFmpeg/ffprobe QC validates codecs, streams, resolution, frame rate, captions, duration, and audio health;
 - model IDs, asset hashes, prompt/schema/profile versions, usage, license/terms metadata, and warnings are preserved.
 
-Factual mode may be advertised as supported only when claim/evidence capture and factual review also pass. Until then, configuration validation must reject it with a clear planned-capability message rather than running a fiction workflow under a factual label.
+Factual mode requires live bounded sources, Evidence Records, complete claim capture, an independent
+pre-TTS factual review, and the same audit again after any Duration Repair changes spoken wording.
+Unsupported, under-qualified, or uncovered claims must stop the Run before synthesis.
 
 ## Foundation choices to validate
 
@@ -46,7 +48,7 @@ Deliver:
 - configuration resolution for `config.toml`, `brief.toml`, `.env`, built-in profiles, and task overrides;
 - the canonical task-ID registry, with exactly one primary Backend binding per task and a separately bound Search capability available only to `research`;
 - secret redaction and validation;
-- stage/item manifests, hashing, per-Scene atomic promotion, frozen prompt/schema/profile assets, resume rules, and parent-linked `rerun --from` semantics;
+- stage/item manifests, hashing, per-Scene or per-Shot atomic promotion, frozen prompt/schema/profile assets, resume rules, and parent-linked `rerun --from` semantics;
 - bounded task executor with deterministic fake Search/Text/Speech/Alignment/Image/Music Backends;
 - `setup`, `preflight`, `generate --stop-after`, `resume`, `rerun --from`, and `evaluate` command shells;
 - capability descriptors, probe reports, typed errors, Cost Ceiling reservation, and usage records.
@@ -185,7 +187,7 @@ Complete:
 - burned animated-caption template based on the canonical Caption Track;
 - final-quality Visual Review/regeneration behavior;
 - character-reference handling for capable image Backends;
-- claim/evidence artifacts and factual review, or keep factual mode rejected;
+- claim/evidence artifacts, a complete Claim Inventory, and independent pre-TTS factual review;
 - Usage Purpose/license and voice-authorization reporting;
 - Run pruning that cannot remove model assets or private source recordings.
 
@@ -274,7 +276,7 @@ Live tests are clearly marked and budget-capped. Unit tests never require creden
 | Music duration/account capability conflict | account capability probe and long fixture | cap one generation at 600 seconds; deterministic loop only when explicit |
 | Old FFmpeg edge cases | actual render/caption/mux smoke | capability-based warning and documented upgrade if test fails |
 | Research copying or prompt injection | adversarial grounded-search excerpts | no direct page fetch in v0; treat excerpts as data, paraphrase pack, bounded calls, provenance |
-| Factual claims unsupported | claim/evidence fixture | block factual mode until review contract passes |
+| Factual claims unsupported | claim/evidence fixture | block TTS with the claim inventory and independent evidence review |
 | Disk growth | repeated Run and model setup test | Run Bundle accounting and explicit `runs prune`; separate model cache |
 
 ## Recommended first implementation slice

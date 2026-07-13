@@ -112,7 +112,9 @@ VoxCPM's optional `voxcpm[timestamps]`/stable-ts post-processing is worth benchm
 
 `nvidia/parakeet-tdt-0.6b-v3` remains an explicit comparison Backend because Finnish is supported and it returns word, segment, and character timestamps. It is CC BY 4.0 and its retained NeMo runner uses WSL2. It follows the same canonical-script reconciliation contract as faster-whisper and is never selected as a silent fallback. [Parakeet model card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
 
-The selected Alignment Backend is loaded only when captions are enabled. Scene boundaries use probed TTS clip durations, so local video generation remains possible without STT when captions are explicitly disabled.
+The selected Alignment Backend is loaded when captions are enabled or cadenced Shots require word-grounded
+visual boundaries and TTS lacks trustworthy timing. Scene boundaries use probed TTS clip durations, so
+scene-locked local generation remains possible without STT when captions are explicitly disabled.
 
 `Qwen/Qwen3-ASR-1.7B` remains an accuracy candidate, but its companion Qwen forced aligner does not currently list Finnish. It is not the v0 default for this requirement. [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-1.7B)
 
@@ -136,7 +138,9 @@ search, bounded result counts, and returned snippets only. Arbitrary page extrac
 disabled. This path is keyless but has no provider SLA, so `offline = true` or a zero query limit
 remains the deterministic no-network option. Brave is retained only as an explicit legacy override.
 
-When `offline = true`, the Search Backend is disabled. Fiction can proceed from supplied material or clearly non-current model knowledge; factual mode requires supplied sources and cannot claim currentness.
+When `offline = true`, the Search Backend is disabled and fiction can proceed without live sources.
+Factual mode currently requires live bounded search with nonzero query and source limits; supplied offline
+evidence ingestion is not implemented, so Offline factual configuration is rejected.
 
 ## Hardware and platform implications
 

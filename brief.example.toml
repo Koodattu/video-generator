@@ -12,3 +12,9 @@ avoid = ["chosen-one plots", "moral stated directly"]
 # Optional research guidance. Fiction uses research as inspiration, not as claims that
 # the story must reproduce literally.
 research_focus = ["northern winter folklore", "surprising cold-weather details"]
+
+# Optional editorial fields for explainers and myth-busters.
+modern_anchor = ""
+central_question = ""
+misconception = ""
+desired_takeaway = ""

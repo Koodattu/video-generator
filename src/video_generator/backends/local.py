@@ -230,6 +230,7 @@ class LocalImageBackend(_LocalBackend):
         provider_request_id = str(result.get("provider_request_id") or "")
         asset = ImageAsset(
             scene_id=request.scene_id,
+            shot_id=getattr(request, "shot_id", None),
             image=MediaReference(
                 path=relative_path(path, self.project_root),
                 sha256=sha256_file(path),

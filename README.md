@@ -1,11 +1,11 @@
 # Video Generator
 
-A local-first Python CLI that turns one creative brief into a narrated still-image video. The fixed,
-typed workflow researches story material, creates and selects ideas, outlines and revises a spoken
-script, synthesizes narration, derives timestamps/captions, plans and generates one image per Scene,
-optionally creates instrumental music, and renders MP4 delivery files with FFmpeg.
+A local-first Python CLI that turns one creative brief into a narrated still-image video. The typed
+workflow supports fiction and evidence-gated factual content, narrative/explainer/myth-buster formats,
+measured narration delivery, and either one image per editorial Scene or a faster timed Shot sequence.
+It optionally creates instrumental music and renders MP4 delivery files with FFmpeg.
 
-The default `generate` command runs end to end. Every public stage and expensive per-Scene item is
+The default `generate` command runs end to end. Every public stage and expensive per-visual item is
 checkpointed in an immutable Run Bundle, so `resume` does not silently repeat valid paid or local
 model work. A task can select a local, OpenAI, Gemini, ElevenLabs, Brave, or mixed Backend without
 changing the workflow.
@@ -13,13 +13,17 @@ changing the workflow.
 ## Current v0 scope
 
 - One Output Language per Run: English (`en`) or Finnish (`fi`).
-- Fiction inspired by bounded research. Factual mode remains rejected until claim-level evidence
-  capture is implemented; the program will not pretend unsupported factual output is ready.
+- Fiction inspired by bounded research, or live factual research with Evidence Records, a complete
+  Claim Inventory, and an independent pre-TTS Factual Review. Offline factual Runs are rejected.
+- Narrative, explainer, and factual myth-buster editorial formats; slow, standard, and fast measured
+  narration presets with an optional custom delivery direction.
 - Static 16:9 images with hard cuts; default output is 1280x720 draft or 1920x1080 final at 30 fps.
 - Selectable SRT captions, plus optional ASS captions with the active spoken word highlighted in a
   second, burned-in MP4.
 - Optional ambient instrumental music mixed below narration.
 - Built-in `ms_paint_stick` image style and arbitrary additional style IDs described in config.
+  Production profiles render every style through their configured generative image model; the
+  programmatic stick renderer is an explicit deterministic test Backend only.
 - Personal, noncommercial use; voice cloning is limited to your own voice or explicit permission.
 - Final-quality local Visual Review is intentionally readiness-gated because the planned Qwen vision
   runner has not yet been proven reliable in 24 GB VRAM. Local draft Runs work without it.
@@ -106,7 +110,7 @@ cloud budgets are not oversubscribed. Progress is streamed from the authoritativ
 closing the browser does not stop the worker. Stop interrupts the complete worker process tree and
 leaves the Run resumable.
 
-Each Run view joins the 19-stage timeline, script Scenes, narration clips, Visual Briefs, compiled
+Each Run view joins the 19-stage timeline, script Scenes, timed visual Shots, narration clips, Visual Briefs, compiled
 image prompts, generated images, Visual Reviews, delivery media, costs, logs, and every file below
 the Run directory. Files with recorded stage hashes are distinguished from internal or untracked files.
 The server binds only to `127.0.0.1`; it is not an authenticated multi-user service and should not be
@@ -274,7 +278,17 @@ Every override is validated against its protocol, language, usage purpose, Offli
 capabilities before a Run is created. English and Finnish use the same workflow contracts; separate
 orchestration code is not duplicated by language.
 
-## Scene continuity and pacing
+## Editorial format, visual cadence, and pacing
+
+The default remains the original behavior: `content_mode = "fiction"`,
+`content_format = "narrative"`, `narration_pace = "standard"`, and
+`visual_shot_mode = "scene_locked"`. These axes are independent, so a factual narrative can remain
+measured while a fictional explainer can use a fast timed-image sequence.
+
+`scene_locked` produces one generated image for each editorial Scene. `cadenced` builds a deterministic,
+frame-aligned Shot schedule after narration and word alignment, then asks the configured image model for
+one still per Shot. `shot_target_seconds`, `shot_min_seconds`, and `shot_max_seconds` control that visual
+rhythm without forcing the outline or TTS checkpoint boundaries to become equally short.
 
 New Runs plan visuals as one storyboard rather than as isolated prompts. The visual plan freezes each
 recurring character's body form, proportions, face and markings, wardrobe, and non-negotiable identity
@@ -285,12 +299,17 @@ instructed never to depict a later event early.
 When the selected image Backend supports references, the first accepted image containing a recurring
 character becomes an identity/style reference for later Scenes. References are restricted to the
 characters present in that Scene and are hash-covered as part of the effective image request. They are
-guidance rather than a mathematical identity guarantee, so inspect the Scenes and Visual Review tabs
+guidance rather than a mathematical identity guarantee, so inspect the Visuals and Visual Review artifacts
 before delivery.
 
-Authored inter-Scene pauses in new scripts are capped at 0.75 seconds and normally target 0.15-0.45
-seconds. Short narration is repaired with useful spoken content instead of padding the timeline with
-silence; overlong narration can still shrink pauses and use bounded tempo fitting before script repair.
+Narration presets resolve to explicit word-rate, pause, and pitch-preserving tempo targets. Fast delivery
+uses tighter pauses and a denser script; slow delivery uses fewer words and more room for emphasis. The
+final measured rate is validated, and short narration is repaired with useful spoken content instead of
+padding the timeline with silence.
+
+The current single-plan cadence limit is 72 generated Shots. Longer videos can use `scene_locked`, a
+larger `shot_target_seconds`, or multiple Runs; configuration rejects an oversized cadenced plan before
+paid generation begins.
 
 ## Resume, inspect, and intentionally rerun
 

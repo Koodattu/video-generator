@@ -229,7 +229,20 @@ class RunStore:
 
     @property
     def config(self) -> ResolvedRunConfig:
-        return ResolvedRunConfig.model_validate(read_json(self.config_path))
+        data = read_json(self.config_path)
+        bindings = data.get("task_bindings") if isinstance(data, dict) else None
+        if (
+            isinstance(bindings, dict)
+            and "claim_inventory" not in bindings
+            and data.get("content_mode", "fiction") == "fiction"
+        ):
+            fallback = bindings.get("factual_review") or bindings.get("script_revision")
+            if fallback:
+                data = {
+                    **data,
+                    "task_bindings": {**bindings, "claim_inventory": fallback},
+                }
+        return ResolvedRunConfig.model_validate(data)
 
     @property
     def brief(self) -> CreativeBrief:
@@ -905,6 +918,10 @@ CONFIG_IMPACT: dict[str, str] = {
     "offline": "research",
     "duration_seconds": "ideate",
     "content_mode": "research",
+    "content_format": "research",
+    "narration_pace": "script-draft",
+    "narration_delivery": "script-draft",
+    "narration_delivery_spec": "script-draft",
     "audience": "script-draft",
     "idea_candidates": "ideate",
     "research_query_limit": "research",
@@ -915,6 +932,10 @@ CONFIG_IMPACT: dict[str, str] = {
     "visual_target_seconds": "outline",
     "visual_min_seconds": "outline",
     "visual_max_seconds": "outline",
+    "visual_shot_mode": "captions",
+    "shot_target_seconds": "visual-plan",
+    "shot_min_seconds": "visual-plan",
+    "shot_max_seconds": "visual-plan",
     "quality": "captions",
     "delivery_width": "captions",
     "delivery_height": "captions",
@@ -938,6 +959,7 @@ TASK_STAGE_IMPACT: dict[str, str] = {
     "review_spoken": "review-spoken",
     "review_constraints": "review-constraints",
     "script_revision": "script-revision",
+    "claim_inventory": "script-revision",
     "factual_review": "script-revision",
     "narration_synthesis": "narration",
     "duration_repair": "narration",

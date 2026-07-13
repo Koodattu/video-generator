@@ -4,12 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from video_generator.contracts import CreativeBrief
+from video_generator.contracts import (
+    ContentFormat,
+    CreativeBrief,
+    NarrationPace,
+    VisualShotMode,
+)
 from video_generator.errors import CheckpointError
 from video_generator.profiles import PROFILES
 from video_generator.prompting import build_frozen_assets
-from video_generator.run_store import RunStore
-from video_generator.util import read_json, relative_path
+from video_generator.run_store import RunStore, earliest_config_impact
+from video_generator.util import atomic_write_json, hash_value, read_json, relative_path
 
 
 def test_parent_linked_fork_rewrites_copied_run_paths(tmp_path: Path, resolved_config) -> None:
@@ -112,3 +117,64 @@ def test_aggregate_checkpoint_detects_corrupt_item_media(tmp_path: Path, resolve
 
     with pytest.raises(CheckpointError, match="missing or corrupt"):
         store.reusable_record("images", **metadata)
+
+
+@pytest.mark.parametrize(
+    ("updates", "expected_stage"),
+    [
+        ({"content_format": ContentFormat.EXPLAINER}, "research"),
+        ({"narration_pace": NarrationPace.FAST}, "script-draft"),
+        ({"narration_delivery": "Measured and reflective."}, "script-draft"),
+        ({"visual_shot_mode": VisualShotMode.CADENCED}, "captions"),
+        ({"shot_target_seconds": 4}, "visual-plan"),
+    ],
+)
+def test_multi_format_config_changes_invalidate_the_earliest_affected_stage(
+    resolved_config,
+    updates: dict[str, object],
+    expected_stage: str,
+) -> None:
+    changed = resolved_config.model_copy(update=updates)
+
+    assert earliest_config_impact(resolved_config, changed) == expected_stage
+
+
+def test_claim_inventory_backend_change_invalidates_script_revision(resolved_config) -> None:
+    bindings = dict(resolved_config.task_bindings)
+    bindings["claim_inventory"] = "deterministic:structured"
+    changed = resolved_config.model_copy(update={"task_bindings": bindings})
+
+    assert earliest_config_impact(resolved_config, changed) == "script-revision"
+
+
+def test_legacy_fiction_run_loads_without_claim_inventory_binding(
+    tmp_path: Path,
+    resolved_config,
+) -> None:
+    config = resolved_config.model_copy(
+        update={
+            "profile": "deterministic-test",
+            "project_root": str(tmp_path),
+            "offline": True,
+            "task_bindings": dict(PROFILES["deterministic-test"]),
+        }
+    )
+    store = RunStore.create(
+        project_root=tmp_path,
+        config=config,
+        brief=CreativeBrief(idea_direction="A tiny winter mystery"),
+        frozen_assets=build_frozen_assets(config),
+    )
+    stored_config = read_json(store.config_path)
+    del stored_config["task_bindings"]["claim_inventory"]
+    atomic_write_json(store.config_path, stored_config)
+    manifest = read_json(store.manifest_path)
+    manifest["config_hash"] = hash_value(stored_config)
+    atomic_write_json(store.manifest_path, manifest)
+
+    reopened = RunStore.open(store.root)
+
+    assert reopened.config.task_bindings["claim_inventory"] == (
+        reopened.config.task_bindings["factual_review"]
+    )
+    assert "claim_inventory" not in read_json(reopened.config_path)["task_bindings"]

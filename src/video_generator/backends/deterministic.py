@@ -77,7 +77,7 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
     task = request.task_id
     if task == "research":
         sources = data.get("sources", [])
-        return {
+        payload = {
             "schema_version": 1,
             "queries": data.get("queries", []),
             "sources": sources,
@@ -95,10 +95,45 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             "cultural_cautions": ["avoid treating living traditions as generic magic"],
             "cliches_to_avoid": ["a prophecy that explains the whole plot"],
         }
+        if data.get("content_mode") == "factual":
+            payload["evidence"] = [
+                {
+                    "evidence_id": f"evidence-{index:03d}",
+                    "supported_statement": str(
+                        source.get("excerpt") or "The bounded fixture source supports this statement."
+                    ),
+                    "source_ids": [str(source.get("source_id"))],
+                    "confidence": "medium",
+                    "time_sensitive": False,
+                    "limitations": ["Deterministic test fixture evidence."],
+                }
+                for index, source in enumerate(sources, start=1)
+            ]
+        return payload
     if task == "ideate":
         count = int(data.get("candidate_count", 5))
+        explainer = data.get("content_format") in {"explainer", "mythbuster"}
         candidates = []
         for index in range(1, count + 1):
+            if explainer:
+                candidates.append(
+                    {
+                        "candidate_id": f"candidate-{index:03d}",
+                        "title": f"Why Winter Paths Sound Different {index}",
+                        "modern_anchor": "the sound of a boot on fresh snow",
+                        "central_question": "Why does very cold snow squeak?",
+                        "misconception": "The sound comes only from heavy boots.",
+                        "thesis": "Temperature changes how snow crystals deform and rub together.",
+                        "evidence_ids": ["evidence-001"] if data.get("content_mode") == "factual" else [],
+                        "evidence_ladder": ["notice the sound", "compare temperatures", "explain crystal friction"],
+                        "human_angle": "People have long read snow conditions through sound and feel.",
+                        "landing_direction": "hear the next winter step as a tiny material experiment",
+                        "visual_opportunities": ["boot and snow crystals", "thermometer", "simple force arrows"],
+                        "accuracy_risks": ["overstating a single cause"],
+                        "duration_fit": "fits a compact evidence-led explanation",
+                    }
+                )
+                continue
             candidates.append(
                 {
                     "candidate_id": f"candidate-{index:03d}",
@@ -118,22 +153,31 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
         return {"schema_version": 1, "candidates": candidates}
     if task == "select":
         candidates = data.get("candidate_set", {}).get("candidates", [])
+        explainer = bool(candidates and "modern_anchor" in candidates[0])
         scores = []
         for index, candidate in enumerate(candidates):
             score = 5 if index == 0 else 4
-            scores.append(
-                {
+            score_item = {
                     "candidate_id": candidate["candidate_id"],
                     "duration_fit": score,
-                    "originality": score,
-                    "story_potential": score,
                     "visual_strength": 5,
                     "spoken_suitability": score,
                     "audience_fit": 5,
-                    "research_responsibility": 5,
-                    "rationale": "The causal arc is complete and every beat has a simple visual.",
-                }
-            )
+                    "rationale": "The progression is clear and every beat has a simple visual.",
+            }
+            if explainer:
+                score_item.update(
+                    hook_strength=score,
+                    evidence_strength=score,
+                    progression=score,
+                )
+            else:
+                score_item.update(
+                    originality=score,
+                    story_potential=score,
+                    research_responsibility=5,
+                )
+            scores.append(score_item)
         chosen = candidates[0]["candidate_id"] if candidates else "candidate-001"
         return {
             "schema_version": 1,
@@ -147,7 +191,33 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
         scene_count = max(2, round(duration / target))
         per_scene = duration / scene_count
         scenes = []
+        explainer = data.get("content_format") in {"explainer", "mythbuster"}
+        arc_roles = [
+            "modern_hook",
+            "question",
+            "misconception",
+            "correction",
+            "evidence",
+            "human_tangent",
+            "synthesis",
+            "landing",
+        ]
         for index in range(1, scene_count + 1):
+            if explainer:
+                role = arc_roles[min(len(arc_roles) - 1, round((index - 1) * (len(arc_roles) - 1) / max(1, scene_count - 1)))]
+                scenes.append(
+                    {
+                        "scene_id": f"scene-{index:03d}",
+                        "arc_role": role,
+                        "purpose": "advance the explanation with one concrete step",
+                        "key_point": "Cold changes how snow crystals respond under a boot.",
+                        "evidence_ids": ["evidence-001"] if data.get("content_mode") == "factual" else [],
+                        "visual_opportunity": "a boot, simple snow crystals, and readable arrows",
+                        "provisional_seconds": per_scene,
+                        "continuity_obligations": ["same blue boot and white snow field"],
+                    }
+                )
+                continue
             scenes.append(
                 {
                     "scene_id": f"scene-{index:03d}",
@@ -159,6 +229,16 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                     "continuity_obligations": ["red triangular scarf", "blue tin lantern"],
                 }
             )
+        if explainer:
+            return {
+                "schema_version": 1,
+                "title": "Why Cold Snow Squeaks",
+                "thesis": "Snow sound changes because cold crystals deform and rub differently.",
+                "modern_anchor": "the next step you take on fresh winter snow",
+                "misconception": "Only boot weight controls the sound.",
+                "landing_callback": "listen to that next step as a material experiment",
+                "scenes": scenes,
+            }
         return {
             "schema_version": 1,
             "title": "The Lantern That Answered",
@@ -199,6 +279,42 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
         return {"schema_version": 1, "review_type": review_type, "passed": True, "findings": []}
     if task == "script_revision":
         return {"schema_version": 1, "script": data["script"], "dispositions": []}
+    if task == "claim_inventory":
+        script = data["script"]
+        evidence = data.get("research_pack", {}).get("evidence", [])
+        evidence_ids = [str(item["evidence_id"]) for item in evidence[:1]]
+        claims = []
+        for index, scene in enumerate(script.get("scenes", []), start=1):
+            exact_text = str(scene.get("spoken_text", "")).split(".", 1)[0].strip()
+            if not exact_text:
+                continue
+            claims.append(
+                {
+                    "claim_id": f"claim-{index:03d}",
+                    "scene_id": scene["scene_id"],
+                    "exact_text": exact_text,
+                    "evidence_ids": evidence_ids,
+                    "qualification": "",
+                }
+            )
+        return {"schema_version": 1, "claims": claims, "coverage_notes": "Fixture audit."}
+    if task == "factual_review":
+        claims = data.get("claim_inventory", {}).get("claims", [])
+        return {
+            "schema_version": 1,
+            "passed": True,
+            "claims": [
+                {
+                    "claim_id": claim["claim_id"],
+                    "verdict": "supported",
+                    "evidence_ids": claim.get("evidence_ids", []),
+                    "rationale": "The deterministic fixture treats its bounded evidence as direct support.",
+                }
+                for claim in claims
+            ],
+            "uncovered_claims": [],
+            "summary": "All fixture claims are covered.",
+        }
     if task == "duration_repair":
         if data.get("repair_strategy") == "single-scene-lengthening-v2":
             scene = data["script"]["scenes"][0]
@@ -234,55 +350,85 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
         return {"schema_version": 1, "script": script, "dispositions": []}
     if task == "visual_plan":
         script = data["script"]
+        has_character = data.get("content_format", "narrative") == "narrative"
         style = {
-            "style_id": "ms_paint_stick",
-            "description": "Naive MS Paint-like stick drawing on a nearly white raster canvas.",
+            "style_id": data.get("style_id", "ms_paint_stick"),
+            "description": data.get("style_description")
+            or "Naive MS Paint-like stick drawing on a nearly white raster canvas.",
             "palette": ["black", "white", "red", "blue", "pale gray"],
             "line_style": "thin, slightly uneven black lines",
             "background": "sparse naive marks with generous empty space",
             "must_avoid": ["written words", "watermarks", "photorealism", "3D", "gradients"],
         }
+        characters = [
+            {
+                "character_id": "character-aino",
+                "name": "Aino",
+                "signature_traits": ["round head", "red triangular scarf"],
+                "color_anchors": ["red scarf"],
+                "recurring_props": ["blue tin lantern"],
+                "body_form": "small upright stick figure; always bipedal",
+                "proportions": ["round head", "short straight limbs", "same small scale"],
+                "face_and_markings": ["two black dot eyes", "no nose", "plain white face"],
+                "wardrobe": ["red triangular scarf tied at the neck"],
+                "identity_constraints": ["never quadrupedal", "never remove or recolor the scarf"],
+            }
+        ] if has_character else []
+        schedule = data.get("canonical_shot_schedule", [])
+        if schedule:
+            return {
+                "schema_version": 1,
+                "style_profile": style,
+                "characters": characters,
+                "duration_seconds": schedule[-1]["end_seconds"],
+                "shots": [
+                    {
+                        **shot,
+                        "story_moment": shot["narration_excerpt"],
+                        "subjects": ["Aino", "blue tin lantern"] if has_character else ["blue boot", "snow crystals"],
+                        "action": "Aino follows the tiny light" if has_character else "the boot compresses snow crystals",
+                        "emotion": "curious and cautiously hopeful" if has_character else "clear and informative",
+                        "environment": "sparse snowy path at blue hour",
+                        "composition": "medium-wide 16:9 view with one clear focal action",
+                        "must_show": ["red triangular scarf", "blue tin lantern"] if has_character else ["blue boot", "individual snow crystals"],
+                        "must_avoid": ["written words", "crowd", "photorealism"],
+                        "character_ids": ["character-aino"] if has_character else [],
+                        "continuity_from_previous": ["preserve the same visible objects"],
+                        "state_after_scene": ["the visible action advances one step"],
+                        "identity_requirements": ["same Aino identity lock"] if has_character else [],
+                        "persistent_elements": ["snowy path"],
+                    }
+                    for shot in schedule
+                ],
+            }
         return {
             "schema_version": 1,
             "style_profile": style,
-            "characters": [
-                {
-                    "character_id": "character-aino",
-                    "name": "Aino",
-                    "signature_traits": ["round head", "red triangular scarf"],
-                    "color_anchors": ["red scarf"],
-                    "recurring_props": ["blue tin lantern"],
-                    "body_form": "small upright stick figure; always bipedal",
-                    "proportions": ["round head", "short straight limbs", "same small scale"],
-                    "face_and_markings": ["two black dot eyes", "no nose", "plain white face"],
-                    "wardrobe": ["red triangular scarf tied at the neck"],
-                    "identity_constraints": ["never quadrupedal", "never remove or recolor the scarf"],
-                }
-            ],
+            "characters": characters,
             "scenes": [
                 {
                     "scene_id": scene["scene_id"],
                     "story_moment": scene["spoken_text"][:240],
-                    "subjects": ["Aino", "blue tin lantern"],
-                    "action": "Aino follows or shields the tiny light",
-                    "emotion": "curious and cautiously hopeful",
+                    "subjects": ["Aino", "blue tin lantern"] if has_character else ["blue boot", "snow crystals"],
+                    "action": "Aino follows or shields the tiny light" if has_character else "a boot compresses snow crystals",
+                    "emotion": "curious and cautiously hopeful" if has_character else "clear and informative",
                     "environment": "sparse snowy path at blue hour",
                     "composition": "medium-wide view with a clear silhouette and empty upper-right space",
-                    "must_show": ["red triangular scarf", "blue tin lantern"],
+                    "must_show": ["red triangular scarf", "blue tin lantern"] if has_character else ["blue boot", "snow crystals"],
                     "must_avoid": ["written words", "crowd", "photorealism"],
-                    "character_ids": ["character-aino"],
+                    "character_ids": ["character-aino"] if has_character else [],
                     "continuity_from_previous": ["Aino keeps the red scarf and blue tin lantern"],
                     "state_after_scene": ["Aino and the lantern advance farther along the snowy path"],
                     "identity_requirements": [
                         "small upright bipedal stick figure with round white face and red triangular scarf"
-                    ],
+                    ] if has_character else [],
                     "persistent_elements": ["red scarf", "blue tin lantern", "snowy path"],
                 }
                 for scene in script.get("scenes", [])
             ],
         }
     if task == "image_prompt_compile":
-        visual = data["visual_brief"]
+        visual = data.get("visual_shot") or data["visual_brief"]
         style = data["style_profile"]
         prompt = (
             f"A deliberately crude raster drawing on a nearly white 16:9 canvas. {visual['story_moment']} "
@@ -291,7 +437,7 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             f"Must show: {', '.join(visual['must_show'])}. No letters, labels, captions, logos, signatures, "
             "watermarks, photorealism, 3D, gradients, polished vector geometry, or elaborate shading."
         )
-        return {
+        payload = {
             "schema_version": 1,
             "scene_id": visual["scene_id"],
             "target_backend_id": data["target_backend_id"],
@@ -304,8 +450,11 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             "reference_paths": data.get("reference_paths", []),
             "settings": {},
         }
+        if visual.get("shot_id"):
+            payload["shot_id"] = visual["shot_id"]
+        return payload
     if task == "visual_review":
-        return {
+        payload = {
             "scene_id": data["scene_id"],
             "passed": True,
             "hard_failure": False,
@@ -320,6 +469,9 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             "failures": [],
             "regeneration_instruction": "",
         }
+        if data.get("shot_id"):
+            payload["shot_id"] = data["shot_id"]
+        return payload
     if task == "music_brief":
         duration = float(data["duration_seconds"])
         return {
@@ -485,6 +637,7 @@ class DeterministicImageBackend(_DeterministicBackend):
         return ImageResult(
             asset=ImageAsset(
                 scene_id=request.scene_id,
+                shot_id=getattr(request, "shot_id", None),
                 image=MediaReference(
                     path=relative_path(output_path, self.workspace_root),
                     sha256=sha256_file(output_path),

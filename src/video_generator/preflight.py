@@ -9,6 +9,7 @@ from typing import Mapping
 from .config import active_task_ids
 from .contracts import (
     CostEstimate,
+    estimated_cadenced_shot_count,
     PreflightReport,
     ProbeItem,
     ProbeReport,
@@ -35,7 +36,8 @@ TASK_LAST_USE_STAGE: dict[str, str] = {
     "review_spoken": "review-spoken",
     "review_constraints": "review-constraints",
     "script_revision": "script-revision",
-    "factual_review": "script-revision",
+    "claim_inventory": "narration",
+    "factual_review": "narration",
     "narration_synthesis": "narration",
     "duration_repair": "narration",
     "caption_alignment": "captions",
@@ -88,6 +90,13 @@ def estimate_cost(
         1, math.ceil(float(config.duration_seconds) / float(config.visual_target_seconds))
     )
     scene_count = target_scene_count + 1
+    visual_shot_count = scene_count
+    if config.visual_shot_mode.value == "cadenced":
+        visual_shot_count = estimated_cadenced_shot_count(
+            float(config.duration_seconds),
+            float(config.visual_target_seconds),
+            float(config.shot_target_seconds),
+        )
     line_items: dict[str, float] = {}
     completed_calls = dict(completed_calls or {})
     active_tasks = _remaining_tasks(config, from_stage)
@@ -97,10 +106,12 @@ def estimate_cost(
         if not descriptor.cloud:
             continue
         calls = (
-            scene_count * 2
+            visual_shot_count * 2
             if task_id == "visual_review"
-            else scene_count
+            else visual_shot_count
             if task_id == "image_prompt_compile"
+            else 2
+            if task_id in {"claim_inventory", "factual_review"}
             else 1
         )
         calls = max(0, calls - completed_calls.get(task_id, 0))
@@ -120,7 +131,11 @@ def estimate_cost(
         speech_calls = max(0, speech_calls - completed_calls.get("narration_synthesis", 0))
         line_items["speech"] = float(speech.reservation_usd) * speech_calls
 
-    if "caption_alignment" in active_tasks and config.captions_enabled and not speech.supports_word_timing:
+    if (
+        "caption_alignment" in active_tasks
+        and (config.captions_enabled or config.visual_shot_mode.value == "cadenced")
+        and not speech.supports_word_timing
+    ):
         alignment = BACKEND_DESCRIPTORS[config.task_bindings["caption_alignment"]]
         if alignment.cloud:
             calls = max(0, scene_count - completed_calls.get("caption_alignment", 0))
@@ -139,7 +154,7 @@ def estimate_cost(
             generation_width * generation_height / (2048 * 1152),
         )
         reference_factor = 1.75 if image.supports_reference_images else 1.0
-        generation_count = scene_count * (2 if config.quality is Quality.FINAL else 1)
+        generation_count = visual_shot_count * (2 if config.quality is Quality.FINAL else 1)
         generation_count = max(0, generation_count - completed_calls.get("image_generate", 0))
         line_items["images"] = (
             float(image.reservation_usd)
@@ -165,6 +180,7 @@ def estimate_cost(
         projected_total_usd=round(already_reserved_usd + total, 4),
         ceiling_usd=float(config.cost_ceiling_usd),
         scene_count=scene_count,
+        visual_shot_count=visual_shot_count,
         line_items={key: round(value, 4) for key, value in sorted(line_items.items())},
         basis=(
             "planned first attempts from "
