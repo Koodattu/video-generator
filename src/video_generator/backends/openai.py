@@ -174,6 +174,7 @@ class _OpenAIClient(Backend):
         schema: dict[str, Any],
         max_output_tokens: int,
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str = "auto",
         max_tool_calls: int | None = None,
         include: list[str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -194,7 +195,7 @@ class _OpenAIClient(Backend):
         }
         if tools:
             body["tools"] = tools
-            body["tool_choice"] = "auto"
+            body["tool_choice"] = tool_choice
         if max_tool_calls is not None:
             body["max_tool_calls"] = max_tool_calls
         if include:
@@ -332,6 +333,7 @@ class OpenAIWebSearchBackend(_OpenAIClient):
             schema=SEARCH_SCHEMA,
             max_output_tokens=2500,
             tools=[{"type": "web_search"}],
+            tool_choice="required",
             max_tool_calls=1,
             include=["web_search_call.action.sources"],
         )

@@ -135,8 +135,11 @@ class LlamaServerWorker:
                 "messages": messages,
                 "max_tokens": int(payload.get("max_output_tokens", 8000)),
                 "temperature": (
-                    0.2
-                    if payload["task_id"] in {"script_draft", "script_revision", "duration_repair"}
+                    0.1
+                    if payload["task_id"] == "factual_review"
+                    else 0.2
+                    if payload["task_id"]
+                    in {"script_draft", "script_revision", "duration_repair"}
                     else 0.65
                 ),
                 "top_p": 0.9,

@@ -340,7 +340,7 @@ def _normalize_token(value: str) -> str:
     return "".join(character for character in value if unicodedata.category(character)[0] in {"L", "N"})
 
 
-CAPTION_RECONCILIATION_REVISION = "canonical-gap-v2"
+CAPTION_RECONCILIATION_REVISION = "canonical-gap-v4-bounded-recognized-lookahead"
 
 
 def _tokens_are_close(left: str, right: str) -> bool:
@@ -430,11 +430,30 @@ def _map_reconciliation_gap(
             canonical_index += 2
             recognized_index += 1
             continue
-        if (
-            recognized_index + 1 < recognized_end
-            and _tokens_are_close(canonical_token, recognized_tokens[recognized_index + 1])
-        ):
-            recognized_index += 1
+        future_recognized_index = next(
+            (
+                candidate_index
+                for candidate_index in range(
+                    recognized_index + 1,
+                    min(recognized_end, recognized_index + 3),
+                )
+                if _tokens_are_close(
+                    canonical_token,
+                    recognized_tokens[candidate_index],
+                )
+                or (
+                    candidate_index + 1 < recognized_end
+                    and _tokens_are_close(
+                        canonical_token,
+                        recognized_tokens[candidate_index]
+                        + recognized_tokens[candidate_index + 1],
+                    )
+                )
+            ),
+            None,
+        )
+        if future_recognized_index is not None:
+            recognized_index = future_recognized_index
             continue
         if (
             canonical_index + 1 < canonical_end
@@ -486,11 +505,24 @@ def reconcile_word_timings(
         canonical_cursor = block.a + block.size
         recognized_cursor = block.b + block.size
     coverage = len(mapped) / len(canonical)
-    if coverage + 1e-9 < minimum_coverage:
+    missing_indices = [index for index in range(len(canonical)) if index not in mapped]
+    short_scene_single_gap = (
+        5 <= len(canonical) <= 8
+        and len(missing_indices) == 1
+        and abs(len(recognized) - len(canonical)) <= 1
+    )
+    if coverage + 1e-9 < minimum_coverage and not short_scene_single_gap:
         raise MediaError(
             f"caption alignment coverage {coverage:.1%} is below the required {minimum_coverage:.1%}",
             kind=ErrorKind.INVALID_OUTPUT,
             action="Inspect the Scene pronunciation/reference audio, then explicitly rerun from captions or narration.",
+            details={
+                "canonical_word_count": len(canonical),
+                "recognized_word_count": len(recognized),
+                "matched_word_count": len(mapped),
+                "unmatched_canonical_words": [canonical[index] for index in missing_indices],
+                "recognized_words": [word.text for word in recognized],
+            },
         )
     output: list[WordTiming | None] = [None] * len(canonical)
     for index, timing in mapped.items():

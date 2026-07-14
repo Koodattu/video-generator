@@ -3,7 +3,16 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from video_generator.contracts import MusicBrief, RenderPlan, RenderScene
+from video_generator.contracts import (
+    EvidenceRecord,
+    EvidenceRecordDraft,
+    FactualResearchPack,
+    FactualResearchSynthesis,
+    MusicBrief,
+    RenderPlan,
+    RenderScene,
+    ResearchSource,
+)
 
 
 def test_music_sections_must_cover_requested_duration() -> None:
@@ -47,3 +56,66 @@ def test_render_scenes_must_be_contiguous() -> None:
             fps=30,
             duration_seconds=5,
         )
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"supported_statement": "x" * 601},
+        {"limitations": ["bounded"] * 5},
+        {"limitations": ["x" * 241]},
+    ],
+)
+def test_evidence_draft_bounds_local_model_payload(updates: dict[str, object]) -> None:
+    values: dict[str, object] = {
+        "supported_statement": "A bounded statement.",
+        "source_ids": ["source-001"],
+        "confidence": "high",
+    }
+    values.update(updates)
+
+    with pytest.raises(ValidationError):
+        EvidenceRecordDraft.model_validate(values)
+
+
+def test_evidence_record_uses_the_same_statement_bound() -> None:
+    with pytest.raises(ValidationError):
+        EvidenceRecord(
+            evidence_id="evidence-001",
+            supported_statement="x" * 601,
+            source_ids=["source-001"],
+            confidence="high",
+        )
+
+
+def test_factual_research_synthesis_accepts_at_most_twelve_records() -> None:
+    record = EvidenceRecordDraft(
+        supported_statement="A bounded statement.",
+        source_ids=["source-001"],
+        confidence="high",
+    )
+
+    assert len(FactualResearchSynthesis(evidence=[record] * 12).evidence) == 12
+    with pytest.raises(ValidationError):
+        FactualResearchSynthesis(evidence=[record] * 13)
+
+
+def test_factual_research_pack_accepts_at_most_twelve_records() -> None:
+    source = ResearchSource(
+        source_id="source-001",
+        url="https://example.com/source",
+        title="Bounded source",
+    )
+    evidence = [
+        EvidenceRecord(
+            evidence_id=f"evidence-{index:03d}",
+            supported_statement=f"Bounded statement {index}.",
+            source_ids=[source.source_id],
+            confidence="high",
+        )
+        for index in range(1, 14)
+    ]
+
+    assert len(FactualResearchPack(sources=[source], evidence=evidence[:12]).evidence) == 12
+    with pytest.raises(ValidationError):
+        FactualResearchPack(sources=[source], evidence=evidence)

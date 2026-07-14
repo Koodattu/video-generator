@@ -90,7 +90,10 @@ def _canonicalize_host_owned_fields(
         "review_spoken": "spoken",
         "review_constraints": "constraints",
     }
-    if task_id in review_types:
+    if (
+        task_id in review_types
+        and input_data.get("review_strategy") != "single-finding-resolution-v1"
+    ):
         review_type = review_types[task_id]
         normalized["review_type"] = review_type
         findings = normalized.get("findings")
@@ -101,9 +104,14 @@ def _canonicalize_host_owned_fields(
             normalized["passed"] = not findings
 
     if task_id == "claim_inventory":
-        claims = normalized.get("claims")
+        coverage_check = (
+            input_data.get("coverage_strategy") == "single-scene-claim-coverage-v1"
+        )
+        claims_field = "missing_claims" if coverage_check else "claims"
+        claims = normalized.get(claims_field)
         scene_extraction = (
             input_data.get("inventory_strategy") == "single-scene-claim-extraction-v2"
+            or coverage_check
         )
         source_script = input_data.get("script")
         script_scenes = source_script.get("scenes") if isinstance(source_script, dict) else None
@@ -119,7 +127,9 @@ def _canonicalize_host_owned_fields(
                     continue
                 if not scene_extraction:
                     claim["claim_id"] = f"claim-{index:03d}"
-                if isinstance(claim.get("evidence_ids"), list):
+                if scene_extraction:
+                    claim.pop("evidence_ids", None)
+                elif isinstance(claim.get("evidence_ids"), list):
                     claim["evidence_ids"] = [
                         evidence_id
                         for evidence_id in claim["evidence_ids"]
@@ -146,11 +156,19 @@ def _canonicalize_host_owned_fields(
         inventory = input_data.get("claim_inventory")
         inventory_claims = inventory.get("claims") if isinstance(inventory, dict) else None
         research_pack = input_data.get("research_pack")
+        evidence_records = input_data.get("evidence_records")
+        evidence_items = (
+            evidence_records
+            if isinstance(evidence_records, list)
+            else research_pack.get("evidence", [])
+            if isinstance(research_pack, dict)
+            else []
+        )
         known_evidence_ids = {
             str(item["evidence_id"])
-            for item in research_pack.get("evidence", [])
+            for item in evidence_items
             if isinstance(item, dict) and item.get("evidence_id")
-        } if isinstance(research_pack, dict) else set()
+        }
         if isinstance(normalized.get("evidence_ids"), list):
             normalized["evidence_ids"] = [
                 evidence_id

@@ -73,13 +73,23 @@ def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> No
     assert models["visual_plan"] is TimedVisualPlan
     assert models["image_prompt_compile"] is TimedImageRequest
     assert assets["prompt_set_version"] == MULTI_FORMAT_PROMPT_SET_VERSION
-    assert assets["workflow_policy_version"] == 13
+    assert assets["workflow_policy_version"] == 26
     claim_properties = assets["schemas"]["claim_inventory"]["$defs"]["ExtractedClaim"][
         "properties"
     ]
-    assert set(claim_properties) == {"exact_text", "evidence_ids", "qualification"}
+    assert set(claim_properties) == {"exact_text", "qualification"}
     assert "shots" in assets["schemas"]["visual_plan"]["properties"]
-    assert "evidence" in assets["schemas"]["research"]["properties"]
+    assert set(assets["schemas"]["research"]["properties"]) == {"evidence"}
+    evidence_schema = assets["schemas"]["research"]["properties"]["evidence"]
+    assert evidence_schema["maxItems"] == 12
+    evidence_properties = assets["schemas"]["research"]["$defs"][
+        "EvidenceRecordDraft"
+    ]["properties"]
+    assert "evidence_id" not in evidence_properties
+    assert evidence_properties["supported_statement"]["maxLength"] == 600
+    assert evidence_properties["limitations"]["maxItems"] == 4
+    assert evidence_properties["limitations"]["items"]["maxLength"] == 240
+    assert "ResearchFindingDraft" not in assets["schemas"]["research"]["$defs"]
     assert "urgent" in assets["prompts"]["script_draft"]["instructions"].lower()
 
 
@@ -217,6 +227,55 @@ def test_infeasible_scene_shot_bounds_are_rejected() -> None:
 
     with pytest.raises(BackendError, match="cannot be divided into Shots"):
         engine._build_shot_schedule(narration, CaptionBundle(enabled=False))
+
+
+def test_short_scene_uses_one_boundary_limited_shot() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        fps=30,
+        shot_target_seconds=3,
+        shot_min_seconds=2,
+        shot_max_seconds=5,
+    )
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text="What is happening?",
+                pause_after_seconds=0,
+            )
+        ],
+    )
+    media = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    timeline = NarrationTimeline(
+        narration_audio=media,
+        duration_seconds=1.8,
+        delivery_duration_seconds=1.8,
+        fps=30,
+        scenes=[
+            TimelineScene(
+                scene_id="scene-001",
+                audio=media,
+                start_seconds=0,
+                speech_end_seconds=1.8,
+                end_seconds=1.8,
+            )
+        ],
+    )
+    narration = NarrationBundle(script=script, timeline=timeline, items=[])
+
+    schedule = engine._build_shot_schedule(narration, CaptionBundle(enabled=False))
+
+    assert schedule == [
+        {
+            "shot_id": "shot-001",
+            "scene_id": "scene-001",
+            "narration_excerpt": "What is happening?",
+            "start_seconds": 0.0,
+            "end_seconds": 1.8,
+        }
+    ]
 
 
 def test_duplicate_visual_request_ids_are_rejected() -> None:

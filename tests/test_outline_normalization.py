@@ -57,3 +57,39 @@ def test_outline_duration_normalization_respects_scene_bounds() -> None:
     assert 4 <= durations[0] <= 20
     assert all(8 <= duration <= 20 for duration in durations[1:-1])
     assert 4 <= durations[-1] <= 20
+
+
+def test_valid_outline_duration_normalization_is_idempotent() -> None:
+    durations = [4.25, 7.25, 8.0, 4.5]
+    outline = StoryOutline(
+        title="Fixture",
+        concept_summary="A short winter story.",
+        scenes=[
+            OutlineScene(
+                scene_id=f"scene-{index:03d}",
+                narrative_purpose="Advance the story.",
+                change="The situation changes.",
+                emotional_beat="Curiosity",
+                visual_opportunity="A clear snowy action.",
+                provisional_seconds=duration,
+            )
+            for index, duration in enumerate(durations, start=1)
+        ],
+    )
+
+    WorkflowEngine._normalize_outline_durations(
+        outline,
+        24,
+        minimum_seconds=4,
+        maximum_seconds=8,
+    )
+    once = [scene.provisional_seconds for scene in outline.scenes]
+    WorkflowEngine._normalize_outline_durations(
+        outline,
+        24,
+        minimum_seconds=4,
+        maximum_seconds=8,
+    )
+
+    assert once == durations
+    assert [scene.provisional_seconds for scene in outline.scenes] == once

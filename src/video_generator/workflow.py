@@ -4,6 +4,7 @@ import math
 import os
 import re
 import shutil
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Sequence
 
@@ -20,11 +21,14 @@ from .contracts import (
     ContentMode,
     CreativeBrief,
     DeliveryManifest,
+    EvidenceRecordDraft,
     ExplainerCandidateSet,
     ExplainerOutline,
     ExplainerSelectionReport,
+    ExtractedClaim,
     FailurePolicy,
     FactualResearchPack,
+    FactualResearchSynthesis,
     FactualClaimReview,
     FactualRevisedScript,
     FactualReviewReport,
@@ -42,6 +46,7 @@ from .contracts import (
     RenderPlan,
     RenderScene,
     ResearchPack,
+    ResearchSynthesis,
     ResearchSource,
     ReviewReport,
     RevisionDisposition,
@@ -49,6 +54,7 @@ from .contracts import (
     SearchRequest,
     SelectionReport,
     SceneClaimExtraction,
+    SceneClaimCoverage,
     ScriptClaim,
     SpeechAsset,
     SpeechRequest,
@@ -102,9 +108,141 @@ from .util import (
 
 
 INTERNAL_REVISION = "media-workflow-v9"
-MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v26"
+MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v43"
+
+HOST_LEXICAL_POLICY_PREFIX = "Host lexical support policy"
+HOST_SELF_CONTAINED_POLICY_PREFIX = "Host self-contained claim policy"
+
+HOST_LEXICAL_STOPWORDS = frozenset(
+    {
+        # English grammatical and framing words.
+        "a",
+        "about",
+        "actually",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "being",
+        "but",
+        "by",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "how",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "may",
+        "might",
+        "now",
+        "of",
+        "on",
+        "or",
+        "really",
+        "should",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "these",
+        "they",
+        "this",
+        "those",
+        "to",
+        "under",
+        "was",
+        "were",
+        "what",
+        "when",
+        "which",
+        "while",
+        "who",
+        "why",
+        "will",
+        "with",
+        "would",
+        # Finnish grammatical and framing words.
+        "että",
+        "ja",
+        "joka",
+        "jolloin",
+        "jos",
+        "jotka",
+        "kanssa",
+        "kautta",
+        "kohti",
+        "kuin",
+        "kun",
+        "mutta",
+        "myös",
+        "nämä",
+        "ne",
+        "niiden",
+        "noin",
+        "nuo",
+        "nyt",
+        "oli",
+        "on",
+        "ovat",
+        "sekä",
+        "sen",
+        "sitten",
+        "tai",
+        "taas",
+        "tämä",
+        "todellisuudessa",
+        "tuo",
+        "voi",
+        "voivat",
+    }
+)
+
+HOST_OWNED_FACTUAL_ROLE_TRANSITIONS = {
+    "en": {
+        "modern_hook": "What is really happening here?",
+        "question": "What could explain this?",
+        "misconception": "What if the obvious explanation is wrong?",
+        "landing": "Now return to the opening and reconsider the result.",
+    },
+    "fi": {
+        "modern_hook": "Mitä tässä oikeastaan tapahtuu?",
+        "question": "Mikä voisi selittää tämän?",
+        "misconception": "Entä jos ilmeisin selitys onkin väärä?",
+        "landing": "Palaa nyt alkuun ja katso tulosta uudelleen.",
+    },
+}
+
+HOST_OWNED_NONFACTUAL_TRANSITIONS = frozenset(
+    {
+        "Palaa nyt alkuun ja katso kokonaisuutta uudelleen.",
+        "Keskity nyt seuraavaan konkreettiseen kohtaan.",
+        "Siirry nyt seuraavaan konkreettiseen kohtaan.",
+        "Now return to the opening and reconsider the whole picture.",
+        "Focus now on the next concrete point.",
+        "Move now to the next concrete point.",
+        *(
+            transition
+            for transitions in HOST_OWNED_FACTUAL_ROLE_TRANSITIONS.values()
+            for transition in transitions.values()
+        ),
+    }
+)
 LEGACY_INTERNAL_REVISION = "media-workflow-v8"
 MAX_AUTHORED_SCENE_PAUSE_SECONDS = 0.75
+DELIVERY_RATE_FIT_MARGIN = 0.002
 DetectorFactory.seed = 0
 
 CandidateSetLike = CandidateSet | ExplainerCandidateSet
@@ -142,6 +280,8 @@ class NarrationBundle(WorkflowModel):
     items: list[NarrationItem]
     duration_repaired: bool = False
     tempo_adjustment: float = 1.0
+    claim_inventory: ClaimInventory | None = None
+    factual_review: FactualReviewReport | None = None
 
 
 class AlignedSceneWords(WorkflowModel):
@@ -158,6 +298,12 @@ class ExpandedSceneText(WorkflowModel):
 class ReplacementText(BaseModel):
     model_config = ConfigDict(extra="forbid")
     spoken_text: str = Field(min_length=1, max_length=10000)
+
+
+class FindingResolution(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resolved: bool
+    explanation: str = Field(min_length=1, max_length=2000)
 
 
 class VisualStyleContent(BaseModel):
@@ -220,7 +366,30 @@ class ClaimReviewDecision(BaseModel):
         "not_a_factual_claim",
     ]
     evidence_ids: list[str] = Field(default_factory=list, max_length=20)
-    rationale: str = Field(min_length=1, max_length=4000)
+    rationale: str = Field(min_length=20, max_length=4000)
+
+
+class EvidenceGroundingDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    verdict: Literal["entailed", "not_entailed"]
+    rationale: str = Field(min_length=20, max_length=4000)
+
+
+class FactualVisualDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    verdict: Literal["grounded", "unsupported", "underillustrated"]
+    rationale: str = Field(min_length=20, max_length=4000)
+
+
+class FactualVisualDepiction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    depiction: str = Field(min_length=1, max_length=2000)
+
+
+class SourceAdmissionDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    verdict: Literal["admit", "reject"]
+    rationale: str = Field(min_length=20, max_length=4000)
 
 
 class CaptionBundle(WorkflowModel):
@@ -380,6 +549,7 @@ class WorkflowEngine:
             research = self._research()
             if self._stop("research"):
                 return None
+            authoring_research = self._authoring_research_payload(research)
             explainer_format = self.config.content_format is not ContentFormat.NARRATIVE
             candidate_model: type[CandidateSetLike] = (
                 ExplainerCandidateSet if explainer_format else CandidateSet
@@ -389,7 +559,7 @@ class WorkflowEngine:
                 "ideate",
                 {
                     "brief": self.brief.model_dump(mode="json"),
-                    "research_pack": research.model_dump(mode="json"),
+                    "research_pack": authoring_research,
                     "candidate_count": self.config.idea_candidates,
                     "duration_seconds": self.config.duration_seconds,
                     "content_mode": self.config.content_mode.value,
@@ -413,7 +583,7 @@ class WorkflowEngine:
                 selection_input.update(
                     {
                         "brief": self.brief.model_dump(mode="json"),
-                        "research_pack": research.model_dump(mode="json"),
+                        "research_pack": authoring_research,
                         "audience": self.config.audience,
                     }
                 )
@@ -448,7 +618,7 @@ class WorkflowEngine:
                 "content_format": self.config.content_format.value,
             }
             if self.workflow_policy_version >= 3:
-                outline_input["research_pack"] = research.model_dump(mode="json")
+                outline_input["research_pack"] = authoring_research
             outline = self._structured_stage(
                 "outline",
                 "outline",
@@ -471,7 +641,7 @@ class WorkflowEngine:
                 **script_word_plan,
             }
             if self.config.content_mode is ContentMode.FACTUAL:
-                draft_input["research_pack"] = research.model_dump(mode="json")
+                draft_input["research_pack"] = authoring_research
             def draft_invariant(value: NarrationScript) -> None:
                 self._validate_draft(
                     value,
@@ -536,7 +706,7 @@ class WorkflowEngine:
                 **script_word_plan,
             }
             if self.config.content_mode is ContentMode.FACTUAL:
-                revision_input["research_pack"] = research.model_dump(mode="json")
+                revision_input["research_pack"] = authoring_research
             def revision_invariant(value: RevisedScript) -> None:
                 self._validate_revision(
                     value,
@@ -580,6 +750,7 @@ class WorkflowEngine:
             narration = self._narration(
                 final_script,
                 factual_research=research if isinstance(research, FactualResearchPack) else None,
+                factual_revision=revised if isinstance(revised, FactualRevisedScript) else None,
                 outline=outline,
             )
             if self._stop("narration"):
@@ -587,6 +758,17 @@ class WorkflowEngine:
             captions = self._captions(narration)
             if self._stop("captions"):
                 return None
+            factual_visual_grounding = (
+                self._factual_visual_grounding_payload(
+                    narration.claim_inventory,
+                    narration.factual_review,
+                    research,
+                )
+                if narration.claim_inventory is not None
+                and narration.factual_review is not None
+                and isinstance(research, FactualResearchPack)
+                else None
+            )
             visual_plan_input = {
                 "script": narration.script.model_dump(mode="json"),
                 "timeline": narration.timeline.model_dump(mode="json"),
@@ -601,6 +783,8 @@ class WorkflowEngine:
                     "aspect_ratio": "16:9",
                 },
             }
+            if factual_visual_grounding is not None:
+                visual_plan_input["factual_grounding"] = factual_visual_grounding
             if self.continuity_policy_enabled:
                 visual_plan_input = {
                     "brief": self.brief.model_dump(mode="json"),
@@ -668,7 +852,10 @@ class WorkflowEngine:
                 )
             if self._stop("visual-plan"):
                 return None
-            image_requests = self._image_prompts(visual_plan)
+            image_requests = self._image_prompts(
+                visual_plan,
+                factual_grounding=factual_visual_grounding,
+            )
             if self._stop("image-prompt-compile"):
                 return None
             prepared_music_brief = None
@@ -898,7 +1085,7 @@ class WorkflowEngine:
             "output_language": self.config.output_language.value,
         }
         if self.config.content_mode is ContentMode.FACTUAL:
-            input_data["research_pack"] = research.model_dump(mode="json")
+            input_data["research_pack"] = self._authoring_research_payload(research)
         report = self._structured_stage(
             stage,
             task_id,
@@ -942,6 +1129,733 @@ class WorkflowEngine:
             raise BackendError(message, kind=ErrorKind.INVALID_OUTPUT)
 
     @staticmethod
+    def _authoring_research_payload(
+        research: ResearchPack | FactualResearchPack,
+    ) -> dict[str, Any]:
+        if isinstance(research, FactualResearchPack):
+            return {
+                "evidence": [item.model_dump(mode="json") for item in research.evidence]
+            }
+        return research.model_dump(mode="json")
+
+    @staticmethod
+    def _authoring_evidence_payload(evidence: EvidenceRecord) -> dict[str, Any]:
+        return evidence.model_dump(mode="json", exclude={"source_ids"})
+
+    @staticmethod
+    def _factual_visual_grounding_payload(
+        inventory: ClaimInventory,
+        review: FactualReviewReport,
+        research: FactualResearchPack,
+    ) -> dict[str, Any]:
+        decisions_by_id = {
+            decision.claim_id: decision for decision in review.claims
+        }
+        supported_claims: list[dict[str, Any]] = []
+        nonfactual_framing: list[dict[str, str]] = []
+        used_evidence_ids: set[str] = set()
+        for claim in inventory.claims:
+            decision = decisions_by_id[claim.claim_id]
+            if decision.verdict == "supported":
+                supported_claims.append(
+                    {
+                        "scene_id": claim.scene_id,
+                        "exact_text": claim.exact_text,
+                        "evidence_ids": list(decision.evidence_ids),
+                    }
+                )
+                used_evidence_ids.update(decision.evidence_ids)
+            elif decision.verdict == "not_a_factual_claim":
+                nonfactual_framing.append(
+                    {"scene_id": claim.scene_id, "exact_text": claim.exact_text}
+                )
+        return {
+            "supported_claims": supported_claims,
+            "nonfactual_framing": nonfactual_framing,
+            "evidence_records": [
+                WorkflowEngine._authoring_evidence_payload(evidence)
+                for evidence in research.evidence
+                if evidence.evidence_id in used_evidence_ids
+            ],
+        }
+
+    @staticmethod
+    def _factual_visual_grounding_for_scene(
+        grounding: dict[str, Any] | None,
+        scene_id: str,
+    ) -> dict[str, Any]:
+        if not grounding:
+            return {}
+        claims = [
+            claim
+            for claim in grounding.get("supported_claims", [])
+            if claim.get("scene_id") == scene_id
+        ]
+        evidence_ids = {
+            evidence_id
+            for claim in claims
+            for evidence_id in claim.get("evidence_ids", [])
+        }
+        return {
+            "supported_claims": claims,
+            "nonfactual_framing": [
+                item
+                for item in grounding.get("nonfactual_framing", [])
+                if item.get("scene_id") == scene_id
+            ],
+            "allowed_evidence_records": [
+                evidence
+                for evidence in grounding.get("evidence_records", [])
+                if evidence.get("evidence_id") in evidence_ids
+            ],
+        }
+
+    @classmethod
+    def _factual_visual_grounding_for_target(
+        cls,
+        grounding: dict[str, Any] | None,
+        *,
+        scene_id: str,
+        narration_excerpt: str,
+        timed_visuals: bool,
+        terminal_claim_fragments_only: bool = False,
+    ) -> dict[str, Any]:
+        scene_grounding = cls._factual_visual_grounding_for_scene(grounding, scene_id)
+        if not timed_visuals:
+            return scene_grounding
+
+        def active_in_excerpt(item: dict[str, Any]) -> bool:
+            exact_text = str(item.get("exact_text") or "").strip()
+            if not exact_text:
+                return False
+            normalized_claim = re.sub(
+                r"\s+",
+                " ",
+                unicodedata.normalize("NFKC", exact_text).casefold(),
+            ).strip(" .!?;:\"'“”‘’")
+            normalized_excerpt = re.sub(
+                r"\s+",
+                " ",
+                unicodedata.normalize("NFKC", narration_excerpt).casefold(),
+            ).strip(" .!?;:\"'“”‘’")
+            if normalized_claim and normalized_excerpt and normalized_claim in normalized_excerpt:
+                return True
+            if normalized_claim and normalized_excerpt and normalized_excerpt in normalized_claim:
+                if not terminal_claim_fragments_only:
+                    return True
+                return bool(re.search(r"[.!?][\"'”’)]*\s*$", narration_excerpt))
+            claim_words = cls._lexical_support_words(exact_text)
+            excerpt_words = cls._lexical_support_words(narration_excerpt)
+            if not claim_words or not excerpt_words:
+                return False
+            overlap = len(claim_words & excerpt_words)
+            shorter_count = min(len(claim_words), len(excerpt_words))
+            claim_numbers = cls._numeric_support_tokens(exact_text)
+            excerpt_numbers = cls._numeric_support_tokens(narration_excerpt)
+            if claim_numbers & excerpt_numbers:
+                return overlap >= 1 and overlap / shorter_count >= 0.25
+            required_overlap = min(3, shorter_count)
+            return overlap >= required_overlap and overlap / shorter_count >= 0.5
+
+        active_claims = [
+            claim
+            for claim in scene_grounding.get("supported_claims", [])
+            if active_in_excerpt(claim)
+        ]
+        active_evidence_ids = {
+            evidence_id
+            for claim in active_claims
+            for evidence_id in claim.get("evidence_ids", [])
+        }
+        return {
+            "supported_claims": active_claims,
+            "nonfactual_framing": [
+                item
+                for item in scene_grounding.get("nonfactual_framing", [])
+                if active_in_excerpt(item)
+            ],
+            "allowed_evidence_records": [
+                evidence
+                for evidence in scene_grounding.get("allowed_evidence_records", [])
+                if evidence.get("evidence_id") in active_evidence_ids
+            ],
+        }
+
+    def _review_factual_visual_candidate(
+        self,
+        *,
+        stage: str,
+        item_id: str,
+        candidate_kind: Literal["visual_content"],
+        candidate: dict[str, Any],
+        grounding: dict[str, Any],
+        staging_context: dict[str, Any],
+    ) -> tuple[FactualVisualDecision, list[UsageRecord]]:
+        claim_depiction_required = bool(grounding.get("supported_claims"))
+        input_data: dict[str, Any] = {
+            "review_strategy": (
+                "single-factual-visual-v2"
+                if getattr(self, "workflow_policy_version", 19) >= 20
+                else "single-factual-visual-v1"
+            ),
+            "candidate_kind": candidate_kind,
+            "candidate": candidate,
+            "factual_grounding": grounding,
+            "staging_context": staging_context,
+            "review_requirement": {
+                "claim_depiction_required": claim_depiction_required,
+                "active_supported_claim_count": len(
+                    grounding.get("supported_claims", [])
+                ),
+                "numeric_claims_need_no_written_text": True,
+            },
+        }
+
+        def validate_decision(decision: FactualVisualDecision) -> None:
+            self._require(
+                len(re.findall(r"\w+", decision.rationale, flags=re.UNICODE)) >= 3,
+                "Factual Visual Review rationale is not meaningful enough to audit",
+            )
+            self._require(
+                claim_depiction_required or decision.verdict != "underillustrated",
+                "Factual Visual Review cannot require Claim coverage without an active Claim",
+            )
+
+        return self._structured_item(
+            stage=stage,
+            item_id=item_id,
+            task_id="factual_review",
+            input_data=input_data,
+            output_model=FactualVisualDecision,
+            invariant=validate_decision,
+            max_output_tokens=600,
+            instruction_suffix=(
+                "Review exactly the one supplied factual visual candidate. Return only verdict and "
+                "rationale. unsupported means the candidate adds a factual process, comparison, "
+                "quantity, transformation, or outcome without direct authorization. underillustrated "
+                "means it is factually safe but, despite claim_depiction_required=true, merely repeats "
+                "a generic anchor instead of visibly conveying an active supported Claim. grounded "
+                "requires both factual authorization and required Claim coverage. A numeric Claim may "
+                "use matching unlabeled measurement or threshold markers, or a comparison directly "
+                "stated by the Claim; a material state or process is allowed only when the exact Claim "
+                "asserts it. Staging context is not factual authority and never narrows semantics "
+                "directly authorized by an active supported Claim. With no active Claim, permit only a "
+                "static staged composition of supplied subjects and setting. Do not repair or return "
+                "host-owned fields."
+            ),
+        )
+
+    def _audit_and_repair_factual_visual_content(
+        self,
+        *,
+        visual_id: str,
+        content: VisualBriefContent,
+        grounding: dict[str, Any],
+        staging_context: dict[str, Any],
+        style_profile: dict[str, Any],
+        character_identities: list[dict[str, Any]],
+        invariant: Callable[[VisualBriefContent], None],
+    ) -> tuple[VisualBriefContent, list[UsageRecord]]:
+        def candidate_payload(value: VisualBriefContent) -> dict[str, Any]:
+            visible_ids = set(value.character_ids)
+            return {
+                "visual_content": value.model_dump(mode="json"),
+                "positive_style_semantics": {
+                    field_name: style_profile[field_name]
+                    for field_name in (
+                        "description",
+                        "palette",
+                        "line_style",
+                        "background",
+                    )
+                    if field_name in style_profile
+                },
+                "visible_character_identities": [
+                    identity
+                    for identity in character_identities
+                    if identity.get("character_id") in visible_ids
+                ],
+            }
+
+        decision, audit_usage = self._review_factual_visual_candidate(
+            stage="visual-plan",
+            item_id=f"audit-content-{visual_id}",
+            candidate_kind="visual_content",
+            candidate=candidate_payload(content),
+            grounding=grounding,
+            staging_context=staging_context,
+        )
+        if decision.verdict == "grounded":
+            return content, audit_usage
+
+        if (
+            getattr(self, "workflow_policy_version", 25) >= 26
+            and not grounding.get("supported_claims")
+        ):
+            neutral = self._neutral_factual_visual_fallback(content)
+            invariant(neutral)
+            neutral_recheck, neutral_recheck_usage = self._review_factual_visual_candidate(
+                stage="visual-plan",
+                item_id=f"recheck-content-{visual_id}",
+                candidate_kind="visual_content",
+                candidate=candidate_payload(neutral),
+                grounding=grounding,
+                staging_context=staging_context,
+            )
+            usage = [*audit_usage, *neutral_recheck_usage]
+            if neutral_recheck.verdict == "grounded":
+                return neutral, usage
+            raise BackendError(
+                f"factual visual gate blocked {visual_id} after host neutral fallback: "
+                + neutral_recheck.rationale,
+                kind=ErrorKind.INVALID_OUTPUT,
+                action=(
+                    "Improve the bounded staging subjects or explicitly rerun from visual-plan "
+                    "after correcting the neutral factual visual context."
+                ),
+            )
+
+        visual_requirement = {
+            "claim_depiction_required": bool(grounding.get("supported_claims")),
+            "active_supported_claim_count": len(
+                grounding.get("supported_claims", [])
+            ),
+        }
+
+        def compact_repair_input(
+            *,
+            strategy: str,
+            base: VisualBriefContent,
+            failure: str,
+            repair_mode: str,
+            prior_failure: str | None = None,
+        ) -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "repair_strategy": strategy,
+                "repair_mode": repair_mode,
+                "previous_depiction": {
+                    "story_moment": base.story_moment,
+                    "action": base.action,
+                    "must_show": list(base.must_show),
+                },
+                "factual_audit_failure": failure,
+                "factual_grounding": grounding,
+                "staging_context": staging_context,
+                "visual_requirement": visual_requirement,
+            }
+            if prior_failure is not None:
+                payload["prior_factual_audit_failure"] = prior_failure
+            return payload
+
+        if getattr(self, "workflow_policy_version", 24) >= 25:
+            repair_input = compact_repair_input(
+                strategy="single-factual-visual-depiction-v2-compact",
+                base=content,
+                failure=decision.rationale,
+                repair_mode=decision.verdict,
+            )
+        else:
+            repair_input = {
+                "repair_strategy": (
+                    "single-factual-visual-depiction-v1"
+                    if getattr(self, "workflow_policy_version", 22) >= 23
+                    else "single-factual-visual-replacement-v2"
+                ),
+                "previous_visual_content": content.model_dump(mode="json"),
+                "factual_audit_failure": decision.rationale,
+                "factual_grounding": grounding,
+                "staging_context": staging_context,
+                "visual_requirement": visual_requirement,
+                "style_profile": style_profile,
+                "character_identities": character_identities,
+            }
+        if getattr(self, "workflow_policy_version", 22) >= 23:
+            def validate_depiction(replacement: FactualVisualDepiction) -> None:
+                invariant(self._apply_factual_visual_depiction(content, replacement))
+
+            if (
+                getattr(self, "workflow_policy_version", 24) >= 25
+                and decision.verdict == "underillustrated"
+            ):
+                depiction_instruction = (
+                    "Return only one replacement depiction string. The previous candidate was "
+                    "factually safe but too generic. Preserve its exact supported variables and "
+                    "relationship, and add only a direct visual encoding of the property the active "
+                    "Claim asserts. Never substitute a correlated proxy, cause, process, phase change, "
+                    "different material amounts, or downstream outcome. For numeric temperature "
+                    "thresholds, use matching unlabeled thermometer or threshold markers—not more or "
+                    "less ice or salt. Python preserves and assembles every other field."
+                )
+            elif getattr(self, "workflow_policy_version", 24) >= 25:
+                depiction_instruction = (
+                    "Return only one replacement depiction string. Remove the unsupported semantics "
+                    "identified by the audit and use only direct active supported Claims and allowed "
+                    "Evidence. Do not replace one unsupported mechanism, proxy, quantity, change, or "
+                    "outcome with another. With no active Claim, describe only a neutral static "
+                    "arrangement from staging context. Python preserves and assembles every other field."
+                )
+            else:
+                depiction_instruction = (
+                    "Return only one depiction string replacing the unsupported or generic central "
+                    "visual statement. Use only active supported Claims and allowed Evidence. When a "
+                    "Claim is active, describe one claim-specific literal cognitive anchor; exact "
+                    "numerals need not appear as written text. With no active Claim, describe a neutral "
+                    "static arrangement of staging-context subjects and setting. Python preserves and "
+                    "assembles all identity, continuity, environment, composition, and host-owned "
+                    "fields; return none of them."
+                )
+
+            replacement, repair_usage = self._structured_item(
+                stage="visual-plan",
+                item_id=f"repair-content-{visual_id}",
+                task_id="visual_plan",
+                input_data=repair_input,
+                output_model=FactualVisualDepiction,
+                invariant=validate_depiction,
+                max_output_tokens=600,
+                instruction_suffix=depiction_instruction,
+            )
+            repaired = self._apply_factual_visual_depiction(content, replacement)
+        else:
+            repaired, repair_usage = self._structured_item(
+                stage="visual-plan",
+                item_id=f"repair-content-{visual_id}",
+                task_id="visual_plan",
+                input_data=repair_input,
+                output_model=VisualBriefContent,
+                invariant=invariant,
+                max_output_tokens=1800,
+                instruction_suffix=(
+                    "Replace only the supplied one-image visual content. Remove every unsupported "
+                    "mechanism, cause, comparison, quantity, change, and result identified by the audit. "
+                    "Use only active supported Claims and allowed Evidence. When a Claim is active, create "
+                    "one claim-specific literal cognitive anchor rather than another generic modern-anchor "
+                    "still life; an exact numeral need not appear as written text. If no Claim is active, "
+                    "return a neutral static arrangement of staging-context subjects and setting. Preserve "
+                    "only grounded style and identity continuity. Return no ID, narration, timing, style "
+                    "contract, Character definition, or surrounding visual item."
+                ),
+            )
+        recheck, recheck_usage = self._review_factual_visual_candidate(
+            stage="visual-plan",
+            item_id=f"recheck-content-{visual_id}",
+            candidate_kind="visual_content",
+            candidate=candidate_payload(repaired),
+            grounding=grounding,
+            staging_context=staging_context,
+        )
+        usage = [*audit_usage, *repair_usage, *recheck_usage]
+        if recheck.verdict == "grounded":
+            return repaired, usage
+
+        allow_coverage_repair = (
+            getattr(self, "workflow_policy_version", 20) >= 21
+            and decision.verdict == "unsupported"
+            and recheck.verdict == "underillustrated"
+            and bool(grounding.get("supported_claims"))
+        )
+        if allow_coverage_repair:
+            if getattr(self, "workflow_policy_version", 24) >= 25:
+                coverage_repair_input = compact_repair_input(
+                    strategy="single-factual-visual-coverage-depiction-v2-compact",
+                    base=repaired,
+                    failure=recheck.rationale,
+                    prior_failure=decision.rationale,
+                    repair_mode="coverage_after_safety",
+                )
+            else:
+                coverage_repair_input = {
+                    "repair_strategy": (
+                        "single-factual-visual-coverage-depiction-v1"
+                        if getattr(self, "workflow_policy_version", 22) >= 23
+                        else "single-factual-visual-coverage-replacement-v1"
+                    ),
+                    "previous_visual_content": repaired.model_dump(mode="json"),
+                    "factual_audit_failure": recheck.rationale,
+                    "factual_grounding": grounding,
+                    "staging_context": staging_context,
+                    "visual_requirement": visual_requirement,
+                    "style_profile": style_profile,
+                    "character_identities": character_identities,
+                }
+            if getattr(self, "workflow_policy_version", 22) >= 23:
+                def validate_coverage_depiction(
+                    replacement: FactualVisualDepiction,
+                ) -> None:
+                    invariant(
+                        self._apply_factual_visual_depiction(repaired, replacement)
+                    )
+
+                coverage_replacement, coverage_repair_usage = self._structured_item(
+                    stage="visual-plan",
+                    item_id=f"coverage-repair-content-{visual_id}",
+                    task_id="visual_plan",
+                    input_data=coverage_repair_input,
+                    output_model=FactualVisualDepiction,
+                    invariant=validate_coverage_depiction,
+                    max_output_tokens=600,
+                    instruction_suffix=(
+                        "Return only one replacement depiction string for this factually safe but "
+                        "underillustrated image. Keep the safe variables unchanged and encode only the "
+                        "property directly asserted by an active supported Claim. Never substitute a "
+                        "correlated proxy, cause, process, phase change, different material amounts, or "
+                        "downstream outcome. For numeric temperature thresholds, use matching unlabeled "
+                        "thermometer or threshold markers—not more or less ice or salt. Python preserves "
+                        "and assembles all other fields; return none of them."
+                        if getattr(self, "workflow_policy_version", 24) >= 25
+                        else "Return only one replacement depiction string for this factually safe but "
+                        "underillustrated image. Keep it within active supported Claims and allowed "
+                        "Evidence, and make at least one Claim immediately legible using a literal "
+                        "object, process, state contrast, side-by-side comparison, or non-textual "
+                        "thermometer shape. A color change alone is not meaningful. Python preserves "
+                        "and assembles all other fields; return none of them."
+                    ),
+                )
+                coverage_repaired = self._apply_factual_visual_depiction(
+                    repaired,
+                    coverage_replacement,
+                )
+            else:
+                coverage_repaired, coverage_repair_usage = self._structured_item(
+                    stage="visual-plan",
+                    item_id=f"coverage-repair-content-{visual_id}",
+                    task_id="visual_plan",
+                    input_data=coverage_repair_input,
+                    output_model=VisualBriefContent,
+                    invariant=invariant,
+                    max_output_tokens=1800,
+                    instruction_suffix=(
+                        "Replace only this one factually safe but underillustrated visual content "
+                        "object. Keep every visible assertion within the active supported Claims and "
+                        "allowed Evidence, but make at least one active Claim immediately legible as a "
+                        "still image. Use a claim-appropriate non-textual device such as a side-by-side "
+                        "comparison, material-state contrast, thermometer shape without numerals, or the "
+                        "literal object/process named by the Claim. A different color alone is not a "
+                        "meaningful comparison. Do not add the supported Claim, its subjects, or its "
+                        "process to must_avoid. Return no ID, narration, timing, style contract, Character "
+                        "definition, or surrounding visual item."
+                    ),
+                )
+            final_recheck, final_recheck_usage = self._review_factual_visual_candidate(
+                stage="visual-plan",
+                item_id=f"final-recheck-content-{visual_id}",
+                candidate_kind="visual_content",
+                candidate=candidate_payload(coverage_repaired),
+                grounding=grounding,
+                staging_context=staging_context,
+            )
+            usage.extend([*coverage_repair_usage, *final_recheck_usage])
+            if final_recheck.verdict == "grounded":
+                return coverage_repaired, usage
+            recheck = final_recheck
+
+        allow_safety_refinement = (
+            getattr(self, "workflow_policy_version", 24) >= 25
+            and decision.verdict == "underillustrated"
+            and recheck.verdict == "unsupported"
+            and bool(grounding.get("supported_claims"))
+        )
+        if allow_safety_refinement:
+            refinement_input = compact_repair_input(
+                strategy="single-factual-visual-safety-refinement-v1",
+                base=content,
+                failure=recheck.rationale,
+                prior_failure=decision.rationale,
+                repair_mode="claim_coverage_without_proxy",
+            )
+
+            def validate_safety_refinement(
+                replacement: FactualVisualDepiction,
+            ) -> None:
+                invariant(self._apply_factual_visual_depiction(content, replacement))
+
+            refinement, refinement_usage = self._structured_item(
+                stage="visual-plan",
+                item_id=f"safety-refinement-content-{visual_id}",
+                task_id="visual_plan",
+                input_data=refinement_input,
+                output_model=FactualVisualDepiction,
+                invariant=validate_safety_refinement,
+                max_output_tokens=600,
+                instruction_suffix=(
+                    "Return only one replacement depiction string. Start from the original factually "
+                    "safe variables, not the unsupported attempted proxy. Make the active Claim legible "
+                    "using only its directly asserted property and remove every mechanism, correlated "
+                    "proxy, material-amount difference, phase change, and outcome identified by the "
+                    "recheck. For numeric temperature thresholds, use matching unlabeled thermometer or "
+                    "threshold markers—not more or less ice or salt. Python assembles every other field."
+                ),
+            )
+            refined = self._apply_factual_visual_depiction(content, refinement)
+            final_recheck, final_recheck_usage = self._review_factual_visual_candidate(
+                stage="visual-plan",
+                item_id=f"final-recheck-content-{visual_id}",
+                candidate_kind="visual_content",
+                candidate=candidate_payload(refined),
+                grounding=grounding,
+                staging_context=staging_context,
+            )
+            usage.extend([*refinement_usage, *final_recheck_usage])
+            if final_recheck.verdict == "grounded":
+                return refined, usage
+            recheck = final_recheck
+
+        if recheck.verdict != "grounded":
+            raise BackendError(
+                f"factual visual gate blocked {visual_id} after bounded repair: "
+                + recheck.rationale,
+                kind=ErrorKind.INVALID_OUTPUT,
+                action=(
+                    "Improve bounded evidence or explicitly rerun from visual-plan after correcting "
+                    "the claim-specific visual brief."
+                ),
+            )
+        return repaired, usage
+
+    @staticmethod
+    def _neutral_factual_visual_fallback(
+        content: VisualBriefContent,
+    ) -> VisualBriefContent:
+        must_show = list(content.subjects) or ["a neutral static arrangement"]
+        return content.model_copy(
+            update={
+                "story_moment": (
+                    "A neutral static arrangement of the listed subjects with no visible "
+                    "interaction, process, change, comparison, or result."
+                ),
+                "action": (
+                    "All listed subjects remain separate and motionless in a static staged arrangement."
+                ),
+                "emotion": "Neutral observation.",
+                "environment": (
+                    "A simple neutral setting with no visible action, process, change, or result."
+                ),
+                "composition": (
+                    "A clear balanced static still-life composition presenting every listed subject "
+                    "separately against a simple background."
+                ),
+                "must_show": must_show,
+                "must_avoid": [
+                    "written text, labels, logos, numbers, and watermarks",
+                    (
+                        "motion, hovering, suspension, interaction, mechanism, cause, comparison, "
+                        "quantity, process, change, and outcome"
+                    ),
+                ],
+                "continuity_from_previous": [
+                    "The neutral staged arrangement remains unchanged from the preceding image."
+                ],
+                "state_after_scene": [
+                    "The neutral staged arrangement remains unchanged."
+                ],
+                "persistent_elements": [],
+            }
+        )
+
+    @staticmethod
+    def _apply_factual_visual_depiction(
+        content: VisualBriefContent,
+        replacement: FactualVisualDepiction,
+    ) -> VisualBriefContent:
+        depiction = replacement.depiction.strip()
+        return content.model_copy(
+            update={
+                "story_moment": depiction,
+                "action": depiction,
+                "must_show": [depiction],
+                "must_avoid": [
+                    "written text, labels, logos, watermarks, and unsupported factual mechanisms"
+                ],
+            }
+        )
+
+    def _compile_factual_image_prompt_content(
+        self,
+        *,
+        visual_brief: Any,
+        style_profile: Any,
+        characters: Sequence[Any],
+    ) -> ImagePromptContent:
+        def joined(values: Sequence[str]) -> str:
+            return ", ".join(value.strip() for value in values if value.strip())
+
+        parts = [
+            "Single still image in a clear 16:9 composition.",
+            f"Approved story moment: {visual_brief.story_moment.strip()}.",
+            f"Visible subjects: {joined(visual_brief.subjects)}.",
+            f"Approved visible action or static arrangement: {visual_brief.action.strip()}.",
+            f"Environment: {visual_brief.environment.strip()}.",
+            f"Emotion: {visual_brief.emotion.strip()}.",
+            f"Composition: {visual_brief.composition.strip()}.",
+            f"Must show exactly: {joined(visual_brief.must_show)}.",
+        ]
+        if visual_brief.identity_requirements:
+            parts.append(
+                "Identity requirements: " + joined(visual_brief.identity_requirements) + "."
+            )
+        if visual_brief.persistent_elements:
+            parts.append(
+                "Persistent visible elements: " + joined(visual_brief.persistent_elements) + "."
+            )
+        for character in characters:
+            identity_parts = [
+                character.name,
+                *character.signature_traits,
+                *character.color_anchors,
+                *character.recurring_props,
+                character.body_form,
+                *character.proportions,
+                *character.face_and_markings,
+                *character.wardrobe,
+                *character.identity_constraints,
+            ]
+            parts.append("Approved Character identity: " + joined(identity_parts) + ".")
+        parts.extend(
+            [
+                f"Visual style: {style_profile.description.strip()}.",
+                f"Palette: {joined(style_profile.palette)}.",
+                f"Line style: {style_profile.line_style.strip()}.",
+                f"Background treatment: {style_profile.background.strip()}.",
+                "No written text, captions, labels, logos, signatures, or watermarks.",
+            ]
+        )
+        prompt = " ".join(part for part in parts if part).strip()
+        negative_items = list(
+            dict.fromkeys(
+                [
+                    *style_profile.must_avoid,
+                    *visual_brief.must_avoid,
+                    "written text",
+                    "captions",
+                    "labels",
+                    "logos",
+                    "signatures",
+                    "watermarks",
+                ]
+            )
+        )
+        negative_prompt = joined(negative_items)
+        self._require(
+            len(prompt) <= 12000 and len(negative_prompt) <= 12000,
+            "Host factual image prompt exceeds the Image Request text limit",
+        )
+        content = ImagePromptContent(prompt=prompt, negative_prompt=negative_prompt)
+        self._validate_image_request_language(content)
+        return content
+
+    @staticmethod
+    def _outline_scene_evidence_ids(
+        outline_scene: Any,
+        research: ResearchPack | FactualResearchPack,
+    ) -> list[str]:
+        scene_ids = getattr(outline_scene, "evidence_ids", None)
+        if scene_ids is not None:
+            return list(scene_ids)
+        if isinstance(research, FactualResearchPack):
+            return [item.evidence_id for item in research.evidence]
+        return []
+
+    @staticmethod
     def _validate_selection(
         selection: SelectionReportLike,
         candidates: CandidateSetLike,
@@ -955,20 +1869,35 @@ class WorkflowEngine:
                 kind=ErrorKind.INVALID_OUTPUT,
             )
 
-    def _validate_candidates(self, candidates: CandidateSet, research: ResearchPack) -> None:
+    def _validate_candidates(
+        self,
+        candidates: CandidateSet,
+        research: ResearchPack | FactualResearchPack,
+    ) -> None:
         self._require(
             len(candidates.candidates) == self.config.idea_candidates,
             "ideation did not return the configured candidate count",
         )
-        finding_ids = {finding.finding_id for finding in research.findings}
-        source_to_findings: dict[str, list[str]] = {}
-        for finding in research.findings:
-            for source_id in finding.source_ids:
-                source_to_findings.setdefault(source_id, []).append(finding.finding_id)
+        if isinstance(research, FactualResearchPack):
+            known_ids = {item.evidence_id for item in research.evidence}
+            references = [
+                (item.evidence_id, item.source_ids) for item in research.evidence
+            ]
+            reference_label = "Evidence"
+        else:
+            known_ids = {item.finding_id for item in research.findings}
+            references = [
+                (item.finding_id, item.source_ids) for item in research.findings
+            ]
+            reference_label = "Research Finding"
+        source_to_references: dict[str, list[str]] = {}
+        for reference_id, source_ids in references:
+            for source_id in source_ids:
+                source_to_references.setdefault(source_id, []).append(reference_id)
         for candidate in candidates.candidates:
             normalized_ids = []
             for reference_id in candidate.research_inspiration_ids:
-                replacements = source_to_findings.get(reference_id, [])
+                replacements = source_to_references.get(reference_id, [])
                 for normalized_id in replacements or [reference_id]:
                     if normalized_id not in normalized_ids:
                         normalized_ids.append(normalized_id)
@@ -978,12 +1907,13 @@ class WorkflowEngine:
                 finding_id
                 for candidate in candidates.candidates
                 for finding_id in candidate.research_inspiration_ids
-                if finding_id not in finding_ids
+                if finding_id not in known_ids
             }
         )
         self._require(
             not unknown,
-            "Story Candidates reference unknown Research Finding IDs: " + ", ".join(unknown),
+            f"Story Candidates reference unknown {reference_label} IDs: "
+            + ", ".join(unknown),
         )
 
     def _validate_candidate_set(
@@ -1230,12 +2160,7 @@ class WorkflowEngine:
         outline_context = outline.model_dump(mode="json", exclude={"scenes"})
         factual_evidence = (
             [
-                {
-                    "evidence_id": item.evidence_id,
-                    "supported_statement": item.supported_statement,
-                    "confidence": item.confidence,
-                    "limitations": item.limitations,
-                }
+                self._authoring_evidence_payload(item)
                 for item in research.evidence
             ]
             if isinstance(research, FactualResearchPack)
@@ -1253,7 +2178,10 @@ class WorkflowEngine:
             minimum_words = int(scene_target["minimum_word_count"])
             target_words = int(scene_target["target_word_count"])
             maximum_words = int(scene_target["maximum_word_count"])
-            preferred_evidence_ids = list(getattr(outline_scene, "evidence_ids", []))
+            preferred_evidence_ids = self._outline_scene_evidence_ids(
+                outline_scene,
+                research,
+            )
             available_scene_evidence = (
                 [
                     evidence
@@ -1412,11 +2340,13 @@ class WorkflowEngine:
         task_id: str = "script_draft",
         strategy_field: str = "draft_strategy",
         item_prefix: str = "word-fit",
+        protected_exact_texts_by_scene: dict[str, Sequence[str]] | None = None,
     ) -> tuple[NarrationScript, list[UsageRecord]]:
         def total_words(scenes: Sequence[Any]) -> int:
             return sum(len(scene.spoken_text.split()) for scene in scenes)
 
         working_scenes = [scene.model_copy(deep=True) for scene in script.scenes]
+        protected_by_scene = protected_exact_texts_by_scene or {}
         total = total_words(working_scenes)
         if minimum_total <= total <= maximum_total:
             return script, []
@@ -1425,12 +2355,7 @@ class WorkflowEngine:
         outline_by_id = {scene.scene_id: scene for scene in outline.scenes}
         factual_evidence = (
             {
-                evidence.evidence_id: {
-                    "evidence_id": evidence.evidence_id,
-                    "supported_statement": evidence.supported_statement,
-                    "confidence": evidence.confidence,
-                    "limitations": evidence.limitations,
-                }
+                evidence.evidence_id: self._authoring_evidence_payload(evidence)
                 for evidence in research.evidence
             }
             if isinstance(research, FactualResearchPack)
@@ -1440,11 +2365,27 @@ class WorkflowEngine:
         fitted_scene_ids: set[str] = set()
         while not minimum_total <= total <= maximum_total:
             direction = "lengthen" if total < minimum_total else "shorten"
+
+            def is_editable(scene: Any) -> bool:
+                if scene.scene_id in fitted_scene_ids:
+                    return False
+                if direction == "lengthen":
+                    return True
+                actual = len(scene.spoken_text.split())
+                protected_floor = max(
+                    1,
+                    sum(
+                        len(exact_text.split())
+                        for exact_text in protected_by_scene.get(scene.scene_id, [])
+                    ),
+                )
+                feasible_maximum = maximum_total - (total - actual)
+                return actual > protected_floor and feasible_maximum >= protected_floor
+
             candidates = [
                 scene
                 for scene in working_scenes
-                if scene.scene_id not in fitted_scene_ids
-                and (direction == "lengthen" or len(scene.spoken_text.split()) > 1)
+                if is_editable(scene)
             ]
             self._require(
                 bool(candidates),
@@ -1455,7 +2396,12 @@ class WorkflowEngine:
                 actual = len(scene.spoken_text.split())
                 target = int(targets[scene.scene_id]["target_word_count"])
                 evidence_backed = int(
-                    bool(getattr(outline_by_id[scene.scene_id], "evidence_ids", []))
+                    bool(
+                        self._outline_scene_evidence_ids(
+                            outline_by_id[scene.scene_id],
+                            research,
+                        )
+                    )
                 )
                 if direction == "lengthen":
                     return evidence_backed, target - actual, actual
@@ -1469,6 +2415,11 @@ class WorkflowEngine:
             )
             actual_words = len(selected.spoken_text.split())
             unchanged_total = total - actual_words
+            protected_exact_texts = list(protected_by_scene.get(selected.scene_id, []))
+            protected_word_floor = max(
+                1,
+                sum(len(exact_text.split()) for exact_text in protected_exact_texts),
+            )
             if direction == "lengthen":
                 minimum_words = max(actual_words + 1, minimum_total - unchanged_total)
                 maximum_words = max(minimum_words, maximum_total - unchanged_total)
@@ -1477,7 +2428,10 @@ class WorkflowEngine:
                 if feasible_maximum < 1:
                     minimum_words = maximum_words = 1
                 else:
-                    minimum_words = max(1, minimum_total - unchanged_total)
+                    minimum_words = max(
+                        protected_word_floor,
+                        minimum_total - unchanged_total,
+                    )
                     maximum_words = min(actual_words - 1, feasible_maximum)
                     self._require(
                         minimum_words <= maximum_words,
@@ -1488,11 +2442,15 @@ class WorkflowEngine:
                 maximum_words,
             )
             outline_scene = outline_by_id[selected.scene_id]
-            preferred_evidence_ids = list(getattr(outline_scene, "evidence_ids", []))
+            preferred_evidence_ids = self._outline_scene_evidence_ids(
+                outline_scene,
+                research,
+            )
             item_input = {
                 strategy_field: "single-scene-word-fit-v1",
                 "direction": direction,
                 "spoken_text": selected.spoken_text,
+                "protected_exact_texts": protected_exact_texts,
                 "adjacent_context": {
                     "previous_spoken_text": (
                         working_scenes[selected_index - 1].spoken_text
@@ -1513,6 +2471,9 @@ class WorkflowEngine:
                 ],
                 "output_language": self.config.output_language.value,
                 "content_mode": self.config.content_mode.value,
+                "content_format": getattr(
+                    self.config, "content_format", ContentFormat.NARRATIVE
+                ).value,
                 "minimum_word_count": minimum_words,
                 "target_word_count": target_words,
                 "maximum_word_count": maximum_words,
@@ -1530,6 +2491,7 @@ class WorkflowEngine:
                 *,
                 minimum: int = minimum_words,
                 maximum: int = maximum_words,
+                protected: tuple[str, ...] = tuple(protected_exact_texts),
             ) -> None:
                 NarrationScript.model_validate(
                     {
@@ -1545,6 +2507,10 @@ class WorkflowEngine:
                     }
                 )
                 actual = len(replacement.spoken_text.split())
+                self._require(
+                    all(exact_text in replacement.spoken_text for exact_text in protected),
+                    "Script word fit changed already supported exact wording",
+                )
                 if not minimum <= actual <= maximum:
                     boundary = minimum if actual < minimum else maximum
                     raise BackendError(
@@ -1582,7 +2548,8 @@ class WorkflowEngine:
                     "Return only one complete replacement spoken_text. Python selected this Scene and "
                     "computed a feasible aggregate residual range; do not return an ID, title, pause, "
                     f"word count, or explanation. Use {minimum_words}-{maximum_words} words inclusive, "
-                    f"aiming near {target_words}. {editing_instruction}"
+                    f"aiming near {target_words}. Preserve every protected_exact_text verbatim. "
+                    f"{editing_instruction}"
                 ),
             )
             working_scenes[selected_index] = selected.model_copy(
@@ -1798,8 +2765,11 @@ class WorkflowEngine:
                 else round(narration.timeline.scenes[scene_index + 1].start_seconds * fps)
             )
             frame_count = max(1, scene_end_frame - scene_start_frame)
-            minimum_count = max(1, math.ceil(frame_count / maximum_frames))
-            maximum_count = frame_count // minimum_frames
+            if frame_count < minimum_frames:
+                minimum_count = maximum_count = 1
+            else:
+                minimum_count = max(1, math.ceil(frame_count / maximum_frames))
+                maximum_count = frame_count // minimum_frames
             if minimum_count > maximum_count:
                 raise BackendError(
                     (
@@ -1880,6 +2850,39 @@ class WorkflowEngine:
                 ).value,
                 "style_id": self.config.style,
                 "timed_visuals": timed_visuals,
+                "factual_visual_gate": (
+                    (
+                        "single-factual-visual-v6-host-neutral-fallback"
+                        if self.workflow_policy_version >= 26
+                        else "single-factual-visual-v5-compact-bounded-refinement"
+                        if self.workflow_policy_version >= 25
+                        else "single-factual-visual-v4-narrow-depiction-repair"
+                        if self.workflow_policy_version >= 23
+                        else "single-factual-visual-v3"
+                        if self.workflow_policy_version >= 21
+                        else "single-factual-visual-v2"
+                        if self.workflow_policy_version >= 20
+                        else "single-factual-visual-v1"
+                    )
+                    if self.workflow_policy_version >= 19
+                    and visual_plan_input.get("factual_grounding") is not None
+                    else "disabled"
+                ),
+                "factual_review_backend": (
+                    {
+                        "backend_id": self.config.task_bindings["factual_review"],
+                        "backend_revision": self.registry.descriptor(
+                            self.config.task_bindings["factual_review"]
+                        ).revision,
+                        "prompt_version": self.prompts.get(
+                            "factual_review",
+                            language=self.config.output_language,
+                        ).version,
+                    }
+                    if self.workflow_policy_version >= 19
+                    and visual_plan_input.get("factual_grounding") is not None
+                    else None
+                ),
             }
         )
         metadata["schema_hash"] = hash_value(
@@ -1889,6 +2892,22 @@ class WorkflowEngine:
                 ),
                 "visual_content": restricted_json_schema(
                     VisualBriefContent.model_json_schema(mode="validation")
+                ),
+                "factual_visual_decision": (
+                    restricted_json_schema(
+                        FactualVisualDecision.model_json_schema(mode="validation")
+                    )
+                    if self.workflow_policy_version >= 19
+                    and visual_plan_input.get("factual_grounding") is not None
+                    else None
+                ),
+                "factual_visual_depiction": (
+                    restricted_json_schema(
+                        FactualVisualDepiction.model_json_schema(mode="validation")
+                    )
+                    if self.workflow_policy_version >= 23
+                    and visual_plan_input.get("factual_grounding") is not None
+                    else None
                 ),
                 "aggregate": restricted_json_schema(
                     output_model.model_json_schema(mode="validation")
@@ -1980,33 +2999,130 @@ class WorkflowEngine:
         )
         visual_items: list[dict[str, Any]] = []
         item_usage = list(foundation_usage)
+        factual_visual_gate = (
+            self.workflow_policy_version >= 19
+            and visual_plan_input.get("factual_grounding") is not None
+        )
         for index, target in enumerate(targets):
             scene_id = str(target["scene_id"])
             visual_id = str(target.get("shot_id") or scene_id)
             next_target = targets[index + 1] if index + 1 < len(targets) else None
-            item_input = {
-                "visual_strategy": "single-visual-v1",
-                "visual_target": target,
-                "parent_outline_scene": outline_by_id[scene_id].model_dump(mode="json"),
-                "parent_scene_spoken_text": script_by_id[scene_id].spoken_text,
-                "previous_visual": visual_items[-1] if visual_items else None,
-                "next_visual_target": next_target,
-                "style_profile": style_data,
-                "character_identities": characters,
-                "brief_constraints": {
-                    "tone": self.brief.tone,
-                    "must_include": self.brief.must_include,
-                    "avoid": self.brief.avoid,
-                    "audience": self.config.audience,
-                },
-                "content_mode": self.config.content_mode.value,
-                "content_format": self.config.content_format.value,
-                "delivery": visual_plan_input["delivery"],
+            factual_grounding = (
+                self._factual_visual_grounding_for_target(
+                    visual_plan_input.get("factual_grounding"),
+                    scene_id=scene_id,
+                    narration_excerpt=str(target["narration_excerpt"]),
+                    timed_visuals=timed_visuals,
+                    terminal_claim_fragments_only=self.workflow_policy_version >= 25,
+                )
+                if factual_visual_gate
+                else self._factual_visual_grounding_for_scene(
+                    visual_plan_input.get("factual_grounding"),
+                    scene_id,
+                )
+            )
+            claim_depiction_required = bool(
+                factual_grounding.get("supported_claims")
+            )
+            staging_context = {
+                "narration_excerpt": str(target["narration_excerpt"]),
+                "modern_anchor": self.brief.modern_anchor,
                 "rule": (
-                    "Depict only visual_target.narration_excerpt. Adjacent inputs are read-only "
-                    "continuity context and must not leak future actions into this image."
+                    "This context supplies neutral subjects and setting but is not factual "
+                    "authority. It neither authorizes nor prohibits a mechanism, cause, "
+                    "comparison, quantity, change, or result; those semantics require direct "
+                    "authorization from active supported Claims and allowed Evidence."
+                    if self.workflow_policy_version >= 25
+                    else "This context authorizes only neutral subjects and setting. It never "
+                    "authorizes a mechanism, cause, comparison, quantity, change, or result."
                 ),
             }
+            if factual_visual_gate:
+                previous_visual = visual_items[-1] if visual_items else None
+                item_input = {
+                    "visual_strategy": "single-visual-v1",
+                    "visual_target": target,
+                    "previous_visual": (
+                        {
+                            field_name: previous_visual[field_name]
+                            for field_name in (
+                                "subjects",
+                                "environment",
+                                "composition",
+                                "character_ids",
+                                "identity_requirements",
+                                "persistent_elements",
+                            )
+                            if field_name in previous_visual
+                        }
+                        if previous_visual
+                        else None
+                    ),
+                    "style_profile": style_data,
+                    "character_identities": characters,
+                    "brief_constraints": {
+                        "tone": self.brief.tone,
+                        "avoid": self.brief.avoid,
+                        "audience": self.config.audience,
+                    },
+                    "staging_context": staging_context,
+                    "visual_requirement": {
+                        "claim_depiction_required": claim_depiction_required,
+                        "active_supported_claim_count": len(
+                            factual_grounding.get("supported_claims", [])
+                        ),
+                        "numeric_claims_need_no_written_text": True,
+                    },
+                    "content_mode": self.config.content_mode.value,
+                    "content_format": self.config.content_format.value,
+                    "delivery": visual_plan_input["delivery"],
+                    "rule": (
+                        "Depict only the current target. factual_grounding is the only authority "
+                        "for factual visual semantics. "
+                        + (
+                            "Create one claim-specific literal cognitive anchor from the active "
+                            "supported Claims; do not default to another generic view of the modern "
+                            "anchor. Exact numerals need not appear as written text."
+                            if claim_depiction_required
+                            else "Create only a neutral static arrangement of staging-context "
+                            "subjects and setting because no supported Claim is active."
+                        )
+                    ),
+                }
+            else:
+                item_input = {
+                    "visual_strategy": "single-visual-v1",
+                    "visual_target": target,
+                    "parent_outline_scene": outline_by_id[scene_id].model_dump(mode="json"),
+                    "parent_scene_spoken_text": script_by_id[scene_id].spoken_text,
+                    "previous_visual": visual_items[-1] if visual_items else None,
+                    "next_visual_target": next_target,
+                    "style_profile": style_data,
+                    "character_identities": characters,
+                    "brief_constraints": {
+                        "tone": self.brief.tone,
+                        "must_include": self.brief.must_include,
+                        "avoid": self.brief.avoid,
+                        "audience": self.config.audience,
+                    },
+                    "content_mode": self.config.content_mode.value,
+                    "content_format": self.config.content_format.value,
+                    "delivery": visual_plan_input["delivery"],
+                    "rule": (
+                        "Depict only visual_target.narration_excerpt. Adjacent inputs are read-only "
+                        "continuity context and must not leak future actions into this image."
+                    ),
+                }
+            if factual_grounding:
+                item_input["factual_grounding"] = {
+                    **factual_grounding,
+                    "rule": (
+                        "Treat nonfactual_framing only as a staged illustration. Any visible "
+                        "mechanism, causal relationship, comparison, quantity, or result must be a "
+                        "literal depiction of supported_claims and allowed_evidence_records. Do not "
+                        "invent invisible interactions or explanatory steps."
+                    ),
+                }
 
             def validate_visual_content(
                 content: VisualBriefContent,
@@ -2052,12 +3168,23 @@ class WorkflowEngine:
                     "duration, Style Profile, Character definition, or surrounding visual item."
                 ),
             )
+            item_usage.extend(usage)
+            if factual_visual_gate:
+                content, gate_usage = self._audit_and_repair_factual_visual_content(
+                    visual_id=visual_id,
+                    content=content,
+                    grounding=factual_grounding,
+                    staging_context=staging_context,
+                    style_profile=style_data,
+                    character_identities=characters,
+                    invariant=validate_visual_content,
+                )
+                item_usage.extend(gate_usage)
             content_data = content.model_dump(mode="json")
             if timed_visuals:
                 visual_items.append({**content_data, **target})
             else:
                 visual_items.append({"scene_id": scene_id, **content_data})
-            item_usage.extend(usage)
 
         if timed_visuals:
             plan_data = {
@@ -2161,6 +3288,21 @@ class WorkflowEngine:
                 "configured Scene duration bounds cannot fit the Duration Budget",
                 kind=ErrorKind.INVALID_OUTPUT,
             )
+
+        current = [scene.provisional_seconds for scene in outline.scenes]
+        if (
+            abs(sum(current) - budget_seconds) <= 0.0005
+            and all(
+                lower - 0.0005 <= value <= upper + 0.0005
+                for value, lower, upper in zip(
+                    current,
+                    lower_bounds,
+                    upper_bounds,
+                    strict=True,
+                )
+            )
+        ):
+            return
 
         normalized = list(lower_bounds)
         remaining = budget_seconds - sum(normalized)
@@ -2273,10 +3415,14 @@ class WorkflowEngine:
         instruction_suffix: str = "",
         target_image_backend: str | None = None,
     ) -> tuple[Any, list[UsageRecord]]:
+        cache_input = {
+            "input_data": input_data,
+            "instruction_suffix": instruction_suffix.strip(),
+        }
         metadata = self._stage_metadata(
             stage=stage,
             task_id=task_id,
-            input_data=input_data,
+            input_data=cache_input,
             target_image_backend=target_image_backend,
         )
         metadata["schema_hash"] = hash_value(
@@ -2358,7 +3504,7 @@ class WorkflowEngine:
 
         inventory_input = {
             "script": script.model_dump(mode="json"),
-            "research_pack": research.model_dump(mode="json"),
+            "research_pack": self._authoring_research_payload(research),
             "content_format": self.config.content_format.value,
         }
         inventory, inventory_usage = self._structured_item(
@@ -2424,6 +3570,272 @@ class WorkflowEngine:
             )
         return inventory, review, [*inventory_usage, *review_usage]
 
+    @staticmethod
+    def _normalize_non_overlapping_claim_spans(
+        spoken_text: str,
+        claims: Sequence[ExtractedClaim],
+        *,
+        occupied_exact_texts: Sequence[str] = (),
+    ) -> list[ExtractedClaim]:
+        occupied: list[tuple[int, int]] = []
+        for exact_text in occupied_exact_texts:
+            start = spoken_text.find(exact_text)
+            WorkflowEngine._require(
+                start >= 0,
+                "Host Claim normalization received wording outside the Scene",
+            )
+            occupied.append((start, start + len(exact_text)))
+
+        located: list[tuple[int, int, int, ExtractedClaim]] = []
+        for index, claim in enumerate(claims):
+            start = spoken_text.find(claim.exact_text)
+            WorkflowEngine._require(
+                start >= 0,
+                "Claim does not preserve exact Scene wording",
+            )
+            located.append((start, start + len(claim.exact_text), index, claim))
+
+        normalized: list[tuple[int, int, ExtractedClaim]] = []
+        for start, end, _, claim in sorted(located):
+            overlaps_occupied = any(
+                not (end <= occupied_start or start >= occupied_end)
+                for occupied_start, occupied_end in occupied
+            )
+            WorkflowEngine._require(
+                not overlaps_occupied,
+                "Coverage Claim overlaps an existing exact Claim span",
+            )
+            exact_duplicate = any(
+                start == other_start and end == other_end
+                for other_start, other_end, _ in normalized
+            )
+            if exact_duplicate:
+                continue
+            if any(
+                not (end <= other_start or start >= other_end)
+                for other_start, other_end, _ in normalized
+            ):
+                raise BackendError(
+                    "Claim extraction returned overlapping semantic spans",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                )
+            normalized.append((start, end, claim))
+
+        ordered = sorted(normalized, key=lambda item: (item[0], item[1]))
+        return [claim for _, _, claim in ordered]
+
+    @staticmethod
+    def _programmatic_sentence_claims(spoken_text: str) -> list[ExtractedClaim]:
+        claims: list[ExtractedClaim] = []
+        start = 0
+        for boundary in re.finditer(
+            r"[.!?]+(?:[\"'”’\)\]]+)?(?=\s+|$)",
+            spoken_text,
+            flags=re.UNICODE,
+        ):
+            exact_text = spoken_text[start : boundary.end()].strip()
+            if re.search(r"\w", exact_text, flags=re.UNICODE):
+                claims.append(ExtractedClaim(exact_text=exact_text))
+            start = boundary.end()
+        remainder = spoken_text[start:].strip()
+        if re.search(r"\w", remainder, flags=re.UNICODE):
+            claims.append(ExtractedClaim(exact_text=remainder))
+        WorkflowEngine._require(
+            len(claims) <= 20,
+            "A factual Scene contains more than 20 sentence-level Claim spans",
+        )
+        return claims
+
+    @staticmethod
+    def _claim_text_allows_nonfactual_verdict(claim: ScriptClaim) -> bool:
+        return claim.exact_text.strip() in HOST_OWNED_NONFACTUAL_TRANSITIONS
+
+    @staticmethod
+    def _claim_has_ambiguous_leading_reference(claim: ScriptClaim) -> bool:
+        match = re.match(r"^[\s\"'“”‘’(\[]*([^\W\d_]+)", claim.exact_text, flags=re.UNICODE)
+        if match is None:
+            return False
+        return match.group(1).casefold() in {
+            "it",
+            "this",
+            "that",
+            "these",
+            "those",
+            "they",
+            "se",
+            "tämä",
+            "tuo",
+            "nämä",
+            "nuo",
+            "ne",
+        }
+
+    @staticmethod
+    def _validate_claim_review_decision(
+        claim: ScriptClaim,
+        decision: ClaimReviewDecision | FactualClaimReview,
+        *,
+        allowed_evidence_ids: set[str],
+        evidence_scope_message: str,
+    ) -> None:
+        WorkflowEngine._require(
+            len(re.findall(r"\w+", decision.rationale, flags=re.UNICODE)) >= 3,
+            "Factual Claim Review rationale is not meaningful enough to audit",
+        )
+        unknown = sorted(set(decision.evidence_ids) - allowed_evidence_ids)
+        WorkflowEngine._require(
+            not unknown,
+            evidence_scope_message + ": " + ", ".join(unknown),
+        )
+        if decision.verdict == "supported":
+            WorkflowEngine._require(
+                bool(decision.evidence_ids),
+                "A supported Claim requires at least one direct Evidence ID",
+            )
+        if decision.verdict == "not_a_factual_claim":
+            WorkflowEngine._require(
+                not decision.evidence_ids,
+                "A non-factual Claim classification must not cite Evidence IDs",
+            )
+
+    @staticmethod
+    def _apply_nonfactual_claim_policy(
+        claim: ScriptClaim,
+        decision: ClaimReviewDecision,
+    ) -> ClaimReviewDecision:
+        if (
+            decision.verdict != "not_a_factual_claim"
+            or WorkflowEngine._claim_text_allows_nonfactual_verdict(claim)
+        ):
+            return decision
+        rationale = (
+            "Host policy classified this extracted assertion as unsupported because exact_text "
+            "does not explicitly mark pure non-assertive framing. Reviewer rationale: "
+            + decision.rationale
+        )
+        return decision.model_copy(
+            update={
+                "verdict": "unsupported",
+                "evidence_ids": [],
+                "rationale": rationale[:4000],
+            }
+        )
+
+    @staticmethod
+    def _apply_self_contained_claim_policy(
+        claim: ScriptClaim,
+        decision: ClaimReviewDecision,
+    ) -> ClaimReviewDecision:
+        if (
+            decision.verdict != "supported"
+            or not WorkflowEngine._claim_has_ambiguous_leading_reference(claim)
+        ):
+            return decision
+        return decision.model_copy(
+            update={
+                "verdict": "needs_qualification",
+                "rationale": (
+                    f"{HOST_SELF_CONTAINED_POLICY_PREFIX} requires a self-contained factual "
+                    "sentence; the leading reference does not identify its antecedent inside "
+                    "exact_text. Reviewer rationale: "
+                    + decision.rationale
+                )[:4000],
+            }
+        )
+
+    @staticmethod
+    def _lexical_support_words(text: str) -> set[str]:
+        normalized = unicodedata.normalize("NFKC", text).casefold()
+        return {
+            token
+            for token in re.findall(r"[^\W\d_]+", normalized, flags=re.UNICODE)
+            if len(token) >= 3 and token not in HOST_LEXICAL_STOPWORDS
+        }
+
+    @staticmethod
+    def _numeric_support_tokens(text: str) -> set[str]:
+        normalized = (
+            unicodedata.normalize("NFKC", text)
+            .replace("−", "-")
+            .replace("–", "-")
+        )
+        tokens: set[str] = set()
+        for raw_token in re.findall(r"[+-]?\d+(?:[.,]\d+)?", normalized):
+            token = raw_token.removeprefix("+")
+            if "," in token:
+                whole, fraction = token.split(",", 1)
+                if len(fraction) != 3:
+                    token = f"{whole}.{fraction}"
+            tokens.add(token)
+        return tokens
+
+    @classmethod
+    def _evidence_statement_supports_claim_lexically(
+        cls,
+        claim_text: str,
+        evidence_text: str,
+    ) -> bool:
+        normalized_claim = re.sub(
+            r"\s+",
+            " ",
+            unicodedata.normalize("NFKC", claim_text).casefold(),
+        ).strip()
+        normalized_evidence = re.sub(
+            r"\s+",
+            " ",
+            unicodedata.normalize("NFKC", evidence_text).casefold(),
+        ).strip()
+        if normalized_claim == normalized_evidence:
+            return True
+
+        claim_numbers = cls._numeric_support_tokens(claim_text)
+        evidence_numbers = cls._numeric_support_tokens(evidence_text)
+        if not claim_numbers.issubset(evidence_numbers):
+            return False
+
+        claim_words = cls._lexical_support_words(claim_text)
+        if not claim_words:
+            return bool(claim_numbers)
+        overlap_count = len(claim_words & cls._lexical_support_words(evidence_text))
+        required_overlap = min(2, len(claim_words))
+        return (
+            overlap_count >= required_overlap
+            and overlap_count / len(claim_words) >= 0.35
+        )
+
+    @classmethod
+    def _apply_lexical_claim_policy(
+        cls,
+        claim: ScriptClaim,
+        decision: ClaimReviewDecision,
+        evidence_by_id: dict[str, Any],
+    ) -> ClaimReviewDecision:
+        if decision.verdict not in {"supported", "needs_qualification"}:
+            return decision
+        if decision.verdict == "needs_qualification" and not decision.evidence_ids:
+            return decision
+        if any(
+            evidence is not None
+            and cls._evidence_statement_supports_claim_lexically(
+                claim.exact_text,
+                evidence.supported_statement,
+            )
+            for evidence_id in decision.evidence_ids
+            for evidence in [evidence_by_id.get(evidence_id)]
+        ):
+            return decision
+        return decision.model_copy(
+            update={
+                "verdict": "needs_qualification",
+                "rationale": (
+                    f"{HOST_LEXICAL_POLICY_PREFIX} requires one cited Evidence statement on its "
+                    "own to carry the Claim's concrete wording and every numeric value. Reviewer "
+                    "rationale: "
+                    + decision.rationale
+                )[:4000],
+            }
+        )
+
     def _factual_audit_by_scene(
         self,
         *,
@@ -2480,23 +3892,18 @@ class WorkflowEngine:
                         + ", ".join(unknown),
                     )
                     decision = prior_decisions[claim.claim_id]
-                    unsupported_citations = sorted(
-                        set(decision.evidence_ids) - set(claim.evidence_ids)
+                    self._validate_claim_review_decision(
+                        claim,
+                        decision,
+                        allowed_evidence_ids=set(claim.evidence_ids),
+                        evidence_scope_message=(
+                            f"Prior review for {claim.claim_id} cites Evidence not linked by its Claim"
+                        ),
                     )
-                    self._require(
-                        not unsupported_citations,
-                        f"Prior review for {claim.claim_id} cites Evidence not linked by its Claim: "
-                        + ", ".join(unsupported_citations),
-                    )
-                    if decision.verdict == "supported":
-                        self._require(
-                            bool(decision.evidence_ids),
-                            f"Prior supported Claim {claim.claim_id} has no direct Evidence IDs",
-                        )
                     if decision.verdict == "not_a_factual_claim":
                         self._require(
-                            not decision.evidence_ids,
-                            f"Prior non-factual Claim {claim.claim_id} cites Evidence IDs",
+                            self._claim_text_allows_nonfactual_verdict(claim),
+                            f"Prior non-factual Claim {claim.claim_id} violates host policy",
                         )
                     prior_claims_by_scene.setdefault(claim.scene_id, []).append(claim)
 
@@ -2510,34 +3917,35 @@ class WorkflowEngine:
                 )
                 continue
 
+            if getattr(self, "workflow_policy_version", 15) >= 16:
+                scene_claims = self._programmatic_sentence_claims(scene.spoken_text)
+                claims_with_prior.extend(
+                    (
+                        ScriptClaim(
+                            claim_id=f"{scene.scene_id}-claim-{index:03d}",
+                            scene_id=scene.scene_id,
+                            exact_text=claim.exact_text,
+                            evidence_ids=[],
+                            qualification="",
+                        ),
+                        None,
+                    )
+                    for index, claim in enumerate(scene_claims, start=1)
+                )
+                continue
+
             inventory_input = {
                 "inventory_strategy": "single-scene-claim-extraction-v2",
                 "spoken_text": scene.spoken_text,
-                "research_pack": {
-                    "evidence": [item.model_dump(mode="json") for item in research.evidence]
-                },
                 "output_language": self.config.output_language.value,
                 "content_format": self.config.content_format.value,
             }
 
             def validate_extraction(extraction: SceneClaimExtraction) -> None:
-                exact_texts: set[str] = set()
-                for claim in extraction.claims:
-                    self._require(
-                        claim.exact_text in scene.spoken_text,
-                        "Extracted Claim does not preserve exact Scene wording",
-                    )
-                    self._require(
-                        claim.exact_text not in exact_texts,
-                        "Scene Claim extraction contains duplicate exact wording",
-                    )
-                    exact_texts.add(claim.exact_text)
-                    unknown = sorted(set(claim.evidence_ids) - set(evidence_by_id))
-                    self._require(
-                        not unknown,
-                        "Extracted Claim references unknown Evidence IDs: "
-                        + ", ".join(unknown),
-                    )
+                self._normalize_non_overlapping_claim_spans(
+                    scene.spoken_text,
+                    extraction.claims,
+                )
 
             extraction, extraction_usage = self._structured_item(
                 stage=stage,
@@ -2549,23 +3957,80 @@ class WorkflowEngine:
                 max_output_tokens=1200,
                 instruction_suffix=(
                     "Extract Claims only from the supplied spoken_text. Return only claims with "
-                    "exact_text, evidence_ids, and qualification. An empty claims list is valid. "
-                    "Do not return a Scene ID, Claim ID, coverage note, or narration edit."
+                    "exact_text and qualification. An empty claims list is valid. "
+                    "Each exact_text must identify one unique, atomic, independently interpretable, "
+                    "non-overlapping span and include any words needed to resolve its subject, "
+                    "negation, direction, and scope. Do not select Evidence IDs or return a Scene ID, "
+                    "Claim ID, coverage note, or narration edit."
                 ),
             )
             usage.extend(extraction_usage)
+            extracted_claims = self._normalize_non_overlapping_claim_spans(
+                scene.spoken_text,
+                extraction.claims,
+            )
+            coverage_input = {
+                "coverage_strategy": "single-scene-claim-coverage-v1",
+                "spoken_text": scene.spoken_text,
+                "existing_claims": [
+                    {
+                        "exact_text": claim.exact_text,
+                        "qualification": claim.qualification,
+                    }
+                    for claim in extracted_claims
+                ],
+                "output_language": self.config.output_language.value,
+                "content_format": self.config.content_format.value,
+            }
+
+            def validate_coverage(coverage: SceneClaimCoverage) -> None:
+                self._normalize_non_overlapping_claim_spans(
+                    scene.spoken_text,
+                    coverage.missing_claims,
+                    occupied_exact_texts=[
+                        claim.exact_text for claim in extracted_claims
+                    ],
+                )
+
+            coverage, coverage_usage = self._structured_item(
+                stage=stage,
+                item_id=f"{item_prefix}-claim-coverage-{scene.scene_id}",
+                task_id="claim_inventory",
+                input_data=coverage_input,
+                output_model=SceneClaimCoverage,
+                invariant=validate_coverage,
+                max_output_tokens=1200,
+                instruction_suffix=(
+                    "Independently check the supplied spoken_text for factual Claims omitted from "
+                    "existing_claims. Return only missing_claims with exact_text and qualification. "
+                    "Each span must be unique, atomic, and independently interpretable, including "
+                    "words needed to resolve its subject, negation, direction, and scope. Do not "
+                    "overlap or repeat an existing span, overlap another missing span, select "
+                    "Evidence IDs, or return host-owned fields."
+                ),
+            )
+            usage.extend(coverage_usage)
+            coverage_claims = self._normalize_non_overlapping_claim_spans(
+                scene.spoken_text,
+                coverage.missing_claims,
+                occupied_exact_texts=[claim.exact_text for claim in extracted_claims],
+            )
+            scene_claims = sorted(
+                [*extracted_claims, *coverage_claims],
+                key=lambda claim: scene.spoken_text.find(claim.exact_text),
+            )
             claims_with_prior.extend(
                 (
                     ScriptClaim(
                         claim_id=f"{scene.scene_id}-claim-{index:03d}",
                         scene_id=scene.scene_id,
                         exact_text=claim.exact_text,
-                        evidence_ids=claim.evidence_ids,
+                        evidence_ids=[],
                         qualification=claim.qualification,
                     ),
                     None,
                 )
-                for index, claim in enumerate(extraction.claims, start=1)
+                for index, claim in enumerate(scene_claims, start=1)
             )
 
         claims = [claim for claim, _ in claims_with_prior]
@@ -2573,48 +4038,73 @@ class WorkflowEngine:
             bool(claims),
             "Factual Script contains no externally verifiable Claims",
         )
-        inventory = ClaimInventory(
-            claims=claims,
-            coverage_notes=(
-                "Claims were extracted Scene by Scene; Python assigned stable Claim and Scene IDs."
-            ),
-        )
         claim_reviews: list[FactualClaimReview] = []
         for claim, prior_decision in claims_with_prior:
             if prior_decision is not None:
                 claim_reviews.append(prior_decision.model_copy(update={"claim_id": claim.claim_id}))
                 continue
-            allowed_evidence_ids = set(claim.evidence_ids)
+            if (
+                getattr(self, "workflow_policy_version", 16) >= 17
+                and self._claim_text_allows_nonfactual_verdict(claim)
+            ):
+                claim_reviews.append(
+                    FactualClaimReview(
+                        claim_id=claim.claim_id,
+                        verdict="not_a_factual_claim",
+                        evidence_ids=[],
+                        rationale=(
+                            "Python recognized this exact sentence as a host-owned, "
+                            "non-assertive factual-format transition."
+                        ),
+                    )
+                )
+                continue
+            if getattr(self, "workflow_policy_version", 21) >= 22:
+                exact_evidence_ids = [
+                    evidence.evidence_id
+                    for evidence in research.evidence
+                    if claim.exact_text.strip() == evidence.supported_statement.strip()
+                ]
+                if exact_evidence_ids:
+                    claim_reviews.append(
+                        FactualClaimReview(
+                            claim_id=claim.claim_id,
+                            verdict="supported",
+                            evidence_ids=exact_evidence_ids,
+                            rationale=(
+                                "Python matched exact_text to an admitted Evidence statement; "
+                                "no semantic inference or provider review was required."
+                            ),
+                        )
+                    )
+                    continue
+            allowed_evidence_ids = set(evidence_by_id)
             allowed_evidence = [
-                evidence_by_id[evidence_id].model_dump(mode="json")
-                for evidence_id in claim.evidence_ids
+                item.model_dump(mode="json") for item in research.evidence
             ]
             review_input = {
                 "review_strategy": "single-claim-v1",
-                "claim": claim.model_dump(mode="json"),
-                "scene_spoken_text": script_by_id[claim.scene_id].spoken_text,
+                "claim": {
+                    "exact_text": claim.exact_text,
+                    "qualification": claim.qualification,
+                },
                 "evidence_records": allowed_evidence,
-                "research_pack": {"evidence": allowed_evidence},
+                "host_owned_nonfactual_texts": sorted(
+                    HOST_OWNED_NONFACTUAL_TRANSITIONS
+                ),
                 "output_language": self.config.output_language.value,
+                "content_format": self.config.content_format.value,
             }
 
             def validate_decision(decision: ClaimReviewDecision) -> None:
-                unknown = sorted(set(decision.evidence_ids) - allowed_evidence_ids)
-                self._require(
-                    not unknown,
-                    "Factual Claim Review cites Evidence not linked by extraction: "
-                    + ", ".join(unknown),
+                self._validate_claim_review_decision(
+                    claim,
+                    decision,
+                    allowed_evidence_ids=allowed_evidence_ids,
+                    evidence_scope_message=(
+                        "Factual Claim Review cites an Evidence ID outside the admitted pack"
+                    ),
                 )
-                if decision.verdict == "supported":
-                    self._require(
-                        bool(decision.evidence_ids),
-                        "A supported Claim requires at least one direct Evidence ID",
-                    )
-                if decision.verdict == "not_a_factual_claim":
-                    self._require(
-                        not decision.evidence_ids,
-                        "A non-factual Claim classification must not cite Evidence IDs",
-                    )
 
             decision, decision_usage = self._structured_item(
                 stage=stage,
@@ -2625,11 +4115,26 @@ class WorkflowEngine:
                 invariant=validate_decision,
                 max_output_tokens=800,
                 instruction_suffix=(
-                    "Review exactly the one supplied Claim against only evidence_records. Return "
-                    "only verdict, evidence_ids, and rationale. Use not_a_factual_claim only for "
-                    "text with no independently asserted factual proposition."
+                    "Review exactly the one supplied Claim against every supplied evidence_record. "
+                    "Return only verdict, evidence_ids, and rationale. Cite only records that "
+                    "directly entail exact_text. One cited record must support the whole Claim on "
+                    "its own; do not combine records into a bridge claim. not_a_factual_claim is "
+                    "valid only when exact_text "
+                    "exactly equals one supplied host_owned_nonfactual_text; a question, framing "
+                    "prefix, qualification label, missing evidence, mechanism, causal statement, "
+                    "or prevalence claim does not qualify. Judge exact_text independently; do not "
+                    "supply an omitted subject, referent, negation, or assertion from outside it."
                 ),
             )
+            decision = self._apply_nonfactual_claim_policy(claim, decision)
+            if getattr(self, "workflow_policy_version", 16) >= 17:
+                decision = self._apply_self_contained_claim_policy(claim, decision)
+            if getattr(self, "workflow_policy_version", 17) >= 18:
+                decision = self._apply_lexical_claim_policy(
+                    claim,
+                    decision,
+                    evidence_by_id,
+                )
             usage.extend(decision_usage)
             claim_reviews.append(
                 FactualClaimReview(
@@ -2640,6 +4145,32 @@ class WorkflowEngine:
                 )
             )
 
+        decisions_by_id = {item.claim_id: item for item in claim_reviews}
+        claims = [
+            claim.model_copy(
+                update={"evidence_ids": decisions_by_id[claim.claim_id].evidence_ids}
+            )
+            for claim in claims
+        ]
+        inventory = ClaimInventory(
+            claims=claims,
+            coverage_notes=(
+                "Python split every changed Scene into complete sentence-level Claim spans, assigned "
+                "stable Claim and Scene IDs, and attached Evidence IDs either by an exact admitted "
+                "Evidence-statement match or by separate per-Claim review. No model selected or "
+                "copied Claim text."
+                if getattr(self, "workflow_policy_version", 21) >= 22
+                else
+                "Python split every changed Scene into complete sentence-level Claim spans, assigned "
+                "stable Claim and Scene IDs, and attached only Evidence IDs approved by the separate "
+                "per-Claim review. No model selected or copied Claim text."
+                if getattr(self, "workflow_policy_version", 15) >= 16
+                else "Claims were extracted and independently coverage-checked Scene by Scene; Python "
+                "deduplicated exact spans, rejected nested, partial, and cross-pass overlaps, assigned "
+                "stable Claim and Scene IDs, and attached only Evidence IDs approved by the separate "
+                "per-Claim review."
+            ),
+        )
         accepted_verdicts = {"supported", "not_a_factual_claim"}
         passed = all(item.verdict in accepted_verdicts for item in claim_reviews)
         review = FactualReviewReport(
@@ -2723,22 +4254,14 @@ class WorkflowEngine:
             }
 
             def validate_decision(decision: ClaimReviewDecision) -> None:
-                unknown = sorted(set(decision.evidence_ids) - evidence_ids)
-                self._require(
-                    not unknown,
-                    "Factual Claim Review references unknown Evidence IDs: "
-                    + ", ".join(unknown),
+                self._validate_claim_review_decision(
+                    claim,
+                    decision,
+                    allowed_evidence_ids=evidence_ids,
+                    evidence_scope_message=(
+                        "Factual Claim Review references an unknown Evidence ID"
+                    ),
                 )
-                if decision.verdict == "supported":
-                    self._require(
-                        bool(decision.evidence_ids),
-                        "A supported Claim requires at least one direct Evidence ID",
-                    )
-                if decision.verdict == "not_a_factual_claim":
-                    self._require(
-                        not decision.evidence_ids,
-                        "A non-factual Claim classification must not cite Evidence IDs",
-                    )
 
             decision, decision_usage = self._structured_item(
                 stage=stage,
@@ -2750,10 +4273,11 @@ class WorkflowEngine:
                 max_output_tokens=800,
                 instruction_suffix=(
                     "Review exactly the one supplied Claim. Return only verdict, evidence_ids, "
-                    "and rationale. Use not_a_factual_claim only for text with no independently "
-                    "asserted factual proposition."
+                    "and rationale. not_a_factual_claim is valid only when exact_text itself "
+                    "explicitly marks non-assertive framing; missing evidence is not sufficient."
                 ),
             )
+            decision = self._apply_nonfactual_claim_policy(claim, decision)
             usage.extend(decision_usage)
             claim_reviews.append(
                 FactualClaimReview(
@@ -2788,6 +4312,207 @@ class WorkflowEngine:
             )
         return inventory, review, usage
 
+    def _accepted_claim_texts_by_scene(
+        self,
+        inventory: ClaimInventory,
+        review: FactualReviewReport,
+    ) -> dict[str, list[str]]:
+        accepted_verdicts = {"supported", "not_a_factual_claim"}
+        decisions_by_id = {decision.claim_id: decision for decision in review.claims}
+        self._require(
+            set(decisions_by_id) == {claim.claim_id for claim in inventory.claims},
+            "Factual Review must cover every inventoried Claim before text is protected",
+        )
+        protected: dict[str, list[str]] = {}
+        for claim in inventory.claims:
+            if decisions_by_id[claim.claim_id].verdict in accepted_verdicts:
+                protected.setdefault(claim.scene_id, []).append(claim.exact_text)
+        return protected
+
+    def _neutral_factual_transition(self, scene_index: int, scene_count: int) -> str:
+        if self.config.output_language.value == "fi":
+            if scene_index == scene_count - 1:
+                return "Palaa nyt alkuun ja katso kokonaisuutta uudelleen."
+            if scene_index == 0:
+                return "Keskity nyt seuraavaan konkreettiseen kohtaan."
+            return "Siirry nyt seuraavaan konkreettiseen kohtaan."
+        if scene_index == scene_count - 1:
+            return "Now return to the opening and reconsider the whole picture."
+        if scene_index == 0:
+            return "Focus now on the next concrete point."
+        return "Move now to the next concrete point."
+
+    def _factual_role_transition(self, outline_scene: Any | None) -> str:
+        if outline_scene is None:
+            return ""
+        arc_role = str(getattr(outline_scene, "arc_role", ""))
+        return HOST_OWNED_FACTUAL_ROLE_TRANSITIONS.get(
+            self.config.output_language.value,
+            {},
+        ).get(arc_role, "")
+
+    @staticmethod
+    def _remove_exact_sentence_spans(spoken_text: str, exact_texts: Sequence[str]) -> str:
+        spans: list[tuple[int, int]] = []
+        search_start = 0
+        for exact_text in exact_texts:
+            start = spoken_text.find(exact_text, search_start)
+            WorkflowEngine._require(
+                start >= 0,
+                "Factual repair received failed wording outside the Scene",
+            )
+            spans.append((start, start + len(exact_text)))
+            search_start = start + len(exact_text)
+        remaining = spoken_text
+        for start, end in sorted(spans, reverse=True):
+            remaining = remaining[:start] + remaining[end:]
+        return re.sub(r"\s+", " ", remaining).strip()
+
+    @staticmethod
+    def _replace_exact_sentence_span(
+        spoken_text: str,
+        exact_text: str,
+        replacement: str,
+    ) -> str:
+        start = spoken_text.find(exact_text)
+        WorkflowEngine._require(
+            start >= 0,
+            "Factual repair received failed wording outside the Scene",
+        )
+        prefix = spoken_text[:start]
+        suffix = spoken_text[start + len(exact_text) :]
+        inserted = replacement.strip()
+        if inserted and inserted in f"{prefix} {suffix}":
+            inserted = ""
+        return " ".join(
+            part
+            for part in (prefix.rstrip(), inserted, suffix.lstrip())
+            if part
+        ).strip()
+
+    @staticmethod
+    def _is_host_owned_qualification(decision: FactualClaimReview) -> bool:
+        return decision.verdict == "needs_qualification" and decision.rationale.startswith(
+            (HOST_LEXICAL_POLICY_PREFIX, HOST_SELF_CONTAINED_POLICY_PREFIX)
+        )
+
+    @staticmethod
+    def _canonical_evidence_statements_by_scene(
+        outline: OutlineLike,
+        research: FactualResearchPack,
+        *,
+        excluded_evidence_ids: set[str] | None = None,
+    ) -> dict[str, list[str]]:
+        evidence_by_id = {item.evidence_id: item for item in research.evidence}
+        excluded = set(excluded_evidence_ids or set())
+        statements: dict[str, list[str]] = {}
+        assigned_evidence_ids: set[str] = set()
+        for outline_scene in outline.scenes:
+            scene_evidence_ids = [
+                evidence_id
+                for evidence_id in WorkflowEngine._outline_scene_evidence_ids(
+                    outline_scene,
+                    research,
+                )
+                if evidence_id in evidence_by_id
+                and evidence_id not in excluded
+                and evidence_id not in assigned_evidence_ids
+                and evidence_by_id[evidence_id].confidence == "high"
+            ]
+            assigned_evidence_ids.update(scene_evidence_ids)
+            scene_statements = [
+                evidence_by_id[evidence_id].supported_statement
+                for evidence_id in scene_evidence_ids
+            ]
+            if scene_statements:
+                statements[outline_scene.scene_id] = list(dict.fromkeys(scene_statements))
+
+        evidence_scenes = [
+            scene
+            for scene in outline.scenes
+            if str(getattr(scene, "arc_role", "")) in {"correction", "evidence"}
+        ]
+        if evidence_scenes:
+            unused_evidence = [
+                evidence
+                for evidence in research.evidence
+                if evidence.confidence == "high"
+                and evidence.evidence_id not in excluded
+                and evidence.evidence_id not in assigned_evidence_ids
+            ]
+            for index, evidence in enumerate(unused_evidence):
+                scene_id = evidence_scenes[index % len(evidence_scenes)].scene_id
+                scene_statements = statements.setdefault(scene_id, [])
+                if evidence.supported_statement not in scene_statements:
+                    scene_statements.append(evidence.supported_statement)
+        return statements
+
+    def _add_neutral_factual_transitions_to_word_floor(
+        self,
+        *,
+        script: NarrationScript,
+        preferred_scene_ids: set[str],
+        minimum_total: int,
+        maximum_total: int,
+        canonical_evidence_by_scene: dict[str, Sequence[str]] | None = None,
+    ) -> NarrationScript:
+        working_scenes = [scene.model_copy(deep=True) for scene in script.scenes]
+        total = sum(len(scene.spoken_text.split()) for scene in working_scenes)
+        if total >= minimum_total:
+            return script
+        if getattr(self, "workflow_policy_version", 16) >= 17:
+            evidence_by_scene = canonical_evidence_by_scene or {}
+            for scene in working_scenes:
+                for statement in evidence_by_scene.get(scene.scene_id, ()):
+                    if statement in scene.spoken_text:
+                        continue
+                    replacement = f"{scene.spoken_text.rstrip()} {statement}".strip()
+                    next_total = total - len(scene.spoken_text.split()) + len(
+                        replacement.split()
+                    )
+                    if next_total > maximum_total:
+                        continue
+                    scene.spoken_text = replacement
+                    total = next_total
+                    if total >= minimum_total:
+                        return NarrationScript(title=script.title, scenes=working_scenes)
+        final_index = len(working_scenes) - 1
+        if getattr(self, "workflow_policy_version", 14) >= 15:
+            preferred_indices = [
+                index
+                for index, scene in enumerate(working_scenes)
+                if scene.scene_id in preferred_scene_ids
+            ]
+            candidate_indices = [
+                *preferred_indices,
+                *(
+                    index
+                    for index in range(len(working_scenes))
+                    if index not in preferred_indices
+                ),
+            ]
+        else:
+            candidate_indices = (
+                [final_index]
+                if working_scenes[final_index].scene_id in preferred_scene_ids
+                else []
+            )
+        for index in candidate_indices:
+            transition = self._neutral_factual_transition(index, len(working_scenes))
+            scene = working_scenes[index]
+            if transition in scene.spoken_text:
+                continue
+            replacement = f"{scene.spoken_text.rstrip()} {transition}"
+            replacement_words = len(replacement.split())
+            next_total = total - len(scene.spoken_text.split()) + replacement_words
+            if next_total > maximum_total:
+                continue
+            scene.spoken_text = replacement
+            total = next_total
+            if total >= minimum_total:
+                break
+        return NarrationScript(title=script.title, scenes=working_scenes)
+
     def _repair_factual_script_once(
         self,
         *,
@@ -2797,9 +4522,25 @@ class WorkflowEngine:
         research: FactualResearchPack,
         inventory: ClaimInventory,
         review: FactualReviewReport,
+        outline: OutlineLike | None = None,
     ) -> tuple[NarrationScript, list[UsageRecord]]:
         accepted_verdicts = {"supported", "not_a_factual_claim"}
         claims_by_id = {claim.claim_id: claim for claim in inventory.claims}
+        decisions_by_id = {decision.claim_id: decision for decision in review.claims}
+        evidence_by_id = {evidence.evidence_id: evidence for evidence in research.evidence}
+        protected_by_scene = self._accepted_claim_texts_by_scene(inventory, review)
+        protected_evidence_ids_by_scene: dict[str, list[str]] = {}
+        for claim in inventory.claims:
+            decision = decisions_by_id[claim.claim_id]
+            if decision.verdict != "supported":
+                continue
+            scene_evidence_ids = protected_evidence_ids_by_scene.setdefault(
+                claim.scene_id,
+                [],
+            )
+            for evidence_id in decision.evidence_ids:
+                if evidence_id not in scene_evidence_ids:
+                    scene_evidence_ids.append(evidence_id)
         failures_by_scene: dict[str, list[tuple[Any, FactualClaimReview]]] = {}
         for decision in review.claims:
             if decision.verdict in accepted_verdicts:
@@ -2815,17 +4556,147 @@ class WorkflowEngine:
             bool(failures_by_scene),
             "Factual repair requires at least one failed Claim",
         )
+        outline_by_id = (
+            {outline_scene.scene_id: outline_scene for outline_scene in outline.scenes}
+            if outline is not None
+            else {}
+        )
         working_scenes = [scene.model_copy(deep=True) for scene in script.scenes]
         usage: list[UsageRecord] = []
-        for scene in working_scenes:
+        for scene_index, scene in enumerate(working_scenes):
             failures = failures_by_scene.get(scene.scene_id)
             if not failures:
                 continue
+            protected_exact_texts = list(protected_by_scene.get(scene.scene_id, []))
+            host_failures = [
+                (claim, decision)
+                for claim, decision in failures
+                if self._is_host_owned_qualification(decision)
+            ]
+            if host_failures:
+                remaining_failures = [
+                    (claim, decision)
+                    for claim, decision in failures
+                    if not self._is_host_owned_qualification(decision)
+                ]
+                role_transition = self._factual_role_transition(
+                    outline_by_id.get(scene.scene_id)
+                )
+                remaining_text = self._remove_exact_sentence_spans(
+                    scene.spoken_text,
+                    [claim.exact_text for claim, _ in host_failures],
+                )
+                if (
+                    not remaining_failures
+                    and not protected_exact_texts
+                    and not remaining_text
+                    and role_transition
+                ):
+                    scene.spoken_text = role_transition
+                    continue
+
+                for claim, decision in host_failures:
+                    candidate_ids = list(
+                        dict.fromkeys([*decision.evidence_ids, *claim.evidence_ids])
+                    )
+                    candidates = [
+                        evidence_by_id[evidence_id]
+                        for evidence_id in candidate_ids
+                        if evidence_id in evidence_by_id
+                    ]
+                    self._require(
+                        bool(candidates),
+                        "Host factual qualification requires cited canonical Evidence",
+                    )
+                    selected_evidence = min(
+                        candidates,
+                        key=lambda evidence: (
+                            evidence.time_sensitive,
+                            evidence.confidence != "high",
+                            len(evidence.supported_statement.split()),
+                            evidence.evidence_id,
+                        ),
+                    )
+                    scene.spoken_text = self._replace_exact_sentence_span(
+                        scene.spoken_text,
+                        claim.exact_text,
+                        selected_evidence.supported_statement,
+                    )
+                    if (
+                        selected_evidence.supported_statement in scene.spoken_text
+                        and selected_evidence.supported_statement not in protected_exact_texts
+                    ):
+                        protected_exact_texts.append(
+                            selected_evidence.supported_statement
+                        )
+                failures = remaining_failures
+                if not failures:
+                    if not scene.spoken_text:
+                        scene.spoken_text = role_transition or self._neutral_factual_transition(
+                            scene_index,
+                            len(working_scenes),
+                        )
+                    continue
+
             allowed_evidence_ids = {
                 evidence_id
                 for claim, decision in failures
                 for evidence_id in [*claim.evidence_ids, *decision.evidence_ids]
             }
+            failed_exact_texts = [claim.exact_text for claim, _ in failures]
+            if (
+                not allowed_evidence_ids
+                and all(decision.verdict == "unsupported" for _, decision in failures)
+            ):
+                if getattr(self, "workflow_policy_version", 14) >= 15:
+                    if getattr(self, "workflow_policy_version", 16) >= 17:
+                        remaining = self._remove_exact_sentence_spans(
+                            scene.spoken_text,
+                            failed_exact_texts,
+                        )
+                        if remaining:
+                            scene.spoken_text = remaining
+                            continue
+                        role_transition = self._factual_role_transition(
+                            outline_by_id.get(scene.scene_id)
+                        )
+                        if role_transition:
+                            scene.spoken_text = role_transition
+                            continue
+                    protected_evidence = [
+                        evidence_by_id[evidence_id]
+                        for evidence_id in protected_evidence_ids_by_scene.get(
+                            scene.scene_id,
+                            [],
+                        )
+                        if evidence_id in evidence_by_id
+                    ]
+                    if protected_evidence:
+                        selected_evidence = min(
+                            protected_evidence,
+                            key=lambda evidence: (
+                                evidence.time_sensitive,
+                                evidence.confidence != "high",
+                                len(evidence.supported_statement.split()),
+                                evidence.evidence_id,
+                            ),
+                        )
+                        scene.spoken_text = selected_evidence.supported_statement
+                    else:
+                        scene.spoken_text = self._neutral_factual_transition(
+                            scene_index,
+                            len(working_scenes),
+                        )
+                    continue
+                remaining = scene.spoken_text
+                for exact_text in failed_exact_texts:
+                    remaining = remaining.replace(exact_text, "")
+                if not re.sub(r"[\W_]+", "", remaining, flags=re.UNICODE):
+                    scene.spoken_text = self._neutral_factual_transition(
+                        scene_index,
+                        len(working_scenes),
+                    )
+                    continue
             item_input = {
                 "repair_strategy": "factual-claim-repair-v1",
                 "spoken_text": scene.spoken_text,
@@ -2839,6 +4710,7 @@ class WorkflowEngine:
                     }
                     for claim, decision in failures
                 ],
+                "protected_exact_texts": protected_exact_texts,
                 "allowed_factual_evidence": [
                     evidence.model_dump(mode="json")
                     for evidence in research.evidence
@@ -2862,6 +4734,24 @@ class WorkflowEngine:
                         ],
                     }
                 )
+                missing_protected = [
+                    exact_text
+                    for exact_text in protected_exact_texts
+                    if exact_text not in replacement.spoken_text
+                ]
+                self._require(
+                    not missing_protected,
+                    "Factual repair changed already supported exact wording",
+                )
+                unchanged_failures = [
+                    exact_text
+                    for exact_text in failed_exact_texts
+                    if exact_text in replacement.spoken_text
+                ]
+                self._require(
+                    not unchanged_failures,
+                    "Factual repair left failed exact wording unchanged",
+                )
 
             replacement, repair_usage = self._structured_item(
                 stage=stage,
@@ -2876,6 +4766,9 @@ class WorkflowEngine:
                     "supported by allowed_factual_evidence. Remove or narrow unsupported wording; "
                     "do not invent a bridge claim. When no evidence is supplied, remove the factual "
                     "assertion. Preserve the Scene's intent and output language. "
+                    "Preserve every protected_exact_text character-for-character and edit only the "
+                    "failed exact wording. Do not combine separate evidence statements into a new "
+                    "causal claim. "
                     "Keep the correction concise and naturally close to the original pacing; Python "
                     "will reconcile the completed Script's aggregate length. Return only the single "
                     "spoken_text field and no host-owned field."
@@ -2895,7 +4788,7 @@ class WorkflowEngine:
     ) -> FactualRevisedScript:
         aggregate_input = {
             "revision": revision_input,
-            "research_pack": research.model_dump(mode="json"),
+            "research_pack": self._authoring_research_payload(research),
         }
         revision_metadata = self._stage_metadata(
             stage="script-revision",
@@ -2985,12 +4878,23 @@ class WorkflowEngine:
         )
         task_ids = ["script_revision"]
         if isinstance(research, FactualResearchPack):
-            task_ids.extend(["claim_inventory", "factual_review"])
+            task_ids.append("factual_review")
+            if self.workflow_policy_version < 16:
+                task_ids.append("claim_inventory")
         metadata["config_hash"] = hash_value(
             {
-                "strategy": "single-scene-replacement-v1",
+                "strategy": "single-scene-semantic-replacement-v3-protected-host-fit",
+                "finding_resolution_strategy": "single-finding-resolution-v1",
                 "factual_repair_strategy": (
-                    "factual-claim-repair-v2-partial-scene-reaudit"
+                    "host-lexical-canonical-sentence-repair-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 18
+                    else
+                    "host-sentence-local-role-transition-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 17
+                    else
+                    "factual-claim-repair-v3-protected-partial-scene-reaudit"
                     if isinstance(research, FactualResearchPack)
                     and self.workflow_policy_version >= 13
                     else "factual-claim-repair-v1"
@@ -2998,15 +4902,59 @@ class WorkflowEngine:
                     else None
                 ),
                 "factual_aggregate_fit_strategy": (
-                    "single-scene-word-fit-v1"
+                    "host-unused-high-confidence-evidence-and-role-transitions-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 18
+                    else
+                    "host-high-confidence-evidence-and-role-transitions-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 17
+                    else
+                    "host-canonical-evidence-and-neutral-transitions-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 15
+                    else "single-scene-word-fit-v2-protected"
                     if isinstance(research, FactualResearchPack)
                     and self.workflow_policy_version >= 11
                     else None
                 ),
                 "claim_inventory_strategy": (
-                    "single-scene-claim-extraction-v2"
+                    "host-sentence-spans-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 16
+                    else "single-scene-claim-extraction-v2"
                     if isinstance(research, FactualResearchPack)
                     and self.workflow_policy_version >= 13
+                    else None
+                ),
+                "claim_coverage_strategy": (
+                    "host-complete-sentence-coverage-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 16
+                    else "single-scene-claim-coverage-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 13
+                    else None
+                ),
+                "claim_span_strategy": (
+                    "host-sentence-boundaries-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 16
+                    else "host-nested-dedup-overlap-reject-v2"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 13
+                    else None
+                ),
+                "claim_evidence_strategy": (
+                    "host-exact-evidence-or-per-claim-semantic-plus-host-lexical-v2"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 22
+                    else "per-claim-semantic-plus-host-lexical-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 18
+                    else "per-claim-all-admitted-evidence-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 14
                     else None
                 ),
                 "tasks": {
@@ -3026,7 +4974,10 @@ class WorkflowEngine:
         schema_payload: dict[str, Any] = {
             "scene_replacement": restricted_json_schema(
                 ReplacementText.model_json_schema(mode="validation")
-            )
+            ),
+            "finding_resolution": restricted_json_schema(
+                FindingResolution.model_json_schema(mode="validation")
+            ),
         }
         if isinstance(research, FactualResearchPack):
             schema_payload.update(
@@ -3034,18 +4985,26 @@ class WorkflowEngine:
                     "factual_scene_repair": restricted_json_schema(
                         ReplacementText.model_json_schema(mode="validation")
                     ),
-                    "claim_inventory": (
-                        restricted_json_schema(
-                            SceneClaimExtraction.model_json_schema(mode="validation")
-                        )
-                        if self.workflow_policy_version >= 13
-                        else self.prompts.schema("claim_inventory")
-                    ),
                     "claim_review_decision": restricted_json_schema(
                         ClaimReviewDecision.model_json_schema(mode="validation")
                     ),
                 }
             )
+            if self.workflow_policy_version < 16:
+                schema_payload.update(
+                    {
+                        "claim_inventory": (
+                            restricted_json_schema(
+                                SceneClaimExtraction.model_json_schema(mode="validation")
+                            )
+                            if self.workflow_policy_version >= 13
+                            else self.prompts.schema("claim_inventory")
+                        ),
+                        "claim_coverage": restricted_json_schema(
+                            SceneClaimCoverage.model_json_schema(mode="validation")
+                        ),
+                    }
+                )
         metadata["schema_hash"] = hash_value(schema_payload)
         artifact_model: type[RevisedScript | FactualRevisedScript] = (
             FactualRevisedScript
@@ -3066,6 +5025,12 @@ class WorkflowEngine:
         attempt = self.store.next_attempt("script-revision")
         self.store.begin_stage("script-revision", attempt=attempt, **metadata)
         findings_by_scene: dict[str, list[Any]] = {}
+        finding_review_tasks: dict[str, str] = {}
+        review_task_by_type = {
+            "story": "review_story",
+            "spoken": "review_spoken",
+            "constraints": "review_constraints",
+        }
         for review in reviews:
             for finding in review.findings:
                 if finding.scene_id is None:
@@ -3074,26 +5039,24 @@ class WorkflowEngine:
                         kind=ErrorKind.INVALID_OUTPUT,
                     )
                 findings_by_scene.setdefault(finding.scene_id, []).append(finding)
+                finding_review_tasks[finding.finding_id] = review_task_by_type[
+                    review.review_type
+                ]
 
         minimum_total = int(revision_input["minimum_total_word_count"])
+        target_total = int(revision_input["target_total_word_count"])
         maximum_total = int(revision_input["maximum_total_word_count"])
         outline_by_id = {scene.scene_id: scene for scene in outline.scenes}
         working_scenes = [scene.model_copy(deep=True) for scene in draft.scenes]
-        dispositions: list[RevisionDisposition] = []
         item_usage: list[UsageRecord] = []
         for index, scene in enumerate(working_scenes):
             findings = findings_by_scene.get(scene.scene_id, [])
             if not findings:
                 continue
-            current_total = sum(len(item.spoken_text.split()) for item in working_scenes)
-            original_count = len(scene.spoken_text.split())
-            unchanged_total = current_total - original_count
-            minimum_words = max(1, minimum_total - unchanged_total)
-            maximum_words = max(minimum_words, maximum_total - unchanged_total)
-            maximum_words = min(maximum_words, max(minimum_words, original_count + 8))
-            target_words = min(max(original_count, minimum_words), maximum_words)
             outline_scene = outline_by_id[scene.scene_id]
-            scene_evidence_ids = set(getattr(outline_scene, "evidence_ids", []))
+            scene_evidence_ids = set(
+                self._outline_scene_evidence_ids(outline_scene, research)
+            )
             allowed_evidence = []
             if isinstance(research, FactualResearchPack):
                 allowed_evidence = [
@@ -3132,18 +5095,9 @@ class WorkflowEngine:
                 "output_language": self.config.output_language.value,
                 "content_mode": self.config.content_mode.value,
                 "content_format": self.config.content_format.value,
-                "minimum_word_count": minimum_words,
-                "target_word_count": target_words,
-                "maximum_word_count": maximum_words,
-                "count_method": "len(spoken_text.split())",
             }
 
-            def validate_replacement(
-                replacement: ReplacementText,
-                *,
-                minimum: int = minimum_words,
-                maximum: int = maximum_words,
-            ) -> None:
+            def validate_replacement(replacement: ReplacementText) -> None:
                 NarrationScript.model_validate(
                     {
                         "schema_version": 1,
@@ -3157,26 +5111,7 @@ class WorkflowEngine:
                         ],
                     }
                 )
-                actual = len(replacement.spoken_text.split())
-                if not minimum <= actual <= maximum:
-                    target = minimum if actual < minimum else maximum
-                    raise BackendError(
-                        (
-                            f"Scene replacement has {actual} words; required inclusive range "
-                            f"is {minimum}-{maximum}"
-                        ),
-                        kind=ErrorKind.INVALID_OUTPUT,
-                        details={
-                            "actual_word_count": actual,
-                            "minimum_word_count": minimum,
-                            "maximum_word_count": maximum,
-                            "target_word_count": target,
-                            "word_delta": target - actual,
-                            "count_method": "len(spoken_text.split())",
-                        },
-                    )
 
-            original_text = scene.spoken_text
             replacement, usage = self._structured_item(
                 stage="script-revision",
                 item_id=f"replacement-{scene.scene_id}",
@@ -3187,30 +5122,112 @@ class WorkflowEngine:
                 max_output_tokens=1200,
                 instruction_suffix=(
                     "Return exactly one complete replacement spoken_text for this Scene. "
-                    f"It must contain {minimum_words}-{maximum_words} whitespace-separated "
-                    "words inclusive. Do not return any host-owned field."
+                    "Apply only the supplied Findings and keep the edit naturally close to the "
+                    "original pacing. Python validates the complete Script's aggregate length. "
+                    "Do not return any host-owned field."
                 ),
             )
             scene.spoken_text = replacement.spoken_text
             item_usage.extend(usage)
-            changed = replacement.spoken_text.strip() != original_text.strip()
-            dispositions.extend(
-                RevisionDisposition(
-                    finding_id=finding.finding_id,
-                    disposition="applied" if changed else "rejected",
-                    explanation=(
-                        "Applied through a bounded Scene text replacement."
-                        if changed
-                        else "The bounded replacement returned no textual change."
-                    ),
-                )
-                for finding in findings
-            )
 
-        revision = RevisedScript(
-            script=NarrationScript(title=draft.title, scenes=working_scenes),
-            dispositions=dispositions,
-        )
+        revised_script = NarrationScript(title=draft.title, scenes=working_scenes)
+        if self.workflow_policy_version >= 11:
+            revised_script, fit_usage = self._fit_scene_local_script_word_range(
+                script=revised_script,
+                outline=outline,
+                research=research,
+                scene_word_targets=revision_input["scene_word_targets"],
+                minimum_total=minimum_total,
+                target_total=target_total,
+                maximum_total=maximum_total,
+                stage="script-revision",
+                task_id="script_revision",
+                strategy_field="revision_strategy",
+                item_prefix="editorial-aggregate-word-fit",
+            )
+            item_usage.extend(fit_usage)
+
+        draft_by_id = {scene.scene_id: scene for scene in draft.scenes}
+        revised_by_id = {scene.scene_id: scene for scene in revised_script.scenes}
+        revised_index_by_id = {
+            scene.scene_id: index for index, scene in enumerate(revised_script.scenes)
+        }
+        dispositions: list[RevisionDisposition] = []
+        finding_index = 0
+        for review_report in reviews:
+            for finding in review_report.findings:
+                finding_index += 1
+                scene_id = str(finding.scene_id)
+                original_text = draft_by_id[scene_id].spoken_text
+                revised_text = revised_by_id[scene_id].spoken_text
+                changed = original_text.strip() != revised_text.strip()
+                if changed:
+                    scene_index = revised_index_by_id[scene_id]
+                    outline_scene = outline_by_id[scene_id]
+                    scene_evidence_ids = set(
+                        self._outline_scene_evidence_ids(outline_scene, research)
+                    )
+                    allowed_evidence = (
+                        [
+                            evidence.model_dump(mode="json")
+                            for evidence in research.evidence
+                            if evidence.evidence_id in scene_evidence_ids
+                        ]
+                        if isinstance(research, FactualResearchPack)
+                        else []
+                    )
+                    resolution_input = {
+                        "review_strategy": "single-finding-resolution-v1",
+                        "finding": {
+                            "severity": finding.severity,
+                            "evidence": finding.evidence,
+                            "recommendation": finding.recommendation,
+                        },
+                        "original_spoken_text": original_text,
+                        "revised_spoken_text": revised_text,
+                        "adjacent_context": {
+                            "previous_spoken_text": (
+                                revised_script.scenes[scene_index - 1].spoken_text
+                                if scene_index > 0
+                                else ""
+                            ),
+                            "next_spoken_text": (
+                                revised_script.scenes[scene_index + 1].spoken_text
+                                if scene_index + 1 < len(revised_script.scenes)
+                                else ""
+                            ),
+                        },
+                        "allowed_factual_evidence": allowed_evidence,
+                        "output_language": self.config.output_language.value,
+                    }
+                    resolution, resolution_usage = self._structured_item(
+                        stage="script-revision",
+                        item_id=f"finding-resolution-{finding_index:03d}",
+                        task_id=finding_review_tasks[finding.finding_id],
+                        input_data=resolution_input,
+                        output_model=FindingResolution,
+                        max_output_tokens=400,
+                        instruction_suffix=(
+                            "Judge only whether the revised spoken_text resolves the supplied "
+                            "Finding. Return only resolved and explanation; do not edit text or "
+                            "return a Finding ID or Review Report."
+                        ),
+                    )
+                    item_usage.extend(resolution_usage)
+                else:
+                    resolution = FindingResolution(
+                        resolved=False,
+                        explanation="The Scene text did not change.",
+                    )
+                dispositions.append(
+                    RevisionDisposition(
+                        finding_id=finding.finding_id,
+                        disposition="applied" if resolution.resolved else "rejected",
+                        explanation=resolution.explanation,
+                    )
+                )
+
+        revision = RevisedScript(script=revised_script, dispositions=dispositions)
         invariant(revision)
         if isinstance(research, FactualResearchPack):
             inventory, review, audit_usage = self._factual_audit(
@@ -3223,6 +5240,14 @@ class WorkflowEngine:
             item_usage.extend(audit_usage)
             if not review.passed:
                 audited_script = revision.script
+                protected_by_scene = self._accepted_claim_texts_by_scene(inventory, review)
+                decisions_by_id = {decision.claim_id: decision for decision in review.claims}
+                failed_scene_ids = {
+                    claim.scene_id
+                    for claim in inventory.claims
+                    if decisions_by_id[claim.claim_id].verdict
+                    not in {"supported", "not_a_factual_claim"}
+                }
                 repaired_script, repair_usage = self._repair_factual_script_once(
                     stage="script-revision",
                     item_prefix="factual-repair",
@@ -3230,22 +5255,56 @@ class WorkflowEngine:
                     research=research,
                     inventory=inventory,
                     review=review,
+                    outline=outline,
                 )
                 if self.workflow_policy_version >= 11:
-                    repaired_script, fit_usage = self._fit_scene_local_script_word_range(
+                    repaired_script = self._add_neutral_factual_transitions_to_word_floor(
                         script=repaired_script,
-                        outline=outline,
-                        research=research,
-                        scene_word_targets=revision_input["scene_word_targets"],
-                        minimum_total=int(revision_input["minimum_total_word_count"]),
-                        target_total=int(revision_input["target_total_word_count"]),
-                        maximum_total=int(revision_input["maximum_total_word_count"]),
-                        stage="script-revision",
-                        task_id="script_revision",
-                        strategy_field="revision_strategy",
-                        item_prefix="factual-aggregate-word-fit",
+                        preferred_scene_ids=failed_scene_ids,
+                        minimum_total=minimum_total,
+                        maximum_total=maximum_total,
+                        canonical_evidence_by_scene=(
+                            self._canonical_evidence_statements_by_scene(
+                                outline,
+                                research,
+                                excluded_evidence_ids={
+                                    evidence_id
+                                    for decision in review.claims
+                                    for evidence_id in decision.evidence_ids
+                                },
+                            )
+                            if self.workflow_policy_version >= 17
+                            else None
+                        ),
                     )
-                    repair_usage.extend(fit_usage)
+                    if self.workflow_policy_version >= 15:
+                        repaired_word_count = sum(
+                            len(scene.spoken_text.split())
+                            for scene in repaired_script.scenes
+                        )
+                        self._require(
+                            minimum_total <= repaired_word_count <= maximum_total,
+                            (
+                                "Host factual repair could not meet the aggregate word range "
+                                "using only canonical Evidence statements and neutral transitions"
+                            ),
+                        )
+                    else:
+                        repaired_script, fit_usage = self._fit_scene_local_script_word_range(
+                            script=repaired_script,
+                            outline=outline,
+                            research=research,
+                            scene_word_targets=revision_input["scene_word_targets"],
+                            minimum_total=int(revision_input["minimum_total_word_count"]),
+                            target_total=int(revision_input["target_total_word_count"]),
+                            maximum_total=int(revision_input["maximum_total_word_count"]),
+                            stage="script-revision",
+                            task_id="script_revision",
+                            strategy_field="revision_strategy",
+                            item_prefix="factual-aggregate-word-fit",
+                            protected_exact_texts_by_scene=protected_by_scene,
+                        )
+                        repair_usage.extend(fit_usage)
                 revision = RevisedScript(
                     script=repaired_script,
                     dispositions=revision.dispositions,
@@ -3310,10 +5369,40 @@ class WorkflowEngine:
             "content_format": self.config.content_format.value,
         }
         metadata = self._stage_metadata(stage="research", task_id="research", input_data=input_seed)
+        if self.config.content_mode is ContentMode.FACTUAL:
+            review_backend_id = self.config.task_bindings["factual_review"]
+            review_descriptor = self.registry.descriptor(review_backend_id)
+            review_prompt = self.prompts.get(
+                "factual_review",
+                language=self.config.output_language,
+            )
+            metadata["config_hash"] = hash_value(
+                {
+                    "research_config_hash": metadata["config_hash"],
+                    "evidence_grounding_backend_id": review_backend_id,
+                    "evidence_grounding_backend_revision": review_descriptor.revision,
+                }
+            )
+            metadata["prompt_version"] = (
+                f"{metadata['prompt_version']}+{review_prompt.version}"
+            )
+            metadata["schema_hash"] = hash_value(
+                {
+                    "research_schema_hash": metadata["schema_hash"],
+                    "evidence_grounding_schema": restricted_json_schema(
+                        EvidenceGroundingDecision.model_json_schema(mode="validation")
+                    ),
+                }
+            )
         pack_model: type[ResearchPack | FactualResearchPack] = (
             FactualResearchPack
             if self.config.content_mode is ContentMode.FACTUAL
             else ResearchPack
+        )
+        synthesis_model: type[ResearchSynthesis | FactualResearchSynthesis] = (
+            FactualResearchSynthesis
+            if self.config.content_mode is ContentMode.FACTUAL
+            else ResearchSynthesis
         )
         reusable = self.store.reusable_record("research", **metadata)
         if reusable:
@@ -3399,6 +5488,10 @@ class WorkflowEngine:
             pack = ResearchPack(queries=queries)
             promoted = self.store.promote_stage(workspace, pack, usage=usage, warnings=warnings)
             return ResearchPack.model_validate(promoted)
+        if self.config.content_mode is ContentMode.FACTUAL:
+            sources, admission_usage, admission_warnings = self._admit_factual_sources(sources)
+            usage.extend(admission_usage)
+            warnings.extend(admission_warnings)
         task_input = {
             **input_seed,
             "sources": [source.model_dump(mode="json") for source in sources],
@@ -3406,27 +5499,211 @@ class WorkflowEngine:
         execution = self.executor.structured(
             "research",
             task_input,
-            pack_model,
+            synthesis_model,
             invariant=lambda value: self._validate_research_source_references(value, sources),
         )
-        model_pack = pack_model.model_validate(execution.artifact)
-        pack_data = model_pack.model_dump(mode="json")
+        synthesis = synthesis_model.model_validate(execution.artifact)
+        usage.extend(_usage_list([execution.result.usage]))
+        pack_data = synthesis.model_dump(mode="json")
         pack_data["queries"] = queries
         pack_data["sources"] = [source.model_dump(mode="json") for source in sources]
+        if isinstance(synthesis, FactualResearchSynthesis):
+            admitted_evidence, grounding_usage, grounding_warnings = (
+                self._ground_factual_evidence_candidates(
+                    synthesis.evidence,
+                    sources,
+                )
+            )
+            usage.extend(grounding_usage)
+            warnings.extend(grounding_warnings)
+            pack_data["findings"] = []
+            pack_data["evidence"] = [
+                {
+                    "evidence_id": f"evidence-{index:03d}",
+                    **evidence.model_dump(mode="json"),
+                }
+                for index, evidence in enumerate(admitted_evidence, start=1)
+            ]
+        else:
+            pack_data["findings"] = [
+                {
+                    "finding_id": f"finding-{index:03d}",
+                    **finding.model_dump(mode="json"),
+                }
+                for index, finding in enumerate(synthesis.findings, start=1)
+            ]
         pack = pack_model.model_validate(pack_data)
         if len(pack.queries) > self.config.research_query_limit or len(pack.sources) > self.config.research_source_limit:
             raise BackendError("Research Pack exceeded configured query/source limits", kind=ErrorKind.INVALID_OUTPUT)
         atomic_write_json(workspace.work_dir / "provider-response.json", execution.result.raw_response)
-        usage.extend(_usage_list([execution.result.usage]))
         promoted = self.store.promote_stage(workspace, pack, usage=usage, warnings=warnings)
         return pack_model.model_validate(promoted)
 
     @staticmethod
+    def _source_has_content_farm_signals(source: ResearchSource) -> bool:
+        title = source.title.casefold()
+        suspicious_phrases = (
+            "multimedia portal",
+            "multimedian portaali",
+            "scientific and popular",
+            "tieteellinen ja suosittu",
+        )
+        return any(phrase in title for phrase in suspicious_phrases) or any(
+            unicodedata.category(character) == "So" for character in source.title
+        )
+
+    def _admit_factual_sources(
+        self,
+        sources: Sequence[ResearchSource],
+    ) -> tuple[list[ResearchSource], list[UsageRecord], list[str]]:
+        admitted: list[ResearchSource] = []
+        usage: list[UsageRecord] = []
+        warnings: list[str] = []
+        for source in sources:
+            if self._source_has_content_farm_signals(source):
+                warnings.append(
+                    f"Excluded factual Source {source.source_id} because its title contains "
+                    "content-farm or promotional-portal signals."
+                )
+                continue
+            review_input = {
+                "review_strategy": "single-source-admission-v1",
+                "source": source.model_dump(mode="json"),
+                "output_language": self.config.output_language.value,
+            }
+            decision, decision_usage = self._structured_item(
+                stage="research",
+                item_id=f"source-admission-{source.source_id}",
+                task_id="factual_review",
+                input_data=review_input,
+                output_model=SourceAdmissionDecision,
+                max_output_tokens=500,
+                instruction_suffix=(
+                    "Review only this one search Source for use as bounded factual evidence. Return "
+                    "only verdict and rationale. Admit a primary authority, accountable institution, "
+                    "or transparent general reference with a substantive excerpt. Reject an "
+                    "unattributed SEO/content farm, machine-translated aggregation, marketing page, "
+                    "forum post, or source whose provenance cannot support factual authoring. Do not "
+                    "judge whether a later claim is entailed and do not rewrite the Source."
+                ),
+            )
+            usage.extend(decision_usage)
+            if decision.verdict == "admit":
+                admitted.append(source)
+            else:
+                warnings.append(
+                    f"Excluded factual Source {source.source_id} after bounded source-admission "
+                    "review."
+                )
+        self._require(
+            bool(admitted),
+            "factual research produced no source suitable for bounded factual authoring",
+        )
+        return admitted, usage, warnings
+
+    def _ground_factual_evidence_candidates(
+        self,
+        candidates: Sequence[EvidenceRecordDraft],
+        sources: Sequence[ResearchSource],
+    ) -> tuple[list[EvidenceRecordDraft], list[UsageRecord], list[str]]:
+        sources_by_id = {source.source_id: source for source in sources}
+        admitted: list[EvidenceRecordDraft] = []
+        usage: list[UsageRecord] = []
+        warnings: list[str] = []
+        for index, candidate in enumerate(candidates, start=1):
+            unknown_source_ids = sorted(set(candidate.source_ids) - set(sources_by_id))
+            self._require(
+                not unknown_source_ids,
+                "Factual Evidence candidate references unknown Source IDs: "
+                + ", ".join(unknown_source_ids),
+            )
+            empty_excerpt_ids = [
+                source_id
+                for source_id in candidate.source_ids
+                if not sources_by_id[source_id].excerpt.strip()
+            ]
+            if empty_excerpt_ids:
+                warnings.append(
+                    f"Excluded factual Evidence candidate {index} because linked Source excerpts "
+                    "were empty: " + ", ".join(empty_excerpt_ids) + "."
+                )
+                continue
+            linked_sources = [
+                sources_by_id[source_id].model_dump(mode="json")
+                for source_id in candidate.source_ids
+            ]
+            review_input = {
+                "review_strategy": "single-evidence-source-entailment-v1",
+                "candidate_statement": candidate.supported_statement,
+                "candidate_limitations": candidate.limitations,
+                "candidate_confidence": candidate.confidence,
+                "candidate_time_sensitive": candidate.time_sensitive,
+                "linked_sources": linked_sources,
+                "output_language": self.config.output_language.value,
+            }
+            decision, decision_usage = self._structured_item(
+                stage="research",
+                item_id=f"evidence-grounding-{index:03d}",
+                task_id="factual_review",
+                input_data=review_input,
+                output_model=EvidenceGroundingDecision,
+                max_output_tokens=600,
+                instruction_suffix=(
+                    "Audit one candidate Evidence statement against only its linked source excerpts. "
+                    "Return only verdict and rationale. entailed requires direct support for the "
+                    "same subject, direction, scope, causality, certainty, and qualifications; "
+                    "otherwise return not_entailed. Do not repair text or use outside knowledge."
+                ),
+            )
+            usage.extend(decision_usage)
+            if decision.verdict == "entailed" and candidate.confidence == "high":
+                admitted.append(candidate)
+            elif decision.verdict == "entailed":
+                warnings.append(
+                    f"Excluded factual Evidence candidate {index} because authoring requires "
+                    "high-confidence bounded evidence."
+                )
+            else:
+                warnings.append(
+                    f"Excluded factual Evidence candidate {index} after source-entailment review."
+                )
+        self._require(
+            bool(admitted),
+            "factual research produced no Evidence candidate directly entailed by its linked "
+            "sources at high confidence",
+        )
+        return admitted, usage, warnings
+
+    @staticmethod
     def _validate_research_source_references(
-        pack: ResearchPack,
+        pack: ResearchPack | ResearchSynthesis | FactualResearchPack | FactualResearchSynthesis,
         sources: Sequence[ResearchSource],
     ) -> None:
         expected_ids = {source.source_id for source in sources}
+        if isinstance(pack, (FactualResearchPack, FactualResearchSynthesis)):
+            unknown_evidence_sources = sorted(
+                {
+                    source_id
+                    for evidence in pack.evidence
+                    for source_id in evidence.source_ids
+                    if source_id not in expected_ids
+                }
+            )
+            WorkflowEngine._require(
+                not unknown_evidence_sources,
+                "Evidence references sources outside the bounded search results: "
+                + ", ".join(unknown_evidence_sources),
+            )
+            return
+        unattributed = [
+            index
+            for index, finding in enumerate(pack.findings, start=1)
+            if not finding.source_ids
+        ]
+        WorkflowEngine._require(
+            not unattributed,
+            "Every Research Finding requires at least one bounded Source ID",
+        )
         unknown = sorted(
             {
                 source_id
@@ -3446,8 +5723,22 @@ class WorkflowEngine:
         script: NarrationScript,
         *,
         factual_research: FactualResearchPack | None = None,
+        factual_revision: FactualRevisedScript | None = None,
         outline: OutlineLike | None = None,
     ) -> NarrationBundle:
+        self._require(
+            (factual_research is None) == (factual_revision is None),
+            "Narration requires factual research and its approved revision together",
+        )
+        if factual_revision is not None:
+            self._require(
+                factual_revision.script == script,
+                "Narration factual revision does not match the supplied Script",
+            )
+        current_inventory = (
+            factual_revision.claim_inventory if factual_revision is not None else None
+        )
+        current_review = factual_revision.factual_review if factual_revision is not None else None
         input_data = {
             "script": script.model_dump(mode="json"),
             "voice": self.config.voice.model_dump(mode="json"),
@@ -3455,6 +5746,11 @@ class WorkflowEngine:
             "backend": self.config.task_bindings["narration_synthesis"],
             "delivery": self._delivery_payload(),
         }
+        if factual_revision is not None:
+            input_data["factual_audit"] = {
+                "claim_inventory": factual_revision.claim_inventory.model_dump(mode="json"),
+                "factual_review": factual_revision.factual_review.model_dump(mode="json"),
+            }
         metadata = self._stage_metadata(stage="narration", task_id=None, input_data=input_data)
         metadata["backend_id"] = self.config.task_bindings["narration_synthesis"]
         metadata["backend_revision"] = self.registry.descriptor(metadata["backend_id"]).revision
@@ -3544,9 +5840,15 @@ class WorkflowEngine:
                     research=factual_research,
                     raise_on_failure=self.workflow_policy_version < 9,
                 )
+                current_inventory = inventory
+                current_review = review
                 usage.extend(factual_usage)
                 if not review.passed:
                     audited_repaired_script = repaired
+                    protected_by_scene = self._accepted_claim_texts_by_scene(
+                        inventory,
+                        review,
+                    )
                     repaired, repair_usage = self._repair_factual_script_once(
                         stage="narration",
                         item_prefix="duration-factual-repair",
@@ -3554,6 +5856,7 @@ class WorkflowEngine:
                         research=factual_research,
                         inventory=inventory,
                         review=review,
+                        outline=outline,
                     )
                     if self.workflow_policy_version >= 11:
                         repaired, fit_usage, _ = self._fit_duration_repair_word_range(
@@ -3564,6 +5867,7 @@ class WorkflowEngine:
                             factual_research=factual_research,
                             outline=outline,
                             item_prefix="duration-factual-word-fit",
+                            protected_exact_texts_by_scene=protected_by_scene,
                         )
                         repair_usage.extend(fit_usage)
                     self._validate_duration_revision(
@@ -3582,7 +5886,7 @@ class WorkflowEngine:
                         )
                         if before.spoken_text != after.spoken_text
                     }
-                    _, _, repaired_factual_usage = self._factual_audit(
+                    current_inventory, current_review, repaired_factual_usage = self._factual_audit(
                         stage="narration",
                         item_prefix="duration-repaired-script-recheck",
                         script=repaired,
@@ -3661,6 +5965,15 @@ class WorkflowEngine:
                     kind=ErrorKind.INVALID_OUTPUT,
                     action="Inspect the repaired script and explicitly rerun from narration with adjusted duration or voice settings.",
                 )
+        if self.workflow_policy_version >= 18:
+            delivery_fitted_bundle = self._fit_narration_delivery_tempo(
+                bundle,
+                output_root=(
+                    aggregate_workspace.work_dir / "delivery-tempo-adjusted"
+                ),
+            )
+            if delivery_fitted_bundle is not None:
+                bundle = delivery_fitted_bundle
         if self.workflow_policy_version >= 3:
             self._validate_narration_delivery(bundle)
         workspace = aggregate_workspace
@@ -3676,7 +5989,20 @@ class WorkflowEngine:
                 )
             }
         )
-        bundle = bundle.model_copy(update={"timeline": timeline})
+        if factual_research is not None:
+            self._require(
+                current_inventory is not None
+                and current_review is not None
+                and current_review.passed,
+                "Narration completed without a passed factual audit for its final Script",
+            )
+        bundle = bundle.model_copy(
+            update={
+                "timeline": timeline,
+                "claim_inventory": current_inventory,
+                "factual_review": current_review,
+            }
+        )
         promoted = self.store.promote_stage(workspace, bundle, usage=usage)
         return NarrationBundle.model_validate(promoted)
 
@@ -3915,6 +6241,19 @@ class WorkflowEngine:
         )
         if tempo is None:
             return None, None
+        return self._adjust_narration_items_tempo(
+            items,
+            tempo=tempo,
+            output_root=output_root,
+        ), tempo
+
+    def _adjust_narration_items_tempo(
+        self,
+        items: Sequence[NarrationItem],
+        *,
+        tempo: float,
+        output_root: Path,
+    ) -> list[NarrationItem]:
         adjusted_items = []
         for item in items:
             destination = output_root / f"{item.speech.scene_id}.wav"
@@ -3938,7 +6277,130 @@ class WorkflowEngine:
                     }
                 )
             )
-        return adjusted_items, tempo
+        return adjusted_items
+
+    @staticmethod
+    def _delivery_tempo_fit_rate(
+        *,
+        achieved_words_per_second: float,
+        minimum_words_per_second: float,
+        maximum_words_per_second: float,
+    ) -> float | None:
+        if achieved_words_per_second <= 0:
+            return None
+        if achieved_words_per_second < minimum_words_per_second:
+            target = minimum_words_per_second * (1 + DELIVERY_RATE_FIT_MARGIN)
+        elif achieved_words_per_second > maximum_words_per_second:
+            target = maximum_words_per_second * (1 - DELIVERY_RATE_FIT_MARGIN)
+        else:
+            return None
+        tempo = target / achieved_words_per_second
+        return tempo if 0.85 <= tempo <= 1.15 else None
+
+    def _duration_repair_aggregate_word_range(
+        self,
+        *,
+        script: NarrationScript,
+        scene_repair_targets: list[dict[str, int | str]],
+        selected_scene_ids: set[str],
+    ) -> tuple[int, int, int]:
+        minimum_total = sum(
+            int(item["minimum_word_count"]) for item in scene_repair_targets
+        )
+        target_total = sum(
+            int(item["target_word_count"]) for item in scene_repair_targets
+        )
+        maximum_total = sum(
+            int(item["maximum_word_count"]) for item in scene_repair_targets
+        )
+        delivery = getattr(self.config, "narration_delivery_spec", None)
+        if getattr(self, "workflow_policy_version", 23) < 24 or delivery is None:
+            return minimum_total, target_total, maximum_total
+
+        speech_window = delivery_ceiling(
+            self.config.duration_seconds,
+            self.config.fps,
+        ) - sum(scene.pause_after_seconds for scene in script.scenes)
+        self._require(
+            speech_window > 0,
+            "Duration Repair has no delivery time remaining after authored pauses",
+        )
+        global_word_ceiling = math.floor(
+            delivery.maximum_words_per_second
+            * (1 - DELIVERY_RATE_FIT_MARGIN)
+            * speech_window
+            + 1e-9
+        )
+        unselected_words = sum(
+            len(scene.spoken_text.split())
+            for scene in script.scenes
+            if scene.scene_id not in selected_scene_ids
+        )
+        selected_word_ceiling = global_word_ceiling - unselected_words
+        self._require(
+            selected_word_ceiling >= minimum_total,
+            (
+                f"Duration Repair aggregate minimum {minimum_total} exceeds the "
+                f"delivery-feasible selected word ceiling {selected_word_ceiling}"
+            ),
+        )
+        maximum_total = min(maximum_total, selected_word_ceiling)
+        target_total = min(target_total, maximum_total)
+        return minimum_total, target_total, maximum_total
+
+    def _fit_narration_delivery_tempo(
+        self,
+        bundle: NarrationBundle,
+        *,
+        output_root: Path,
+    ) -> NarrationBundle | None:
+        delivery = self.config.narration_delivery_spec
+        if delivery is None:
+            return None
+        speech_seconds = sum(
+            scene.speech_end_seconds - scene.start_seconds
+            for scene in bundle.timeline.scenes
+        )
+        if speech_seconds <= 0:
+            return None
+        word_count = sum(
+            len(scene.spoken_text.split()) for scene in bundle.script.scenes
+        )
+        tempo = self._delivery_tempo_fit_rate(
+            achieved_words_per_second=word_count / speech_seconds,
+            minimum_words_per_second=delivery.minimum_words_per_second,
+            maximum_words_per_second=delivery.maximum_words_per_second,
+        )
+        if tempo is None:
+            return None
+        adjusted_items = self._adjust_narration_items_tempo(
+            bundle.items,
+            tempo=tempo,
+            output_root=output_root,
+        )
+        candidate = self._assemble_narration(
+            bundle.script,
+            adjusted_items,
+            duration_repaired=True,
+            tempo_adjustment=bundle.tempo_adjustment * tempo,
+        )
+        if not duration_is_accepted(
+            candidate.timeline,
+            self.config.duration_seconds,
+        ):
+            return None
+        candidate_speech_seconds = sum(
+            scene.speech_end_seconds - scene.start_seconds
+            for scene in candidate.timeline.scenes
+        )
+        achieved = word_count / candidate_speech_seconds
+        if not (
+            delivery.minimum_words_per_second
+            <= achieved
+            <= delivery.maximum_words_per_second
+        ):
+            return None
+        return candidate
 
     def _duration_repair(
         self,
@@ -4013,8 +6475,19 @@ class WorkflowEngine:
             "selected_scene_ids": selected_scene_ids,
             "scene_repair_targets": scene_repair_targets,
             "output_language": self.config.output_language.value,
+            "content_mode": self.config.content_mode.value,
+            "content_format": getattr(
+                self.config, "content_format", ContentFormat.NARRATIVE
+            ).value,
             "repair_strategy": (
-                "per-scene-text-v4-host-aggregate-fit"
+                "per-scene-text-v6-host-delivery-fit"
+                if scene_local_repair
+                and self.workflow_policy_version >= 24
+                else "per-scene-text-v5-host-factual-fit"
+                if scene_local_repair
+                and factual_research is not None
+                and self.workflow_policy_version >= 18
+                else "per-scene-text-v4-host-aggregate-fit"
                 if scene_local_repair and self.workflow_policy_version >= 11
                 else "per-scene-text-v3"
                 if scene_local_repair
@@ -4025,12 +6498,7 @@ class WorkflowEngine:
         }
         if factual_research is not None:
             item_input["available_factual_evidence"] = [
-                {
-                    "evidence_id": item.evidence_id,
-                    "supported_statement": item.supported_statement,
-                    "confidence": item.confidence,
-                    "limitations": item.limitations,
-                }
+                self._authoring_evidence_payload(item)
                 for item in factual_research.evidence
             ]
         item_id = "duration-repair-script"
@@ -4127,12 +6595,7 @@ class WorkflowEngine:
         timeline = {scene.scene_id: scene for scene in measured_timeline.scenes}
         evidence_by_id = (
             {
-                item.evidence_id: {
-                    "evidence_id": item.evidence_id,
-                    "supported_statement": item.supported_statement,
-                    "confidence": item.confidence,
-                    "limitations": item.limitations,
-                }
+                item.evidence_id: self._authoring_evidence_payload(item)
                 for item in factual_research.evidence
             }
             if factual_research is not None
@@ -4147,7 +6610,10 @@ class WorkflowEngine:
         usage: list[UsageRecord] = []
         response_index: dict[str, Any] = {
             "repair_strategy": (
-                "per-scene-text-v4-host-aggregate-fit"
+                "per-scene-text-v6-host-delivery-fit"
+                if advisory_scene_words
+                and getattr(self, "workflow_policy_version", 23) >= 24
+                else "per-scene-text-v4-host-aggregate-fit"
                 if advisory_scene_words
                 else "per-scene-text-v3"
             ),
@@ -4167,8 +6633,10 @@ class WorkflowEngine:
             original_words = int(target["original_word_count"])
             direction = "lengthen" if duration_scale > 1 else "shorten"
             outline_scene = outline_by_id.get(scene.scene_id)
-            preferred_evidence_ids = list(
-                getattr(outline_scene, "evidence_ids", [])
+            preferred_evidence_ids = (
+                self._outline_scene_evidence_ids(outline_scene, factual_research)
+                if outline_scene is not None and factual_research is not None
+                else []
             )
             available_scene_evidence = (
                 [
@@ -4206,6 +6674,9 @@ class WorkflowEngine:
                 },
                 "available_factual_evidence": available_scene_evidence,
                 "content_mode": self.config.content_mode.value,
+                "content_format": getattr(
+                    self.config, "content_format", ContentFormat.NARRATIVE
+                ).value,
                 "output_language": self.config.output_language.value,
                 "original_word_count": original_words,
                 "minimum_word_count": minimum_words,
@@ -4326,6 +6797,239 @@ class WorkflowEngine:
         )
         return revision, usage, response_index
 
+    def _fit_factual_duration_word_range_host(
+        self,
+        *,
+        script: NarrationScript,
+        scene_repair_targets: list[dict[str, int | str]],
+        selected_scene_ids: set[str],
+        factual_research: FactualResearchPack,
+        outline: OutlineLike | None,
+        protected_exact_texts_by_scene: dict[str, Sequence[str]] | None,
+    ) -> NarrationScript:
+        minimum_total, target_total, maximum_total = (
+            self._duration_repair_aggregate_word_range(
+                script=script,
+                scene_repair_targets=scene_repair_targets,
+                selected_scene_ids=selected_scene_ids,
+            )
+        )
+        working_scenes = [scene.model_copy(deep=True) for scene in script.scenes]
+        protected_by_scene = protected_exact_texts_by_scene or {}
+        outline_by_id = (
+            {scene.scene_id: scene for scene in outline.scenes}
+            if outline is not None
+            else {}
+        )
+
+        def selected_total() -> int:
+            return sum(
+                len(scene.spoken_text.split())
+                for scene in working_scenes
+                if scene.scene_id in selected_scene_ids
+            )
+
+        total = selected_total()
+        if minimum_total <= total <= maximum_total:
+            return script
+
+        if total < minimum_total:
+            sentence_texts = [
+                claim.exact_text
+                for scene in working_scenes
+                for claim in self._programmatic_sentence_claims(scene.spoken_text)
+            ]
+            used_evidence_ids = {
+                evidence.evidence_id
+                for evidence in factual_research.evidence
+                if any(
+                    self._evidence_statement_supports_claim_lexically(
+                        sentence,
+                        evidence.supported_statement,
+                    )
+                    for sentence in sentence_texts
+                )
+            }
+            selected_scenes = [
+                scene
+                for scene in working_scenes
+                if scene.scene_id in selected_scene_ids
+            ]
+            self._require(
+                bool(selected_scenes),
+                "Host factual Duration Repair fitting has no selected Scenes",
+            )
+            evidence_scenes = [
+                scene
+                for scene in selected_scenes
+                if str(getattr(outline_by_id.get(scene.scene_id), "arc_role", ""))
+                in {"correction", "evidence"}
+            ] or selected_scenes
+            evidence_scene_ids = [scene.scene_id for scene in evidence_scenes]
+            evidence_by_id = {
+                evidence.evidence_id: evidence for evidence in factual_research.evidence
+            }
+            candidate_pairs: list[tuple[str, Any]] = []
+            scheduled_evidence_ids: set[str] = set()
+            for scene in selected_scenes:
+                outline_scene = outline_by_id.get(scene.scene_id)
+                if outline_scene is None:
+                    continue
+                for evidence_id in self._outline_scene_evidence_ids(
+                    outline_scene,
+                    factual_research,
+                ):
+                    evidence = evidence_by_id.get(evidence_id)
+                    if (
+                        evidence is None
+                        or evidence.confidence != "high"
+                        or evidence_id in used_evidence_ids
+                        or evidence_id in scheduled_evidence_ids
+                    ):
+                        continue
+                    candidate_pairs.append((scene.scene_id, evidence))
+                    scheduled_evidence_ids.add(evidence_id)
+            for evidence in factual_research.evidence:
+                if (
+                    evidence.confidence != "high"
+                    or evidence.evidence_id in used_evidence_ids
+                    or evidence.evidence_id in scheduled_evidence_ids
+                ):
+                    continue
+                scene_id = evidence_scene_ids[
+                    len(scheduled_evidence_ids) % len(evidence_scene_ids)
+                ]
+                candidate_pairs.append((scene_id, evidence))
+                scheduled_evidence_ids.add(evidence.evidence_id)
+
+            while total < minimum_total:
+                feasible = []
+                for index, (scene_id, evidence) in enumerate(candidate_pairs):
+                    scene = next(
+                        item for item in working_scenes if item.scene_id == scene_id
+                    )
+                    if evidence.supported_statement in scene.spoken_text:
+                        continue
+                    next_total = total + len(evidence.supported_statement.split())
+                    if next_total <= maximum_total:
+                        feasible.append(
+                            (
+                                abs(target_total - next_total),
+                                index,
+                                scene,
+                                evidence,
+                                next_total,
+                            )
+                        )
+                if not feasible:
+                    break
+                _, index, scene, evidence, next_total = min(feasible)
+                scene.spoken_text = (
+                    f"{scene.spoken_text.rstrip()} {evidence.supported_statement}"
+                ).strip()
+                candidate_pairs.pop(index)
+                total = next_total
+
+            transition_candidates: list[tuple[Any, str]] = []
+            for scene in selected_scenes:
+                outline_scene = outline_by_id.get(scene.scene_id)
+                role_transition = self._factual_role_transition(outline_scene)
+                neutral_transition = self._neutral_factual_transition(
+                    working_scenes.index(scene),
+                    len(working_scenes),
+                )
+                for transition in (role_transition, neutral_transition):
+                    if transition and transition not in scene.spoken_text:
+                        transition_candidates.append((scene, transition))
+            while total < minimum_total:
+                feasible = []
+                for index, (scene, transition) in enumerate(transition_candidates):
+                    next_total = total + len(transition.split())
+                    if next_total <= maximum_total:
+                        feasible.append(
+                            (abs(target_total - next_total), index, scene, transition, next_total)
+                        )
+                if not feasible:
+                    break
+                _, index, scene, transition, next_total = min(feasible)
+                scene.spoken_text = f"{scene.spoken_text.rstrip()} {transition}".strip()
+                transition_candidates.pop(index)
+                total = next_total
+
+        while total > maximum_total:
+            candidates: list[tuple[int, int, int, Any, str]] = []
+            for scene_index, scene in enumerate(working_scenes):
+                if scene.scene_id not in selected_scene_ids:
+                    continue
+                protected = set(protected_by_scene.get(scene.scene_id, ()))
+                for claim in self._programmatic_sentence_claims(scene.spoken_text):
+                    if claim.exact_text in protected:
+                        continue
+                    replacement = self._replace_exact_sentence_span(
+                        scene.spoken_text,
+                        claim.exact_text,
+                        "",
+                    )
+                    if not replacement:
+                        outline_scene = outline_by_id.get(scene.scene_id)
+                        replacement = self._factual_role_transition(outline_scene)
+                        if not replacement or replacement == claim.exact_text:
+                            replacement = self._neutral_factual_transition(
+                                scene_index,
+                                len(working_scenes),
+                            )
+                    next_total = (
+                        total
+                        - len(scene.spoken_text.split())
+                        + len(replacement.split())
+                    )
+                    if next_total < minimum_total or next_total >= total:
+                        continue
+                    candidates.append(
+                        (
+                            0
+                            if claim.exact_text in HOST_OWNED_NONFACTUAL_TRANSITIONS
+                            else 1,
+                            0 if next_total <= maximum_total else 1,
+                            abs(target_total - next_total),
+                            scene,
+                            replacement,
+                        )
+                    )
+            self._require(
+                bool(candidates),
+                "Host factual Duration Repair fitting exhausted safe sentence edits",
+            )
+            _, _, _, selected_scene, replacement = min(
+                candidates,
+                key=lambda item: item[:3],
+            )
+            total = (
+                total
+                - len(selected_scene.spoken_text.split())
+                + len(replacement.split())
+            )
+            selected_scene.spoken_text = replacement
+
+        self._require(
+            minimum_total <= total <= maximum_total,
+            (
+                "Host factual Duration Repair fitting could not meet the aggregate word range "
+                "using only admitted Evidence statements and host-owned transitions"
+            ),
+        )
+        for scene in working_scenes:
+            missing_protected = [
+                exact_text
+                for exact_text in protected_by_scene.get(scene.scene_id, ())
+                if exact_text not in scene.spoken_text
+            ]
+            self._require(
+                not missing_protected,
+                "Host factual Duration Repair fitting changed protected wording",
+            )
+        return NarrationScript(title=script.title, scenes=working_scenes)
+
     def _fit_duration_repair_word_range(
         self,
         *,
@@ -4336,12 +7040,31 @@ class WorkflowEngine:
         factual_research: FactualResearchPack | None,
         outline: OutlineLike | None,
         item_prefix: str = "duration-word-fit",
+        protected_exact_texts_by_scene: dict[str, Sequence[str]] | None = None,
     ) -> tuple[NarrationScript, list[UsageRecord], list[dict[str, str]]]:
+        if (
+            factual_research is not None
+            and getattr(self, "workflow_policy_version", 17) >= 18
+        ):
+            fitted = self._fit_factual_duration_word_range_host(
+                script=script,
+                scene_repair_targets=scene_repair_targets,
+                selected_scene_ids=selected_scene_ids,
+                factual_research=factual_research,
+                outline=outline,
+                protected_exact_texts_by_scene=protected_exact_texts_by_scene,
+            )
+            return fitted, [], []
         targets = {str(item["scene_id"]): item for item in scene_repair_targets}
-        minimum_total = sum(int(item["minimum_word_count"]) for item in scene_repair_targets)
-        target_total = sum(int(item["target_word_count"]) for item in scene_repair_targets)
-        maximum_total = sum(int(item["maximum_word_count"]) for item in scene_repair_targets)
+        minimum_total, target_total, maximum_total = (
+            self._duration_repair_aggregate_word_range(
+                script=script,
+                scene_repair_targets=scene_repair_targets,
+                selected_scene_ids=selected_scene_ids,
+            )
+        )
         working_scenes = [scene.model_copy(deep=True) for scene in script.scenes]
+        protected_by_scene = protected_exact_texts_by_scene or {}
 
         def selected_total() -> int:
             return sum(
@@ -4362,12 +7085,7 @@ class WorkflowEngine:
         )
         evidence_by_id = (
             {
-                evidence.evidence_id: {
-                    "evidence_id": evidence.evidence_id,
-                    "supported_statement": evidence.supported_statement,
-                    "confidence": evidence.confidence,
-                    "limitations": evidence.limitations,
-                }
+                evidence.evidence_id: self._authoring_evidence_payload(evidence)
                 for evidence in factual_research.evidence
             }
             if factual_research is not None
@@ -4378,12 +7096,30 @@ class WorkflowEngine:
         fit_items: list[dict[str, str]] = []
         while not minimum_total <= total <= maximum_total:
             direction = "lengthen" if total < minimum_total else "shorten"
+
+            def is_editable(scene: Any) -> bool:
+                if (
+                    scene.scene_id not in selected_scene_ids
+                    or scene.scene_id in fitted_scene_ids
+                ):
+                    return False
+                if direction == "lengthen":
+                    return True
+                actual = len(scene.spoken_text.split())
+                protected_floor = max(
+                    1,
+                    sum(
+                        len(exact_text.split())
+                        for exact_text in protected_by_scene.get(scene.scene_id, [])
+                    ),
+                )
+                feasible_maximum = maximum_total - (total - actual)
+                return actual > protected_floor and feasible_maximum >= protected_floor
+
             candidates = [
                 scene
                 for scene in working_scenes
-                if scene.scene_id in selected_scene_ids
-                and scene.scene_id not in fitted_scene_ids
-                and (direction == "lengthen" or len(scene.spoken_text.split()) > 1)
+                if is_editable(scene)
             ]
             self._require(
                 bool(candidates),
@@ -4394,7 +7130,15 @@ class WorkflowEngine:
                 actual = len(scene.spoken_text.split())
                 desired = int(targets[scene.scene_id]["target_word_count"])
                 evidence_backed = int(
-                    bool(getattr(outline_by_id.get(scene.scene_id), "evidence_ids", []))
+                    bool(
+                        self._outline_scene_evidence_ids(
+                            outline_by_id.get(scene.scene_id),
+                            factual_research,
+                        )
+                    )
+                    if factual_research is not None
+                    and outline_by_id.get(scene.scene_id) is not None
+                    else False
                 )
                 if direction == "lengthen":
                     return evidence_backed, desired - actual, actual
@@ -4408,6 +7152,11 @@ class WorkflowEngine:
             )
             actual_words = len(selected.spoken_text.split())
             unchanged_total = total - actual_words
+            protected_exact_texts = list(protected_by_scene.get(selected.scene_id, []))
+            protected_word_floor = max(
+                1,
+                sum(len(exact_text.split()) for exact_text in protected_exact_texts),
+            )
             if direction == "lengthen":
                 minimum_words = max(actual_words + 1, minimum_total - unchanged_total)
                 maximum_words = max(minimum_words, maximum_total - unchanged_total)
@@ -4416,7 +7165,10 @@ class WorkflowEngine:
                 if feasible_maximum < 1:
                     minimum_words = maximum_words = 1
                 else:
-                    minimum_words = max(1, minimum_total - unchanged_total)
+                    minimum_words = max(
+                        protected_word_floor,
+                        minimum_total - unchanged_total,
+                    )
                     maximum_words = min(actual_words - 1, feasible_maximum)
                     self._require(
                         minimum_words <= maximum_words,
@@ -4427,13 +7179,16 @@ class WorkflowEngine:
                 maximum_words,
             )
             outline_scene = outline_by_id.get(selected.scene_id)
-            preferred_evidence_ids = list(
-                getattr(outline_scene, "evidence_ids", [])
+            preferred_evidence_ids = (
+                self._outline_scene_evidence_ids(outline_scene, factual_research)
+                if outline_scene is not None and factual_research is not None
+                else []
             )
             item_input = {
                 "repair_strategy": "single-scene-word-fit-v1",
                 "direction": direction,
                 "spoken_text": selected.spoken_text,
+                "protected_exact_texts": protected_exact_texts,
                 "original_spoken_text": original_by_id[selected.scene_id].spoken_text,
                 "adjacent_context": {
                     "previous_spoken_text": (
@@ -4453,6 +7208,9 @@ class WorkflowEngine:
                     if evidence_id in evidence_by_id
                 ],
                 "content_mode": self.config.content_mode.value,
+                "content_format": getattr(
+                    self.config, "content_format", ContentFormat.NARRATIVE
+                ).value,
                 "output_language": self.config.output_language.value,
                 "minimum_word_count": minimum_words,
                 "target_word_count": target_words,
@@ -4471,6 +7229,7 @@ class WorkflowEngine:
                 *,
                 minimum: int = minimum_words,
                 maximum: int = maximum_words,
+                protected: tuple[str, ...] = tuple(protected_exact_texts),
             ) -> None:
                 NarrationScript.model_validate(
                     {
@@ -4486,6 +7245,10 @@ class WorkflowEngine:
                     }
                 )
                 actual = len(replacement.spoken_text.split())
+                self._require(
+                    all(exact_text in replacement.spoken_text for exact_text in protected),
+                    "Duration word fit changed already supported exact wording",
+                )
                 if not minimum <= actual <= maximum:
                     boundary = minimum if actual < minimum else maximum
                     raise BackendError(
@@ -4524,7 +7287,8 @@ class WorkflowEngine:
                     "Return only one complete replacement spoken_text. Python selected this Scene and "
                     "computed a feasible aggregate residual range; do not return an ID, title, pause, "
                     f"word count, or explanation. Use {minimum_words}-{maximum_words} words inclusive, "
-                    f"aiming near {target_words}. {editing_instruction}"
+                    f"aiming near {target_words}. Preserve every protected_exact_text verbatim. "
+                    f"{editing_instruction}"
                 ),
             )
             working_scenes[selected_index] = selected.model_copy(
@@ -5050,7 +7814,12 @@ class WorkflowEngine:
                 scene.pop(field_name, None)
         return payload
 
-    def _image_prompts(self, visual_plan: VisualPlanLike) -> ImageRequestSet:
+    def _image_prompts(
+        self,
+        visual_plan: VisualPlanLike,
+        *,
+        factual_grounding: dict[str, Any] | None = None,
+    ) -> ImageRequestSet:
         target_backend_id = self.config.task_bindings["image_generate"]
         target_descriptor = self.registry.descriptor(target_backend_id)
         input_data = {
@@ -5058,13 +7827,44 @@ class WorkflowEngine:
             "target_backend_id": target_backend_id,
             "target_revision": target_descriptor.revision,
         }
-        metadata = self._stage_metadata(
-            stage="image-prompt-compile",
-            task_id="image_prompt_compile",
-            input_data=input_data,
-            target_image_backend=target_backend_id,
+        if factual_grounding is not None:
+            input_data["factual_grounding"] = factual_grounding
+        host_factual_prompt_compile = (
+            self.workflow_policy_version >= 19 and factual_grounding is not None
         )
-        if self.workflow_policy_version >= 8:
+        if host_factual_prompt_compile:
+            metadata = {
+                "input_hash": hash_run_input(input_data),
+                "config_hash": hash_value(
+                    {
+                        "strategy": "host-grounded-image-prompt-v1",
+                        "target_backend": target_backend_id,
+                        "target_revision": target_descriptor.revision,
+                        "language": "en",
+                    }
+                ),
+                "backend_id": "internal:factual-prompt-compiler",
+                "backend_revision": "host-grounded-image-prompt-v1",
+                "prompt_version": "",
+                "schema_hash": hash_value(
+                    {
+                        "prompt_content": restricted_json_schema(
+                            ImagePromptContent.model_json_schema(mode="validation")
+                        ),
+                        "aggregate": restricted_json_schema(
+                            ImageRequestSet.model_json_schema(mode="validation")
+                        ),
+                    }
+                ),
+            }
+        else:
+            metadata = self._stage_metadata(
+                stage="image-prompt-compile",
+                task_id="image_prompt_compile",
+                input_data=input_data,
+                target_image_backend=target_backend_id,
+            )
+        if self.workflow_policy_version >= 8 and not host_factual_prompt_compile:
             metadata["config_hash"] = hash_value(
                 {
                     "strategy": "prompt-content-v1",
@@ -5142,7 +7942,21 @@ class WorkflowEngine:
                 "image_quality": "low" if self.config.quality is Quality.DRAFT else "high",
                 "reference_paths": [],
             }
-            if self.workflow_policy_version >= 8:
+            scene_grounding = self._factual_visual_grounding_for_scene(
+                factual_grounding,
+                visual_brief.scene_id,
+            )
+            if scene_grounding:
+                item_input["factual_grounding"] = {
+                    **scene_grounding,
+                    "rule": (
+                        "Compile only the current grounded visual. Do not add a mechanism, causal "
+                        "relationship, quantity, or result absent from supported_claims and "
+                        "allowed_evidence_records. Nonfactual framing is a staged illustration, not "
+                        "evidence of a real event."
+                    ),
+                }
+            if self.workflow_policy_version >= 8 and not host_factual_prompt_compile:
                 item_input["compiler_strategy"] = "prompt-content-v1"
             if self.continuity_policy_enabled:
                 item_input["continuity_context"] = {
@@ -5153,21 +7967,32 @@ class WorkflowEngine:
                     "rule": "Context only: depict the current Visual Brief, never an adjacent action.",
                 }
             if self.workflow_policy_version >= 8:
-                prompt_content, item_usage = self._structured_item(
-                    stage="image-prompt-compile",
-                    item_id=visual_id,
-                    task_id="image_prompt_compile",
-                    input_data=item_input,
-                    output_model=ImagePromptContent,
-                    invariant=self._validate_image_request_language,
-                    max_output_tokens=1600,
-                    instruction_suffix=(
-                        "Return only prompt and negative_prompt for this one image. Python owns "
-                        "the Scene/Shot identity, target Backend, dimensions, quality, seed, "
-                        "reference paths, and generation settings; do not return any of them."
-                    ),
-                    target_image_backend=target_backend_id,
-                )
+                if host_factual_prompt_compile:
+                    prompt_content = self._compile_factual_image_prompt_content(
+                        visual_brief=visual_brief,
+                        style_profile=visual_plan.style_profile,
+                        characters=[
+                            characters_by_id[character_id]
+                            for character_id in visual_brief.character_ids
+                        ],
+                    )
+                    item_usage = []
+                else:
+                    prompt_content, item_usage = self._structured_item(
+                        stage="image-prompt-compile",
+                        item_id=visual_id,
+                        task_id="image_prompt_compile",
+                        input_data=item_input,
+                        output_model=ImagePromptContent,
+                        invariant=self._validate_image_request_language,
+                        max_output_tokens=1600,
+                        instruction_suffix=(
+                            "Return only prompt and negative_prompt for this one image. Python owns "
+                            "the Scene/Shot identity, target Backend, dimensions, quality, seed, "
+                            "reference paths, and generation settings; do not return any of them."
+                        ),
+                        target_image_backend=target_backend_id,
+                    )
                 request_data = {
                     "schema_version": 1,
                     "scene_id": visual_brief.scene_id,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from video_generator.contracts import OutputLanguage
+from video_generator.contracts import ContentFormat, ContentMode, OutputLanguage
 from video_generator.prompting import (
     PROMPT_SET_VERSION,
     SHARED_RULES,
@@ -59,3 +59,23 @@ def test_craft_rules_remain_task_specific() -> None:
     assert "renew or complicate that uncertainty once around the middle" in " ".join(
         outline.instructions.split()
     )
+
+
+def test_factual_review_prompt_contains_only_exclusive_small_decision_strategies(
+    resolved_config,
+) -> None:
+    config = resolved_config.model_copy(
+        update={
+            "content_mode": ContentMode.FACTUAL,
+            "content_format": ContentFormat.MYTHBUSTER,
+        }
+    )
+    instructions = build_frozen_assets(config)["prompts"]["factual_review"][
+        "instructions"
+    ]
+
+    assert "exactly one bounded decision" in instructions
+    assert "mutually exclusive" in instructions
+    assert "uncovered_claims" not in instructions
+    assert "neither expands nor narrows direct authorization" in instructions
+    assert "matching unlabeled measurement or threshold markers" in instructions

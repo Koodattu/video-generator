@@ -72,22 +72,87 @@ def _fixture_sentence(language: OutputLanguage, index: int) -> str:
     return options[index % len(options)]
 
 
+def _is_factual_content(data: dict[str, Any]) -> bool:
+    return data.get("content_mode") == "factual"
+
+
+def _factual_evidence(data: dict[str, Any]) -> list[dict[str, Any]]:
+    available = data.get("available_factual_evidence")
+    if isinstance(available, list):
+        return [item for item in available if isinstance(item, dict)]
+    research_pack = data.get("research_pack", {})
+    if isinstance(research_pack, dict):
+        evidence = research_pack.get("evidence", [])
+        if isinstance(evidence, list):
+            return [item for item in evidence if isinstance(item, dict)]
+    return []
+
+
+def _factual_narrative_text(
+    data: dict[str, Any],
+    *,
+    desired_words: int,
+    language: OutputLanguage,
+    fallback: str = "",
+) -> str:
+    evidence = _factual_evidence(data)
+    position = max(0, int(data.get("scene_position", 1)) - 1)
+    statement = (
+        str(evidence[position % len(evidence)].get("supported_statement", "")).strip()
+        if evidence
+        else fallback.strip()
+    )
+    if not statement:
+        statement = (
+            "Tarkastele vain annettua rajattua näyttöä."
+            if language is OutputLanguage.FINNISH
+            else "Consider only the supplied bounded evidence."
+        )
+    words = statement.split()
+    directives = (
+        ["Katso.", "Keskity.", "Jatka.", "Palaa.", "Harkitse."]
+        if language is OutputLanguage.FINNISH
+        else ["Look.", "Focus.", "Continue.", "Return.", "Reconsider."]
+    )
+    while len(words) < desired_words:
+        words.append(directives[(len(words) - len(statement.split())) % len(directives)])
+    return " ".join(words)
+
+
 def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
     data = request.input_data
     task = request.task_id
     if task == "research":
         sources = data.get("sources", [])
+        if data.get("content_mode") == "factual":
+            evidence = []
+            for source in sources:
+                excerpt = str(
+                    source.get("excerpt")
+                    or "The bounded fixture source supports this statement."
+                )
+                supported_statement = excerpt.split(";", 1)[0].strip()
+                if supported_statement and supported_statement[-1] not in ".!?":
+                    supported_statement += "."
+                evidence.append(
+                    {
+                        "supported_statement": supported_statement,
+                        "source_ids": [str(source.get("source_id"))],
+                        "confidence": "high",
+                        "time_sensitive": False,
+                        "limitations": ["Deterministic test fixture evidence."],
+                    }
+                )
+            return {
+                "evidence": evidence
+            }
         payload = {
-            "schema_version": 1,
-            "queries": data.get("queries", []),
-            "sources": sources,
             "findings": [
                 {
-                    "finding_id": f"finding-{index:03d}",
                     "summary": str(source.get("excerpt") or "A concrete setting detail for original fiction."),
                     "source_ids": [str(source.get("source_id"))],
                 }
-                for index, source in enumerate(sources, start=1)
+                for source in sources
             ],
             "motifs": ["a responsive light", "tracks that change direction"],
             "setting_details": ["dry snow squeaks sharply in deep cold"],
@@ -95,24 +160,20 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             "cultural_cautions": ["avoid treating living traditions as generic magic"],
             "cliches_to_avoid": ["a prophecy that explains the whole plot"],
         }
-        if data.get("content_mode") == "factual":
-            payload["evidence"] = [
-                {
-                    "evidence_id": f"evidence-{index:03d}",
-                    "supported_statement": str(
-                        source.get("excerpt") or "The bounded fixture source supports this statement."
-                    ),
-                    "source_ids": [str(source.get("source_id"))],
-                    "confidence": "medium",
-                    "time_sensitive": False,
-                    "limitations": ["Deterministic test fixture evidence."],
-                }
-                for index, source in enumerate(sources, start=1)
-            ]
         return payload
     if task == "ideate":
         count = int(data.get("candidate_count", 5))
         explainer = data.get("content_format") in {"explainer", "mythbuster"}
+        factual_narrative = _is_factual_content(data)
+        evidence = _factual_evidence(data)
+        bounded_statement = (
+            str(evidence[0].get("supported_statement", "The bounded evidence is examined."))
+            if evidence
+            else "The bounded evidence is examined."
+        )
+        bounded_evidence_id = (
+            str(evidence[0].get("evidence_id", "")) if evidence else ""
+        )
         candidates = []
         for index in range(1, count + 1):
             if explainer:
@@ -131,6 +192,26 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                         "visual_opportunities": ["boot and snow crystals", "thermometer", "simple force arrows"],
                         "accuracy_risks": ["overstating a single cause"],
                         "duration_fit": "fits a compact evidence-led explanation",
+                    }
+                )
+                continue
+            if factual_narrative:
+                candidates.append(
+                    {
+                        "candidate_id": f"candidate-{index:03d}",
+                        "title": f"A Bounded Evidence Path {index}",
+                        "premise": bounded_statement,
+                        "protagonist_desire": "The viewer wants to understand the bounded evidence.",
+                        "obstacle": "The evidence must remain within its stated scope and limits.",
+                        "turn": bounded_statement,
+                        "ending_direction": "Return to the same bounded statement with its limits intact.",
+                        "emotional_promise": "Curiosity resolves into evidence-based understanding.",
+                        "research_inspiration_ids": (
+                            [bounded_evidence_id] if bounded_evidence_id else []
+                        ),
+                        "visual_opportunities": ["a literal diagram of the supported statement"],
+                        "originality_risks": ["inventing events beyond the supplied evidence"],
+                        "duration_fit": "fits a compact evidence-led narrative",
                     }
                 )
                 continue
@@ -192,6 +273,13 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
         per_scene = duration / scene_count
         scenes = []
         explainer = data.get("content_format") in {"explainer", "mythbuster"}
+        factual_narrative = _is_factual_content(data)
+        evidence = _factual_evidence(data)
+        bounded_statement = (
+            str(evidence[0].get("supported_statement", "The bounded evidence is examined."))
+            if evidence
+            else "The bounded evidence is examined."
+        )
         arc_roles = [
             "modern_hook",
             "question",
@@ -218,6 +306,23 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                     }
                 )
                 continue
+            if factual_narrative:
+                scenes.append(
+                    {
+                        "scene_id": f"scene-{index:03d}",
+                        "narrative_purpose": (
+                            "introduce the bounded evidence"
+                            if index == 1
+                            else "revisit the evidence without expanding its scope"
+                        ),
+                        "change": bounded_statement,
+                        "emotional_beat": "curiosity becomes careful understanding",
+                        "visual_opportunity": "a literal diagram of the supported statement",
+                        "provisional_seconds": per_scene,
+                        "continuity_obligations": ["keep the same evidence subject visible"],
+                    }
+                )
+                continue
             scenes.append(
                 {
                     "scene_id": f"scene-{index:03d}",
@@ -239,6 +344,13 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                 "landing_callback": "listen to that next step as a material experiment",
                 "scenes": scenes,
             }
+        if factual_narrative:
+            return {
+                "schema_version": 1,
+                "title": "A Bounded Evidence Path",
+                "concept_summary": bounded_statement,
+                "scenes": scenes,
+            }
         return {
             "schema_version": 1,
             "title": "The Lantern That Answered",
@@ -252,6 +364,15 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             language = OutputLanguage(
                 data.get("output_language", request.output_language.value)
             )
+            if _is_factual_content(data):
+                return {
+                    "spoken_text": _factual_narrative_text(
+                        data,
+                        desired_words=desired_words,
+                        language=language,
+                        fallback=text,
+                    )
+                }
             sentence_index = 0
             while len(text.split()) < desired_words:
                 text += " " + _fixture_sentence(language, sentence_index)
@@ -264,6 +385,14 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                 data.get("output_language", request.output_language.value)
             )
             desired_words = int(data.get("target_word_count", 12))
+            if _is_factual_content(data):
+                return {
+                    "spoken_text": _factual_narrative_text(
+                        data,
+                        desired_words=desired_words,
+                        language=language,
+                    )
+                }
             sentence_index = max(0, int(data.get("scene_position", 1)) - 1)
             text = ""
             while len(text.split()) < desired_words:
@@ -281,12 +410,19 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
         for index, scene in enumerate(outline.get("scenes", [])):
             seconds = float(scene.get("provisional_seconds", 15))
             desired_words = target_by_scene.get(scene["scene_id"], max(8, round(seconds / 0.42)))
-            text = ""
-            sentence_index = index
-            while len(text.split()) < desired_words:
-                text = (text + " " + _fixture_sentence(language, sentence_index)).strip()
-                sentence_index += 1
-            text = " ".join(text.split()[:desired_words]).rstrip(".,;:") + "."
+            if _is_factual_content(data):
+                text = _factual_narrative_text(
+                    {**data, "scene_position": index + 1},
+                    desired_words=desired_words,
+                    language=language,
+                )
+            else:
+                text = ""
+                sentence_index = index
+                while len(text.split()) < desired_words:
+                    text = (text + " " + _fixture_sentence(language, sentence_index)).strip()
+                    sentence_index += 1
+                text = " ".join(text.split()[:desired_words]).rstrip(".,;:") + "."
             scenes.append(
                 {
                     "scene_id": scene["scene_id"],
@@ -296,6 +432,12 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             )
         return {"schema_version": 1, "title": outline.get("title", "Fixture Story"), "scenes": scenes}
     if task.startswith("review_"):
+        if data.get("review_strategy") == "single-finding-resolution-v1":
+            return {
+                "resolved": data.get("revised_spoken_text")
+                != data.get("original_spoken_text"),
+                "explanation": "The deterministic fixture confirms the bounded edit changed the Scene.",
+            }
         review_type = {
             "review_story": "story",
             "review_spoken": "spoken",
@@ -304,13 +446,38 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
         return {"schema_version": 1, "review_type": review_type, "passed": True, "findings": []}
     if task == "script_revision":
         if data.get("repair_strategy") == "factual-claim-repair-v1":
-            return {"spoken_text": data["spoken_text"]}
+            text = str(data["spoken_text"])
+            evidence = data.get("allowed_factual_evidence", [])
+            if not evidence:
+                language = OutputLanguage(
+                    data.get("output_language", request.output_language.value)
+                )
+                return {
+                    "spoken_text": (
+                        "Siirry nyt seuraavaan konkreettiseen kohtaan."
+                        if language is OutputLanguage.FINNISH
+                        else "Move now to the next concrete point."
+                    )
+                }
+            replacement_statement = str(evidence[0]["supported_statement"])
+            for failed in data.get("failed_claims", []):
+                text = text.replace(str(failed["exact_text"]), replacement_statement)
+            return {"spoken_text": text}
         if data.get("revision_strategy") == "single-scene-word-fit-v1":
             desired_words = int(data["target_word_count"])
             text = str(data["spoken_text"])
             language = OutputLanguage(
                 data.get("output_language", request.output_language.value)
             )
+            if _is_factual_content(data):
+                return {
+                    "spoken_text": _factual_narrative_text(
+                        data,
+                        desired_words=desired_words,
+                        language=language,
+                        fallback=text,
+                    )
+                }
             sentence_index = 0
             while len(text.split()) < desired_words:
                 text += " " + _fixture_sentence(language, sentence_index)
@@ -322,16 +489,15 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             return {"spoken_text": data["spoken_text"]}
         return {"schema_version": 1, "script": data["script"], "dispositions": []}
     if task == "claim_inventory":
+        if data.get("coverage_strategy") == "single-scene-claim-coverage-v1":
+            return {"missing_claims": []}
         if data.get("inventory_strategy") == "single-scene-claim-extraction-v2":
-            evidence = data.get("research_pack", {}).get("evidence", [])
-            evidence_ids = [str(item["evidence_id"]) for item in evidence[:1]]
             exact_text = str(data.get("spoken_text", "")).split(".", 1)[0].strip()
             return {
                 "claims": (
                     [
                         {
                             "exact_text": exact_text,
-                            "evidence_ids": evidence_ids,
                             "qualification": "",
                         }
                     ]
@@ -358,11 +524,74 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             )
         return {"schema_version": 1, "claims": claims, "coverage_notes": "Fixture audit."}
     if task == "factual_review":
+        if data.get("review_strategy") == "single-source-admission-v1":
+            return {
+                "verdict": "admit",
+                "rationale": (
+                    "The deterministic fixture source has explicit bounded provenance and an excerpt."
+                ),
+            }
+        if data.get("review_strategy") == "single-evidence-source-entailment-v1":
+            return {
+                "verdict": "entailed",
+                "rationale": (
+                    "The deterministic fixture directly accepts its linked bounded source excerpt."
+                ),
+            }
+        if data.get("review_strategy") in {
+            "single-factual-visual-v1",
+            "single-factual-visual-v2",
+        }:
+            return {
+                "verdict": "grounded",
+                "rationale": (
+                    "The deterministic fixture visual contains only its supplied bounded semantics."
+                ),
+            }
         if data.get("review_strategy") == "single-claim-v1":
-            claim = data["claim"]
+            evidence = data.get("evidence_records", [])
+            exact_text = str(data.get("claim", {}).get("exact_text", "")).strip()
+            if exact_text in data.get("host_owned_nonfactual_texts", []):
+                return {
+                    "verdict": "not_a_factual_claim",
+                    "evidence_ids": [],
+                    "rationale": "The exact text is one supplied host-owned neutral transition.",
+                }
+            if data.get("content_format") == "narrative":
+                claim_text = " ".join(
+                    exact_text.split()
+                ).rstrip(".!?;:").casefold()
+                matched = next(
+                    (
+                        item
+                        for item in evidence
+                        if " ".join(str(item.get("supported_statement", "")).split())
+                        .rstrip(".!?;:")
+                        .casefold()
+                        == claim_text
+                    ),
+                    None,
+                )
+                return {
+                    "verdict": "supported" if matched is not None else "unsupported",
+                    "evidence_ids": (
+                        [str(matched["evidence_id"])]
+                        if matched is not None and matched.get("evidence_id")
+                        else []
+                    ),
+                    "rationale": (
+                        "The Claim exactly matches one supplied bounded Evidence statement."
+                        if matched is not None
+                        else "The Claim does not exactly match any supplied bounded Evidence statement."
+                    ),
+                }
             return {
                 "verdict": "supported",
-                "evidence_ids": claim.get("evidence_ids", []),
+                "evidence_ids": [
+                    str(item["evidence_id"])
+                    for item in evidence[:1]
+                    if item.get("evidence_id")
+                ],
                 "rationale": "The deterministic fixture treats its bounded evidence as direct support.",
             }
         claims = data.get("claim_inventory", {}).get("claims", [])
@@ -388,6 +617,15 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             language = OutputLanguage(
                 data.get("output_language", request.output_language.value)
             )
+            if _is_factual_content(data):
+                return {
+                    "spoken_text": _factual_narrative_text(
+                        data,
+                        desired_words=desired,
+                        language=language,
+                        fallback=text,
+                    )
+                }
             sentence_index = 0
             while len(text.split()) < desired:
                 text += " " + _fixture_sentence(language, sentence_index)
@@ -401,6 +639,15 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             language = OutputLanguage(
                 data.get("output_language", request.output_language.value)
             )
+            if _is_factual_content(data):
+                return {
+                    "spoken_text": _factual_narrative_text(
+                        data,
+                        desired_words=desired,
+                        language=language,
+                        fallback=text,
+                    )
+                }
             sentence_index = 0
             while len(text.split()) < desired:
                 text += " " + _fixture_sentence(language, sentence_index)
@@ -492,24 +739,57 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             characters = data.get("character_identities", [])
             character_ids = [item["character_id"] for item in characters]
             has_previous = data.get("previous_visual") is not None
+            factual_grounding = data.get("factual_grounding")
+            static_factual_staging = (
+                factual_grounding is not None
+                and not factual_grounding.get("supported_claims")
+            )
             return {
-                "story_moment": target["narration_excerpt"],
+                "story_moment": (
+                    "A neutral staged view of the current narrated subjects."
+                    if static_factual_staging
+                    else "A literal view of the currently supported narrated point."
+                    if factual_grounding is not None
+                    else target["narration_excerpt"]
+                ),
                 "subjects": (
                     ["Aino", "blue tin lantern"]
                     if character_ids
                     else ["hand", "literal narrated objects"]
                 ),
-                "action": "Show the literal visible action described by the current narration.",
+                "action": (
+                    "The supplied subjects remain motionless in a neutral static arrangement."
+                    if static_factual_staging
+                    else "Show only the literal supported relationship in the current narration."
+                    if factual_grounding is not None
+                    else "Show the literal visible action described by the current narration."
+                ),
                 "emotion": "clear focused curiosity",
-                "environment": "a sparse setting consistent with the parent Outline Scene",
-                "composition": "one large focal action centered in a readable 16:9 frame",
-                "must_show": ["the current narrated object and action", "clear silhouettes"],
+                "environment": (
+                    "a sparse neutral setting from the supplied staging context"
+                    if factual_grounding is not None
+                    else "a sparse setting consistent with the parent Outline Scene"
+                ),
+                "composition": (
+                    "one static arrangement centered in a readable 16:9 frame"
+                    if static_factual_staging
+                    else "one large focal action centered in a readable 16:9 frame"
+                ),
+                "must_show": (
+                    ["the staged subjects without a visible change", "clear silhouettes"]
+                    if static_factual_staging
+                    else ["the current narrated object and action", "clear silhouettes"]
+                ),
                 "must_avoid": ["written words", "labels", "future events"],
                 "character_ids": character_ids,
                 "continuity_from_previous": (
                     ["preserve the incoming visible state"] if has_previous else []
                 ),
-                "state_after_scene": ["the current action leaves a visible result"],
+                "state_after_scene": (
+                    ["the static arrangement remains unchanged"]
+                    if static_factual_staging
+                    else ["the current action leaves a visible result"]
+                ),
                 "identity_requirements": (
                     ["preserve every supplied Aino identity trait exactly"]
                     if character_ids

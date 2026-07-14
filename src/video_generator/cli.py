@@ -21,7 +21,7 @@ from .errors import ConfigurationError, ErrorKind, VideoGeneratorError
 from .preflight import run_preflight
 from .provenance import build_runtime_snapshot, verify_runtime_snapshot
 from .profiles import BACKEND_DESCRIPTORS, PROFILES
-from .prompting import build_frozen_assets
+from .prompting import build_frozen_assets, canonical_backend_descriptor_payload
 from .run_store import RunStore, TASK_STAGE_IMPACT, earliest_config_impact
 from .setup import (
     CURATED_LLM_CANDIDATES,
@@ -345,7 +345,13 @@ def _earliest_frozen_impact(
     new_descriptors = new_profile.get("backend_descriptors", {})
     if isinstance(old_descriptors, dict) and isinstance(new_descriptors, dict):
         for task_id, backend_id in config.task_bindings.items():
-            if old_descriptors.get(backend_id) != new_descriptors.get(backend_id):
+            old_descriptor = old_descriptors.get(backend_id)
+            new_descriptor = new_descriptors.get(backend_id)
+            if isinstance(old_descriptor, dict):
+                old_descriptor = canonical_backend_descriptor_payload(old_descriptor)
+            if isinstance(new_descriptor, dict):
+                new_descriptor = canonical_backend_descriptor_payload(new_descriptor)
+            if old_descriptor != new_descriptor:
                 stages.append(TASK_STAGE_IMPACT[task_id])
     old_runtime = old.get("runtime_snapshot", {}) if isinstance(old.get("runtime_snapshot"), dict) else {}
     new_runtime = new.get("runtime_snapshot", {}) if isinstance(new.get("runtime_snapshot"), dict) else {}

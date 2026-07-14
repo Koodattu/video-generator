@@ -9,6 +9,7 @@ from pydantic import BaseModel, field_validator
 from video_generator.contracts import OutputLanguage, RevisedScript, StructuredTextResult
 from video_generator.errors import BackendError, ErrorKind
 from video_generator.executor import TaskExecutor, _canonicalize_host_owned_fields
+from video_generator.workflow import WorkflowEngine
 
 
 class _Output(BaseModel):
@@ -36,6 +37,49 @@ class _Scene(BaseModel):
 
 class _SceneList(BaseModel):
     scenes: list[_Scene]
+
+
+def test_structured_item_cache_identity_includes_normalized_instruction_suffix() -> None:
+    identities: list[dict[str, str]] = []
+    reusable = SimpleNamespace(usage=[])
+
+    class Store:
+        def reusable_item(self, stage, item_id, **metadata):
+            identities.append(metadata)
+            return reusable
+
+        def load_item_artifact(self, record, model):
+            return model(value=1)
+
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        task_bindings={"outline": "local:fixture"},
+        output_language=OutputLanguage.ENGLISH,
+    )
+    engine.registry = SimpleNamespace(
+        descriptor=lambda backend_id: SimpleNamespace(revision="fixture-revision")
+    )
+    engine.prompts = SimpleNamespace(
+        output_language=lambda task_id, language: language,
+        get=lambda *args, **kwargs: SimpleNamespace(version="fixture-prompt"),
+        schema=lambda task_id: {},
+    )
+    engine.store = Store()
+
+    for suffix in ("Rule A", "Rule B", "  Rule A  "):
+        artifact, usage = engine._structured_item(
+            stage="outline",
+            item_id="scene-001",
+            task_id="outline",
+            input_data={"value": "unchanged"},
+            output_model=_Output,
+            instruction_suffix=suffix,
+        )
+        assert artifact == _Output(value=1)
+        assert usage == []
+
+    assert identities[0]["input_hash"] != identities[1]["input_hash"]
+    assert identities[0] == identities[2]
 
 
 def test_structured_repairs_one_invariant_failure() -> None:
@@ -226,7 +270,6 @@ def test_scene_claim_extraction_keeps_only_semantic_fields() -> None:
         {
             "inventory_strategy": "single-scene-claim-extraction-v2",
             "spoken_text": "Metal carries heat away.",
-            "research_pack": {"evidence": [{"evidence_id": "ev-001"}]},
         },
         {
             "claims": [
@@ -243,7 +286,6 @@ def test_scene_claim_extraction_keeps_only_semantic_fields() -> None:
         "claims": [
             {
                 "exact_text": "Metal carries heat away.",
-                "evidence_ids": ["ev-001"],
                 "qualification": "At equal starting temperature.",
             }
         ]
@@ -253,10 +295,48 @@ def test_scene_claim_extraction_keeps_only_semantic_fields() -> None:
         {
             "inventory_strategy": "single-scene-claim-extraction-v2",
             "spoken_text": "Look at this spoon.",
-            "research_pack": {"evidence": []},
         },
         {"claims": []},
     ) == {"claims": []}
+
+
+def test_scene_claim_coverage_removes_provider_selected_evidence() -> None:
+    normalized = _canonicalize_host_owned_fields(
+        "claim_inventory",
+        {
+            "coverage_strategy": "single-scene-claim-coverage-v1",
+            "spoken_text": "Metal carries heat away.",
+            "existing_claims": [],
+        },
+        {
+            "missing_claims": [
+                {
+                    "exact_text": "Metal carries heat away.",
+                    "evidence_ids": ["ev-001", "made-up"],
+                    "qualification": "",
+                }
+            ]
+        },
+    )
+
+    assert normalized == {
+        "missing_claims": [
+            {
+                "exact_text": "Metal carries heat away.",
+                "qualification": "",
+            }
+        ]
+    }
+
+
+def test_finding_resolution_keeps_only_model_resolution_fields() -> None:
+    normalized = _canonicalize_host_owned_fields(
+        "review_spoken",
+        {"review_strategy": "single-finding-resolution-v1"},
+        {"resolved": True, "explanation": "The defect is gone."},
+    )
+
+    assert normalized == {"resolved": True, "explanation": "The defect is gone."}
 
 
 def test_factual_review_assigns_claim_ids_and_derives_pass() -> None:
@@ -264,7 +344,7 @@ def test_factual_review_assigns_claim_ids_and_derives_pass() -> None:
         "factual_review",
         {
             "claim_inventory": {"claims": [{"claim_id": "claim-001"}]},
-            "research_pack": {"evidence": [{"evidence_id": "ev-001"}]},
+            "evidence_records": [{"evidence_id": "ev-001"}],
         },
         {
             "passed": False,

@@ -94,6 +94,55 @@ def test_llama_worker_uses_llama_cpp_nested_json_schema(monkeypatch) -> None:
     assert result["finish_reason"] == "stop"
 
 
+def test_llama_worker_uses_low_variance_sampling_for_factual_review() -> None:
+    calls: list[dict] = []
+
+    class Session:
+        baseline = SimpleNamespace(used_mb=100)
+        peak_used_mb = 120
+        startup_elapsed_seconds = 1.0
+
+        def chat_completion(self, payload: dict) -> dict:
+            calls.append(payload)
+            return {
+                "id": "fixture",
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"verdict":"grounded","rationale":"The bounded visual is directly grounded."}'
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {},
+            }
+
+    worker = object.__new__(LlamaServerWorker)
+    worker.model_path = Path("model.gguf")
+    worker.session = Session()
+    worker.dispatch(
+        "structured_text.complete",
+        {
+            "task_id": "factual_review",
+            "instructions": "Return only the requested decision.",
+            "input_data": {},
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "verdict": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["verdict", "rationale"],
+                "additionalProperties": False,
+            },
+            "max_output_tokens": 600,
+            "media_inputs": [],
+        },
+    )
+
+    assert calls[0]["temperature"] == 0.1
+
+
 def test_llama_worker_rejects_truncated_structured_output() -> None:
     class Session:
         baseline = SimpleNamespace(used_mb=100)

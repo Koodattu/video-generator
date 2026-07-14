@@ -369,13 +369,46 @@ class ResearchFinding(ContractModel):
     source_ids: list[str] = Field(default_factory=list)
 
 
+EvidenceStatement = Annotated[str, Field(min_length=1, max_length=600)]
+EvidenceLimitation = Annotated[str, Field(min_length=1, max_length=240)]
+EvidenceLimitations = Annotated[list[EvidenceLimitation], Field(max_length=4)]
+
+
 class EvidenceRecord(ContractModel):
     evidence_id: Annotated[str, Field(min_length=1, max_length=120)]
-    supported_statement: Annotated[str, Field(min_length=1, max_length=4000)]
+    supported_statement: EvidenceStatement
     source_ids: Annotated[list[str], Field(min_length=1, max_length=20)]
     confidence: Literal["low", "medium", "high"]
     time_sensitive: bool = False
-    limitations: list[str] = Field(default_factory=list)
+    limitations: EvidenceLimitations = Field(default_factory=list)
+
+
+class ResearchFindingDraft(ContractModel):
+    summary: Annotated[str, Field(min_length=1, max_length=4000)]
+    source_ids: Annotated[list[str], Field(min_length=1, max_length=20)]
+
+
+class EvidenceRecordDraft(ContractModel):
+    supported_statement: EvidenceStatement
+    source_ids: Annotated[list[str], Field(min_length=1, max_length=20)]
+    confidence: Literal["low", "medium", "high"]
+    time_sensitive: bool = False
+    limitations: EvidenceLimitations = Field(default_factory=list)
+
+
+class ResearchSynthesis(ContractModel):
+    findings: Annotated[list[ResearchFindingDraft], Field(max_length=100)] = Field(
+        default_factory=list
+    )
+    motifs: list[str] = Field(default_factory=list)
+    setting_details: list[str] = Field(default_factory=list)
+    vocabulary: list[str] = Field(default_factory=list)
+    cultural_cautions: list[str] = Field(default_factory=list)
+    cliches_to_avoid: list[str] = Field(default_factory=list)
+
+
+class FactualResearchSynthesis(ContractModel):
+    evidence: Annotated[list[EvidenceRecordDraft], Field(min_length=1, max_length=12)]
 
 
 class ResearchPack(VersionedContract):
@@ -410,7 +443,7 @@ class ResearchPack(VersionedContract):
 
 
 class FactualResearchPack(ResearchPack):
-    evidence: Annotated[list[EvidenceRecord], Field(min_length=1)]
+    evidence: Annotated[list[EvidenceRecord], Field(min_length=1, max_length=12)]
 
     @model_validator(mode="after")
     def validate_evidence_references(self) -> "FactualResearchPack":
@@ -681,12 +714,17 @@ class ScriptClaim(ContractModel):
 
 class ExtractedClaim(ContractModel):
     exact_text: Annotated[str, Field(min_length=1, max_length=4000)]
-    evidence_ids: Annotated[list[str], Field(max_length=20)] = Field(default_factory=list)
     qualification: Annotated[str, Field(max_length=2000)] = ""
 
 
 class SceneClaimExtraction(ContractModel):
     claims: Annotated[list[ExtractedClaim], Field(max_length=20)] = Field(default_factory=list)
+
+
+class SceneClaimCoverage(ContractModel):
+    missing_claims: Annotated[list[ExtractedClaim], Field(max_length=20)] = Field(
+        default_factory=list
+    )
 
 
 class ClaimInventory(VersionedContract):

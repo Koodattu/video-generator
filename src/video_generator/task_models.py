@@ -9,12 +9,12 @@ from .contracts import (
     ExplainerCandidateSet,
     ExplainerOutline,
     ExplainerSelectionReport,
-    FactualResearchPack,
+    FactualResearchSynthesis,
     FactualReviewReport,
     ImageRequest,
     MusicBrief,
     NarrationScript,
-    ResearchPack,
+    ResearchSynthesis,
     ResolvedRunConfig,
     ReviewReport,
     RevisedScript,
@@ -32,7 +32,7 @@ from .contracts import (
 
 def task_output_models(config: ResolvedRunConfig | None = None) -> dict[str, type[BaseModel]]:
     models: dict[str, type[BaseModel]] = {
-        "research": ResearchPack,
+        "research": ResearchSynthesis,
         "ideate": CandidateSet,
         "select": SelectionReport,
         "outline": StoryOutline,
@@ -53,7 +53,7 @@ def task_output_models(config: ResolvedRunConfig | None = None) -> dict[str, typ
     if config.content_mode is ContentMode.FACTUAL:
         models.update(
             {
-                "research": FactualResearchPack,
+                "research": FactualResearchSynthesis,
                 "claim_inventory": SceneClaimExtraction,
                 "factual_review": FactualReviewReport,
             }

@@ -353,7 +353,10 @@ class GeminiSearchBackend(_GeminiClient):
                     "mime_type": "application/json",
                     "schema": SEARCH_SCHEMA,
                 },
-                "generation_config": {"max_output_tokens": 2500},
+                "generation_config": {
+                    "max_output_tokens": 2500,
+                    "tool_choice": "any",
+                },
             }
         )
         try:

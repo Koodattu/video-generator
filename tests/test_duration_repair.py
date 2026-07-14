@@ -8,6 +8,7 @@ import pytest
 from video_generator.contracts import (
     ContentMode,
     MediaReference,
+    NarrationDeliverySpec,
     NarrationScript,
     NarrationTimeline,
     OutputLanguage,
@@ -980,6 +981,85 @@ def test_tempo_fit_uses_minimum_rate_when_it_reaches_accepted_floor() -> None:
         pause_seconds=4,
         budget_seconds=120,
     ) == pytest.approx(0.85)
+
+
+def test_delivery_tempo_fit_corrects_small_rate_shortfall() -> None:
+    tempo = WorkflowEngine._delivery_tempo_fit_rate(
+        achieved_words_per_second=2.020,
+        minimum_words_per_second=2.025,
+        maximum_words_per_second=2.577,
+    )
+
+    assert tempo == pytest.approx((2.025 * 1.002) / 2.020)
+    assert 1.0 < tempo < 1.01
+
+
+def test_delivery_tempo_fit_leaves_in_range_delivery_unchanged() -> None:
+    assert (
+        WorkflowEngine._delivery_tempo_fit_rate(
+            achieved_words_per_second=2.2,
+            minimum_words_per_second=2.025,
+            maximum_words_per_second=2.577,
+        )
+        is None
+    )
+
+
+def test_delivery_tempo_fit_rejects_large_rate_correction() -> None:
+    assert (
+        WorkflowEngine._delivery_tempo_fit_rate(
+            achieved_words_per_second=1.5,
+            minimum_words_per_second=2.025,
+            maximum_words_per_second=2.577,
+        )
+        is None
+    )
+
+
+def test_policy_twenty_four_delivery_word_range_reserves_pauses_and_unselected_words() -> None:
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text=" ".join(["selected"] * 50),
+                pause_after_seconds=0.24,
+            ),
+            ScriptScene(
+                scene_id="scene-002",
+                spoken_text=" ".join(["fixed"] * 10),
+                pause_after_seconds=0,
+            ),
+        ],
+    )
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 24
+    engine.config = SimpleNamespace(
+        duration_seconds=24,
+        fps=30,
+        narration_delivery_spec=NarrationDeliverySpec(
+            target_words_per_second=2.301,
+            minimum_words_per_second=2.025,
+            maximum_words_per_second=2.577,
+            target_pause_seconds=0.08,
+            maximum_pause_seconds=0.75,
+        ),
+    )
+
+    aggregate_range = engine._duration_repair_aggregate_word_range(
+        script=script,
+        scene_repair_targets=[
+            {
+                "scene_id": "scene-001",
+                "minimum_word_count": 45,
+                "target_word_count": 50,
+                "maximum_word_count": 60,
+            }
+        ],
+        selected_scene_ids={"scene-001"},
+    )
+
+    assert aggregate_range == (45, 50, 51)
 
 
 def test_duration_acceptance_keeps_an_exact_ceiling_with_an_eighty_five_percent_floor() -> None:

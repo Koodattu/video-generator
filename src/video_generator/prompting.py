@@ -17,7 +17,7 @@ from .task_models import task_output_models
 
 
 PROMPT_SET_VERSION = "2026-07-12.v14"
-MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-14.v28"
+MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-14.v43"
 
 
 SHARED_RULES = """
@@ -41,8 +41,9 @@ When input is insufficient, use a schema-valid conservative value rather than in
 TASK_INSTRUCTIONS: dict[str, str] = {
     "research": """
 Create a compact Research Pack for fiction-inspired ideation. Use only the supplied bounded search
-results and excerpts. Paraphrase useful details; never reproduce distinctive phrasing. Retain source
-metadata and link every finding to real Source IDs. Seek diversity across physical details, setting,
+results and excerpts. Paraphrase useful details; never reproduce distinctive phrasing. Link every
+finding to supplied Source IDs, but do not return queries, source metadata, or any IDs for findings;
+Python owns those fields. Seek diversity across physical details, setting,
 vocabulary, motifs, cultural cautions, and clichés. Do not propose a story, protagonist, plot, or
 script. Do not claim that a search excerpt proves more than it says. Stop with the supplied material;
 you have no permission to browse recursively or issue additional queries.
@@ -164,13 +165,13 @@ When revision_strategy is single-scene-replacement-v1, perform only that bounded
 supplied Findings against the one spoken_text and its adjacent read-only context. Return only the
 complete replacement spoken_text required by the output schema. Do not return an ID, title, pause,
 disposition, diff, explanation, or unchanged surrounding Scene. Preserve facts and satisfy the supplied
-inclusive word-count range; Python owns every other field.
+Findings with a naturally paced minimal edit; Python owns aggregate word fitting and every other field.
 
 When revision_strategy is single-scene-word-fit-v1, return only one complete replacement spoken_text.
 Python selected the Scene and calculated a feasible residual range for the complete Script. Preserve
 meaning, facts, and adjacent continuity; use the broad minimum/maximum range and aim near
 target_word_count. In factual mode, added assertions require direct available_factual_evidence. Never
-pad with filler or return host-owned fields.
+pad with filler or return host-owned fields. Preserve each supplied protected_exact_text verbatim.
 
 When neither revision_strategy nor repair_strategy is supplied, produce one complete revised Narration
 Script after reconciling all three review reports.
@@ -191,20 +192,30 @@ make event-based curiosity payoffs legible.
 """,
     "claim_inventory": """
 When inventory_strategy is single-scene-claim-extraction-v2, inspect only the supplied spoken_text.
-Return only semantic claims with exact_text, evidence_ids, and qualification. Python owns and assigns
-the Scene ID, Claim IDs, ordering across Scenes, coverage notes, and final Claim Inventory. Returning
-an empty claims list is correct when the Scene contains only a constructed presentational setup,
-hypothetical example, viewer direction, or description of what the current illustration shows. Do not
-turn those framing details into claims about an externally observed real-world event.
+Return only semantic claim spans with exact_text and qualification. Do not select Evidence IDs.
+Python owns evidence matching, the Scene ID, Claim IDs, ordering across Scenes, coverage notes, and
+the final Claim Inventory. Returning an empty claims list is correct when the Scene contains only a
+constructed presentational setup, hypothetical example, viewer direction, or description of what the
+current illustration shows. Do not turn those framing details into claims about an externally observed
+real-world event. Leave qualification empty for ordinary factual assertions; use it only to describe
+context needed to interpret the exact words.
 
-Extract every externally verifiable assertion from the approved Narration Script. Preserve the exact
-spoken wording and Scene ID for each claim. Link only Evidence IDs that directly support that exact
-assertion; leave evidence_ids empty when support is missing or only inferential. Do not treat opinions,
-clearly signposted speculation, fictional framing, or explicitly nonliteral comparisons and analogies as
-factual claims. For wording such as "acts like" or "think of it as", inventory only an independently
-asserted factual proposition, not the comparison itself. Do not repair, soften, or omit a factual claim to
-make coverage appear complete. Return Claims in Script and Scene order. The inventory is an audit
-artifact, not narration.
+When coverage_strategy is single-scene-claim-coverage-v1, independently inspect the supplied
+spoken_text after reading existing_claims. Return only externally verifiable claims that those spans
+missed, under missing_claims. Preserve exact wording and do not select Evidence IDs.
+Returning an empty list is correct only when the existing spans cover every factual assertion or the
+Scene contains no factual assertion. Every span must identify one unique atomic proposition and must
+not overlap another returned span or any existing_claims span. Do not repeat an existing exact_text or
+return host-owned IDs.
+
+When neither single-Scene strategy is supplied, extract every externally verifiable assertion from the
+approved Narration Script. Preserve the exact spoken wording and Scene ID for each claim. Link only
+Evidence IDs that directly support that exact assertion; leave evidence_ids empty when support is
+missing or only inferential. Do not treat opinions, clearly signposted speculation, fictional framing,
+or explicitly nonliteral comparisons and analogies as factual claims. For wording such as "acts like"
+or "think of it as", inventory only an independently asserted factual proposition, not the comparison
+itself. Do not repair, soften, or omit a factual claim to make coverage appear complete. Return Claims
+in Script and Scene order. The inventory is an audit artifact, not narration.
 """,
     "duration_repair": """
 When repair_strategy is single-scene-text-v3, edit only the supplied spoken_text and return only its
@@ -219,7 +230,7 @@ When repair_strategy is single-scene-word-fit-v1, return only one complete repla
 Python selected the Scene and calculated a feasible residual range for the complete Script. Preserve
 meaning, facts, and adjacent continuity; use the broad minimum/maximum range and aim near
 target_word_count. In factual mode, added assertions require direct available_factual_evidence. Never
-pad with filler or return host-owned fields.
+pad with filler or return host-owned fields. Preserve each supplied protected_exact_text verbatim.
 
 Perform the single allowed measured Duration Repair. Change only selected_scene_ids, preserving every
 Scene ID, order, narrative purpose, fact, continuity obligation, tone, and payoff. Use measured Scene
@@ -322,38 +333,68 @@ contract is promoted.
 
 
 FACTUAL_RESEARCH_INSTRUCTIONS = """
-Create an auditable Factual Research Pack using only the supplied bounded search results and excerpts.
-Retain source metadata and paraphrase findings conservatively. Create one Evidence Record per claimable
-proposition, with stable Evidence IDs and direct Source ID links. Split compound propositions when one
-source supports only part of them. Record uncertainty, conflicts, time sensitivity, and limitations.
-Never fill a gap from memory, treat a search snippet as stronger than its source text, or issue more
-queries. The later Script may use only claims supported by these Evidence Records.
+Create only candidate Evidence Record content using the supplied bounded search results and excerpts.
+Return one independently claimable proposition per record with direct Source ID links. Do not return
+findings, themes, motifs, setting ideas, queries, source metadata, Evidence IDs, or a finished Research
+Pack; Python owns those fields and final assembly. Paraphrase conservatively, split compound
+propositions, and preserve direction, scope, causality, uncertainty, conflicts, time sensitivity, and
+limitations exactly. Never fill a gap from memory, treat a search snippet as stronger than its source
+text, or issue more queries. Each candidate receives a separate source-entailment review before it can
+be used for authoring. Return at most 12 atomic Evidence records. Set confidence honestly from the
+bounded excerpts; Python, not this synthesis call, decides which confidence levels are admitted.
 """
 
 
 FACTUAL_REVIEW_INSTRUCTIONS = """
-When review_strategy is single-claim-v1, review only the supplied Claim and return only verdict,
-evidence_ids, and rationale. Use not_a_factual_claim only when the exact text is solely a directive,
-question, opinion, or explicitly nonliteral analogy with no independently asserted factual proposition.
-Never use that verdict to excuse an unsupported factual assertion.
+Perform exactly one bounded decision selected by review_strategy. The strategy branches below are
+mutually exclusive; do not perform or return work from any other branch.
 
-Independently verify every inventoried claim against the supplied Evidence Records and their source
-metadata. Use supported only when the exact spoken assertion is directly entailed by cited evidence;
-use needs_qualification when scope, certainty, attribution, or time sensitivity must be narrowed; use
-unsupported when support is absent or contradictory. List any factual assertions in the Script that the
-inventory missed under uncovered_claims. Set passed=true only when every inventoried claim is supported
-and uncovered_claims is empty. Return Claim reviews in the supplied inventory order. Do not rewrite the
-Script or reward plausible but uncited knowledge.
+When review_strategy is single-source-admission-v1, inspect only the supplied search Source. Admit a
+primary authority, accountable institution, or transparent general reference with a substantive
+excerpt. Reject unattributed SEO/content farms, machine-translated aggregations, promotional pages,
+forum posts, and sources whose provenance is too opaque for factual authoring. Return only verdict and
+rationale. Do not review a future claim, repair the Source, or use outside knowledge.
+
+When review_strategy is single-claim-v1, review only the supplied Claim and return only verdict,
+evidence_ids, and rationale. Consider every supplied Evidence Record, and cite only records that
+directly entail the exact words. Use not_a_factual_claim only when the exact text itself explicitly
+signals a short, pure question, viewer direction, hypothetical, personal opinion, or nonliteral analogy
+and contains no independently asserted factual proposition. A description of what many people believe is an
+externally verifiable prevalence claim. An unqualified mechanism, causal statement, comparison, or
+real-world description remains factual even when no evidence is supplied. Never use a qualification
+label or missing evidence to excuse an unsupported assertion.
+
+When review_strategy is single-evidence-source-entailment-v1, compare only candidate_statement with
+linked_sources. Return only verdict and rationale. Use entailed only when the excerpts directly support
+the statement's direction, scope, subject, causality, certainty, and qualifications. Use not_entailed
+for inference, generalization, stronger causality, changed direction, or unsupported synthesis. Do not
+rewrite the candidate or use outside knowledge.
+
+When review_strategy is single-factual-visual-v1 or single-factual-visual-v2, inspect only the supplied
+candidate visual semantics and return only verdict and rationale. unsupported means any depicted
+real-world mechanism, causal relationship, comparison, number, transformation, or outcome is not
+explicitly authorized by one supported_claim or allowed_evidence_record. Camera, color, layout,
+material, and other stylistic choices do not require factual evidence. staging_context supplies subjects
+and settings but is not factual authority; it neither expands nor narrows direct authorization from an
+active supported Claim. When no supported Claim is active, permit only a static, clearly staged
+arrangement; any visible change, mechanism, cause, or outcome is unsupported. For v2, when
+review_requirement.claim_depiction_required is true, use underillustrated when the candidate is factually
+safe but merely repeats a generic anchor instead of visibly conveying at least one active supported
+Claim. A numeric Claim may use matching unlabeled measurement or threshold markers, or a comparison
+directly stated by the Claim; a material state or process is allowed only when the exact Claim asserts it.
+The exact numeral need not appear because written text is forbidden. Use grounded only when all depicted
+semantics are authorized and required Claim coverage is present. Do not infer common knowledge, use
+outside knowledge, repair the candidate, or return an ID or Evidence ID.
 """
 
 
 FACTUAL_NARRATIVE_TASK_INSTRUCTIONS: dict[str, str] = {
     "ideate": """
 Produce exactly candidate_count meaningfully different factual narrative concepts from the Creative
-Brief and Factual Research Pack. Each concept needs a documented focal person, group, place, process,
-or event; a clear driving question; real pressure or uncertainty; an evidence-grounded turn; an ending
-direction; and concrete still-image opportunities. Use Research Finding IDs as provenance anchors and
-name accuracy risks honestly. Do not invent scenes, motives, quotations, chronology, or composite
+Brief and admitted Evidence Records. Each concept needs a documented focal person, group, place,
+process, or event; a clear driving question; real pressure or uncertainty; an evidence-grounded turn;
+an ending direction; and concrete still-image opportunities. Use Evidence IDs as provenance anchors
+and name accuracy risks honestly. Do not invent scenes, motives, quotations, chronology, or composite
 characters. Do not select a winner or write an outline.
 """,
     "select": """
@@ -412,8 +453,11 @@ EXPLAINER_TASK_INSTRUCTIONS: dict[str, str] = {
 Produce exactly candidate_count distinct explainer concepts. Each needs a relatable modern anchor, a
 central question, a precise thesis, an escalating evidence ladder, a human angle, a landing that returns
 to the anchor, and concrete still-image opportunities. For mythbuster format, identify the misconception
-fairly before correcting it and make every correction traceable to supplied Evidence IDs. For general
-explainer format, a misconception is optional. Do not invent evidence, select a winner, or write prose.
+fairly only when the supplied Evidence Records support both its substance and any prevalence wording;
+otherwise frame it as a viewer hypothetical. Make every correction traceable to supplied Evidence IDs.
+The hypothetical must not imply that an uncited proposition is true or false; use a neutral question
+when the evidence supports only the positive explanation. For general explainer format, a misconception
+is optional. Do not invent evidence, select a winner, or write prose.
 """,
     "select": """
 Score every supplied explainer candidate exactly once on the fixed rubric: duration fit, hook strength,
@@ -445,9 +489,11 @@ contrast; do not announce an agenda. Move one logical step per Scene, define unf
 language, and make each evidence step earn the next. For factual content, state no assertion beyond the
 supplied Evidence Records, prioritize Evidence IDs attached to that Outline Scene, and preserve
 uncertainty. For mythbuster format, represent
-the misconception fairly, pivot cleanly, escalate from intuitive to surprising evidence, and return to
-the anchor in the landing. Direct address is useful when it genuinely places the viewer in the idea, not
-as repetitive engagement bait. End the final Scene with pause_after_seconds equal to zero.
+the misconception fairly only when its substance is evidenced; otherwise ask a neutral question and
+pivot to the supported explanation without implying an uncited belief is false. Escalate from intuitive
+to surprising evidence, and return to the anchor in the landing. Direct address is useful when it
+genuinely places the viewer in the idea, not as repetitive engagement bait. End the final Scene with
+pause_after_seconds equal to zero.
 """,
     "review_story": """
 Review the draft's editorial structure only: hook relevance, question clarity, logical progression,
@@ -488,6 +534,13 @@ Define recurring Character Identities once, keep their stable traits locked, and
 across adjacent Shots. Each Shot needs one focal action, readable silhouettes, sparse composition, and
 explicit no-text constraints. Apply the selected style_id and style_description consistently. All images
 are generated by the configured image model; do not describe or request programmatic drawing code.
+When factual_grounding is supplied, treat nonfactual framing as a staged illustration and derive every
+visible mechanism, causal relationship, comparison, quantity, and result only from supported_claims and
+allowed_evidence_records. A Shot with an active supported Claim must use a claim-specific literal
+cognitive anchor; do not default to another generic view of the modern anchor. Exact numerals need not be
+rendered as forbidden written text. A Shot with no active supported Claim must remain a neutral static
+arrangement of supplied subjects and setting. Prefer a simple macroscopic anchor over an invented
+microscopic explanation.
 """,
     "image_prompt_compile": """
 Compile the current Timed Visual Shot into one target-Backend Timed Image Request. Preserve shot_id,
@@ -495,6 +548,9 @@ scene_id, target Backend, dimensions, quality, reference paths, settings, and se
 only the supplied narration span, with the focal subject and action early in the prompt. Use adjacent
 Shots only for identity and state continuity; never import their events. Write prompt and negative_prompt
 entirely in English, repeat identity/style/no-text constraints, and invent no unsupported details.
+When factual_grounding is supplied, do not add a mechanism, causal link, quantity, or outcome absent from
+the supported claims and evidence. A metaphor may clarify composition but must not look like literal
+scientific evidence.
 """,
     "visual_review": """
 Review only the supplied Shot image against its Timed Visual Shot, Style Profile, Character Identities,
@@ -585,14 +641,15 @@ Never pad with filler or return host-owned fields.
 
 When revision_strategy is single-scene-replacement-v1, return only one complete replacement
 spoken_text for the supplied Scene. Python preserves the title, Scene ID, order, pause, and all
-unchanged Scenes. Treat adjacent_context as read-only. Apply only the supplied findings, stay inside
-the stated word envelope, and do not return a disposition or any other host-owned field.
+unchanged Scenes. Treat adjacent_context as read-only. Apply only the supplied findings, keep the edit
+naturally close to the original pacing, and do not return a disposition or any other host-owned field.
 
 When revision_strategy is single-scene-word-fit-v1, return only one complete replacement spoken_text
 for the supplied Scene. Python selected that Scene and calculated a feasible residual range for the
 complete Script. Preserve meaning, facts, and adjacent continuity; use the broad minimum/maximum
 range and aim near target_word_count. In factual mode, added assertions require direct
-available_factual_evidence. Never pad with filler or return host-owned fields.
+available_factual_evidence. Preserve each supplied protected_exact_text verbatim. Never pad with
+filler or return host-owned fields.
 
 When repair_strategy is factual-claim-repair-v1, return only one complete replacement spoken_text
 for the supplied Scene. Every factual assertion must be directly supported by
@@ -600,7 +657,18 @@ allowed_factual_evidence. Remove or narrow the failed wording described in faile
 inventing a bridge claim. If allowed_factual_evidence is empty, remove the factual assertion instead of
 substituting another one. Keep the correction concise and naturally close to the original pacing;
 Python validates and, only when needed, reconciles the complete Script's aggregate word range. Python
-also preserves every identity, timing, ordering, and review field and performs a fresh audit.
+also preserves every identity, timing, ordering, and review field and performs a fresh audit. Preserve
+every protected_exact_text verbatim. Change or remove each failed exact_text; do not rewrite a
+supported neighboring claim or combine separate Evidence Records into a new causal bridge.
+"""
+    if task_id in {"review_story", "review_spoken", "review_constraints"}:
+        instructions += """
+
+When review_strategy is single-finding-resolution-v1, inspect only the supplied original Finding and
+the original/revised spoken_text. Return only resolved and a concise explanation. Set resolved=true
+only when the revised wording actually satisfies that Finding's recommendation without creating the
+same defect elsewhere in the Scene. Do not return a Finding ID, Review Report, new Finding, edit, or
+host-owned field.
 """
     if task_id == "visual_plan":
         instructions += """
@@ -745,7 +813,7 @@ def build_frozen_assets(config: ResolvedRunConfig | None = None) -> dict[str, An
     }
     assets: dict[str, Any] = {
         "prompt_set_version": prompt_set_version,
-        "workflow_policy_version": 2 if legacy_pack else 13,
+        "workflow_policy_version": 2 if legacy_pack else 26,
         "prompts": prompts,
         "image_targets": TARGET_IMAGE_GUIDANCE,
         "schemas": schemas,
@@ -760,9 +828,20 @@ def build_frozen_assets(config: ResolvedRunConfig | None = None) -> dict[str, An
             "pricing_snapshot": config.pricing_snapshot,
             "task_bindings": dict(sorted(config.task_bindings.items())),
             "backend_descriptors": {
-                backend_id: BACKEND_DESCRIPTORS[backend_id].model_dump(mode="json")
+                backend_id: canonical_backend_descriptor_payload(
+                    BACKEND_DESCRIPTORS[backend_id].model_dump(mode="json")
+                )
                 for backend_id in backend_ids
             },
             "pricing_catalog": frozen_pricing_catalog(),
         }
     return assets
+
+
+def canonical_backend_descriptor_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    canonical = dict(payload)
+    for field_name in ("protocols", "languages", "allowed_usage_purposes"):
+        values = canonical.get(field_name)
+        if isinstance(values, (list, set, tuple)):
+            canonical[field_name] = sorted(values)
+    return canonical

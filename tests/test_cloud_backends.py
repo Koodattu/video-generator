@@ -108,6 +108,7 @@ def test_openai_search_requests_provider_source_details() -> None:
         "web_search_call.action.sources"
     ]
     assert http.requests[0]["json_body"]["model"] == "gpt-5.6-terra"
+    assert http.requests[0]["json_body"]["tool_choice"] == "required"
 
 
 def test_openai_rejects_non_completed_response(tmp_path: Path) -> None:
@@ -246,6 +247,8 @@ def test_gemini_search_rejects_multiple_billable_queries() -> None:
             SearchRequest(query="winter detail", max_results=2, language=OutputLanguage.ENGLISH)
         )
 
+    assert http.requests[0]["json_body"]["generation_config"]["tool_choice"] == "any"
+
     assert caught.value.kind is ErrorKind.INVALID_OUTPUT
 
 
@@ -257,8 +260,10 @@ def test_curated_profiles_use_current_backends() -> None:
     assert PROFILES["local"]["script_draft"] == "local:llama-server"
     assert PROFILES["local"]["search"] == "ddgs:duckduckgo"
     assert BACKEND_DESCRIPTORS["openai:web"].model_id == "gpt-5.6-terra"
+    assert BACKEND_DESCRIPTORS["openai:web"].revision.endswith("required-search-tool")
     assert BACKEND_DESCRIPTORS["openai:gpt-5.4-mini"].model_id == "gpt-5.4-mini-2026-03-17"
     assert BACKEND_DESCRIPTORS["gemini:search"].model_id == "gemini-3.5-flash"
+    assert BACKEND_DESCRIPTORS["gemini:search"].revision.endswith("any-search-tool")
 
 
 def test_gemini_image_uses_current_jpeg_response_format(

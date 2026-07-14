@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from video_generator.cli import build_parser
+from copy import deepcopy
+
+from video_generator.cli import _earliest_frozen_impact, build_parser
+from video_generator.prompting import build_frozen_assets
 
 
 def test_generate_is_end_to_end_by_default() -> None:
@@ -40,3 +43,28 @@ def test_models_download_selects_a_curated_candidate() -> None:
 
     assert args.candidate == "qwen3.6-27b-q4-mtp"
     assert args.dry_run
+
+
+def test_backend_descriptor_set_order_does_not_invalidate_rerun(resolved_config) -> None:
+    old = build_frozen_assets(resolved_config)
+    new = deepcopy(old)
+    descriptors = new["profile"]["backend_descriptors"]
+    backend_id = next(
+        candidate
+        for candidate, descriptor in descriptors.items()
+        if len(descriptor["languages"]) > 1
+    )
+    descriptors[backend_id]["languages"].reverse()
+
+    assert _earliest_frozen_impact(old, new, resolved_config) is None
+
+
+def test_frozen_backend_descriptor_sets_are_sorted(resolved_config) -> None:
+    assets = build_frozen_assets(resolved_config)
+
+    for descriptor in assets["profile"]["backend_descriptors"].values():
+        assert descriptor["protocols"] == sorted(descriptor["protocols"])
+        assert descriptor["languages"] == sorted(descriptor["languages"])
+        assert descriptor["allowed_usage_purposes"] == sorted(
+            descriptor["allowed_usage_purposes"]
+        )
