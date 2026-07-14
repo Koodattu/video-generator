@@ -64,7 +64,8 @@ def _llama_grammar_schema(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
     result = {key: _llama_grammar_schema(item) for key, item in value.items()}
-    result.pop("maxLength", None)
+    for unsupported_keyword in ("maxItems", "maxLength", "minItems", "pattern"):
+        result.pop(unsupported_keyword, None)
     if result.get("type") == "number":
         for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
             result.pop(key, None)
@@ -152,9 +153,16 @@ class LlamaServerWorker:
             }
         )
         try:
-            content = response["choices"][0]["message"]["content"]
+            choice = response["choices"][0]
+            content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ValueError("llama-server response did not contain assistant content") from exc
+        finish_reason = str(choice.get("finish_reason") or "")
+        if finish_reason != "stop":
+            raise ValueError(
+                "llama-server response did not finish normally: "
+                + (finish_reason or "missing finish_reason")
+            )
         if not isinstance(content, str):
             raise ValueError("llama-server assistant content was not text")
         content = re.sub(r"^.*?</think>\s*", "", content, flags=re.DOTALL)
@@ -165,6 +173,7 @@ class LlamaServerWorker:
         return {
             "data": data,
             "provider_request_id": str(response.get("id") or ""),
+            "finish_reason": finish_reason,
             "runtime_revision": os.environ.get("VIDEO_GENERATOR_RUNTIME_REVISION", ""),
             "model_revision": os.environ.get("VIDEO_GENERATOR_MODEL_REVISION", ""),
             "model_id": os.environ.get("VIDEO_GENERATOR_MODEL_ID", ""),

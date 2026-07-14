@@ -15,8 +15,14 @@ from video_generator.errors import BackendError
 from video_generator.workflow import WorkflowEngine
 
 
-@pytest.mark.parametrize("count", [6, 14])
-def test_script_word_range_rejects_under_and_over_length_scripts(count: int) -> None:
+@pytest.mark.parametrize(
+    ("count", "expected_target"),
+    [(6, 8), (14, 12)],
+)
+def test_script_word_range_rejects_under_and_over_length_scripts(
+    count: int,
+    expected_target: int,
+) -> None:
     script = NarrationScript(
         title="Fixture",
         scenes=[
@@ -28,12 +34,21 @@ def test_script_word_range_rejects_under_and_over_length_scripts(count: int) -> 
         ],
     )
 
-    with pytest.raises(BackendError, match=f"has {count} words.*8-12"):
+    with pytest.raises(BackendError, match=f"has {count} words.*8-12") as caught:
         WorkflowEngine._validate_script_word_range(
             script,
             minimum_words=8,
             maximum_words=12,
         )
+
+    assert caught.value.details == {
+        "actual_word_count": count,
+        "minimum_word_count": 8,
+        "maximum_word_count": 12,
+        "target_word_count": expected_target,
+        "word_delta": expected_target - count,
+        "count_method": "whitespace-separated words across every spoken_text field",
+    }
 
 
 def test_script_word_range_accepts_inclusive_bounds() -> None:
@@ -109,3 +124,117 @@ def test_script_word_plan_minimum_matches_duration_acceptance(
         (scene["minimum_sentence_count"], scene["maximum_sentence_count"])
         for scene in plan["scene_word_targets"]
     } == {expected_sentence_bounds}
+    assert sum(
+        int(scene["minimum_word_count"])
+        for scene in plan["scene_word_targets"]
+    ) == plan["minimum_total_word_count"]
+    assert sum(
+        int(scene["target_word_count"])
+        for scene in plan["scene_word_targets"]
+    ) == plan["target_total_word_count"]
+    assert sum(
+        int(scene["maximum_word_count"])
+        for scene in plan["scene_word_targets"]
+    ) == plan["maximum_total_word_count"]
+    assert all(
+        int(scene["minimum_word_count"])
+        <= int(scene["target_word_count"])
+        <= int(scene["maximum_word_count"])
+        for scene in plan["scene_word_targets"]
+    )
+
+
+def test_policy_v3_local_draft_leaves_room_for_measured_audio_repair() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 3
+    engine.config = SimpleNamespace(
+        output_language=OutputLanguage.ENGLISH,
+        duration_seconds=32,
+        task_bindings={"script_draft": "local:fixture"},
+        narration_delivery_spec=SimpleNamespace(target_words_per_second=2.193),
+    )
+    outline = StoryOutline(
+        title="Fixture",
+        concept_summary="A short local story.",
+        scenes=[
+            OutlineScene(
+                scene_id=f"scene-{index:03d}",
+                narrative_purpose="Advance the story.",
+                change="The situation changes.",
+                emotional_beat="Curiosity",
+                visual_opportunity="A clear action.",
+                provisional_seconds=8,
+            )
+            for index in range(1, 5)
+        ],
+    )
+
+    plan = engine._script_word_plan(outline)
+
+    assert plan["minimum_total_word_count"] == 53
+    assert plan["target_total_word_count"] == 67
+    assert plan["maximum_total_word_count"] == 70
+
+
+def test_policy_v10_local_draft_defers_more_duration_fit_to_measured_audio() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 10
+    engine.config = SimpleNamespace(
+        output_language=OutputLanguage.ENGLISH,
+        duration_seconds=32,
+        task_bindings={"script_draft": "local:fixture"},
+        narration_delivery_spec=SimpleNamespace(target_words_per_second=2.193),
+    )
+    outline = StoryOutline(
+        title="Fixture",
+        concept_summary="A short local story.",
+        scenes=[
+            OutlineScene(
+                scene_id=f"scene-{index:03d}",
+                narrative_purpose="Advance the story.",
+                change="The situation changes.",
+                emotional_beat="Curiosity",
+                visual_opportunity="A clear action.",
+                provisional_seconds=8,
+            )
+            for index in range(1, 5)
+        ],
+    )
+
+    plan = engine._script_word_plan(outline)
+
+    assert plan["minimum_total_word_count"] == 46
+    assert plan["target_total_word_count"] == 67
+    assert plan["maximum_total_word_count"] == 70
+
+
+def test_policy_v11_local_draft_restores_strict_aggregate_envelope() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 11
+    engine.config = SimpleNamespace(
+        output_language=OutputLanguage.ENGLISH,
+        duration_seconds=32,
+        task_bindings={"script_draft": "local:fixture"},
+        narration_delivery_spec=SimpleNamespace(target_words_per_second=2.193),
+    )
+    outline = StoryOutline(
+        title="Fixture",
+        concept_summary="A short local story.",
+        scenes=[
+            OutlineScene(
+                scene_id=f"scene-{index:03d}",
+                narrative_purpose="Advance the story.",
+                change="The situation changes.",
+                emotional_beat="Curiosity",
+                visual_opportunity="A clear action.",
+                provisional_seconds=8,
+            )
+            for index in range(1, 5)
+        ],
+    )
+
+    plan = engine._script_word_plan(outline)
+
+    assert plan["minimum_total_word_count"] == 53
+    assert plan["target_total_word_count"] == 67
+    assert plan["maximum_total_word_count"] == 70

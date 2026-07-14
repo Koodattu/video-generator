@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Literal, Sequence
 
 from langdetect import DetectorFactory, LangDetectException, detect
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -25,6 +25,7 @@ from .contracts import (
     ExplainerSelectionReport,
     FailurePolicy,
     FactualResearchPack,
+    FactualClaimReview,
     FactualRevisedScript,
     FactualReviewReport,
     ImageAsset,
@@ -43,9 +44,12 @@ from .contracts import (
     ResearchPack,
     ResearchSource,
     ReviewReport,
+    RevisionDisposition,
     RevisedScript,
     SearchRequest,
     SelectionReport,
+    SceneClaimExtraction,
+    ScriptClaim,
     SpeechAsset,
     SpeechRequest,
     StoryOutline,
@@ -63,6 +67,7 @@ from .errors import BackendError, ErrorKind, MediaError, VideoGeneratorError
 from .executor import StructuredExecution, TaskExecutor, result_usage
 from .media import (
     AudioProbe,
+    CAPTION_RECONCILIATION_REVISION,
     MediaTools,
     adjust_audio_tempo,
     build_timeline,
@@ -97,7 +102,7 @@ from .util import (
 
 
 INTERNAL_REVISION = "media-workflow-v9"
-MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v10"
+MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v26"
 LEGACY_INTERNAL_REVISION = "media-workflow-v8"
 MAX_AUTHORED_SCENE_PAUSE_SECONDS = 0.75
 DetectorFactory.seed = 0
@@ -148,6 +153,74 @@ class AlignedSceneWords(WorkflowModel):
 class ExpandedSceneText(WorkflowModel):
     scene_id: str
     spoken_text: str = Field(min_length=1, max_length=10000)
+
+
+class ReplacementText(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    spoken_text: str = Field(min_length=1, max_length=10000)
+
+
+class VisualStyleContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    description: str = Field(min_length=1, max_length=4000)
+    palette: list[str] = Field(min_length=1, max_length=20)
+    line_style: str = Field(min_length=1, max_length=1000)
+    background: str = Field(min_length=1, max_length=1000)
+    must_avoid: list[str] = Field(min_length=1, max_length=30)
+
+
+class VisualCharacterContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    signature_traits: list[str] = Field(min_length=1, max_length=30)
+    color_anchors: list[str] = Field(default_factory=list, max_length=20)
+    recurring_props: list[str] = Field(default_factory=list, max_length=20)
+    body_form: str = Field(min_length=1, max_length=1000)
+    proportions: list[str] = Field(min_length=1, max_length=20)
+    face_and_markings: list[str] = Field(min_length=1, max_length=20)
+    wardrobe: list[str] = Field(default_factory=list, max_length=20)
+    identity_constraints: list[str] = Field(min_length=1, max_length=30)
+
+
+class VisualFoundation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    style: VisualStyleContent
+    characters: list[VisualCharacterContent] = Field(default_factory=list, max_length=20)
+
+
+class VisualBriefContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    story_moment: str = Field(min_length=1, max_length=2000)
+    subjects: list[str] = Field(min_length=1, max_length=20)
+    action: str = Field(min_length=1, max_length=2000)
+    emotion: str = Field(min_length=1, max_length=1000)
+    environment: str = Field(min_length=1, max_length=2000)
+    composition: str = Field(min_length=1, max_length=2000)
+    must_show: list[str] = Field(min_length=1, max_length=30)
+    must_avoid: list[str] = Field(min_length=1, max_length=30)
+    character_ids: list[str] = Field(default_factory=list, max_length=20)
+    continuity_from_previous: list[str] = Field(default_factory=list, max_length=30)
+    state_after_scene: list[str] = Field(default_factory=list, max_length=30)
+    identity_requirements: list[str] = Field(default_factory=list, max_length=30)
+    persistent_elements: list[str] = Field(default_factory=list, max_length=30)
+
+
+class ImagePromptContent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    prompt: str = Field(min_length=1, max_length=12000)
+    negative_prompt: str = Field(default="", max_length=12000)
+
+
+class ClaimReviewDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    verdict: Literal[
+        "supported",
+        "needs_qualification",
+        "unsupported",
+        "not_a_factual_claim",
+    ]
+    evidence_ids: list[str] = Field(default_factory=list, max_length=20)
+    rationale: str = Field(min_length=1, max_length=4000)
 
 
 class CaptionBundle(WorkflowModel):
@@ -399,20 +472,31 @@ class WorkflowEngine:
             }
             if self.config.content_mode is ContentMode.FACTUAL:
                 draft_input["research_pack"] = research.model_dump(mode="json")
-            draft = self._structured_stage(
-                "script-draft",
-                "script_draft",
-                draft_input,
-                NarrationScript,
-                invariant=lambda value: self._validate_draft(
+            def draft_invariant(value: NarrationScript) -> None:
+                self._validate_draft(
                     value,
                     outline,
                     minimum_words=int(script_word_plan["minimum_total_word_count"]),
                     maximum_words=int(script_word_plan["maximum_total_word_count"]),
                     enforce_pause_limit=self.continuity_policy_enabled,
                     maximum_pause_seconds=self._maximum_authored_pause_seconds(),
-                ),
-            )
+                )
+
+            if self.workflow_policy_version >= 5:
+                draft = self._scene_local_draft_stage(
+                    draft_input,
+                    outline,
+                    research,
+                    invariant=draft_invariant,
+                )
+            else:
+                draft = self._structured_stage(
+                    "script-draft",
+                    "script_draft",
+                    draft_input,
+                    NarrationScript,
+                    invariant=draft_invariant,
+                )
             if self._stop("script-draft"):
                 return None
             story_review = self._review_stage(
@@ -463,7 +547,15 @@ class WorkflowEngine:
                     enforce_pause_limit=self.continuity_policy_enabled,
                     maximum_pause_seconds=self._maximum_authored_pause_seconds(),
                 )
-            if self.config.content_mode is ContentMode.FACTUAL:
+            if self.workflow_policy_version >= 4:
+                revised = self._scene_local_revision_stage(
+                    revision_input,
+                    reviews,
+                    outline,
+                    research,
+                    invariant=revision_invariant,
+                )
+            elif self.config.content_mode is ContentMode.FACTUAL:
                 if not isinstance(research, FactualResearchPack):
                     raise BackendError(
                         "factual Run did not produce an evidence-backed Research Pack",
@@ -488,6 +580,7 @@ class WorkflowEngine:
             narration = self._narration(
                 final_script,
                 factual_research=research if isinstance(research, FactualResearchPack) else None,
+                outline=outline,
             )
             if self._stop("narration"):
                 return None
@@ -547,14 +640,32 @@ class WorkflowEngine:
                             self.config.content_format is ContentFormat.NARRATIVE
                         ),
                     )
-            visual_plan = self._structured_stage(
-                "visual-plan",
-                "visual_plan",
-                visual_plan_input,
-                visual_plan_model,
-                invariant=visual_plan_invariant,
-                max_output_tokens=16000 if timed_visuals else 8000,
-            )
+            if self.workflow_policy_version >= 7:
+                visual_plan = self._split_visual_plan_stage(
+                    visual_plan_input,
+                    outline=outline,
+                    script=narration.script,
+                    schedule=canonical_shot_schedule,
+                    timed_visuals=timed_visuals,
+                    output_model=visual_plan_model,
+                    invariant=visual_plan_invariant,
+                )
+            else:
+                visual_plan = self._structured_stage(
+                    "visual-plan",
+                    "visual_plan",
+                    visual_plan_input,
+                    visual_plan_model,
+                    invariant=visual_plan_invariant,
+                    max_output_tokens=(
+                        7000
+                        if timed_visuals
+                        and self.config.task_bindings["visual_plan"].startswith("local:")
+                        else 16000
+                        if timed_visuals
+                        else 8000
+                    ),
+                )
             if self._stop("visual-plan"):
                 return None
             image_requests = self._image_prompts(visual_plan)
@@ -664,6 +775,7 @@ class WorkflowEngine:
                         "task_id": task_id,
                         "backend_id": backend_id,
                         "language": output_language.value,
+                        "target_image_backend": target_image_backend,
                     }
                 ),
                 "backend_id": backend_id,
@@ -694,6 +806,7 @@ class WorkflowEngine:
             direct.update(
                 enabled=self.config.captions_enabled,
                 animated=self.config.animated_captions,
+                reconciliation_revision=CAPTION_RECONCILIATION_REVISION,
                 visual_shot_mode=self.config.visual_shot_mode.value,
                 alignment_backend=self.config.task_bindings["caption_alignment"],
                 width=self.config.delivery_width,
@@ -791,12 +904,22 @@ class WorkflowEngine:
             task_id,
             input_data,
             ReviewReport,
-            invariant=lambda value: self._validate_review(value, expected_type, task_id),
+            invariant=lambda value: self._validate_review(
+                value,
+                expected_type,
+                task_id,
+                {scene.scene_id for scene in script.scenes},
+            ),
         )
         return report
 
     @staticmethod
-    def _validate_review(report: ReviewReport, expected_type: str, task_id: str) -> None:
+    def _validate_review(
+        report: ReviewReport,
+        expected_type: str,
+        task_id: str,
+        expected_scene_ids: set[str],
+    ) -> None:
         WorkflowEngine._require(
             report.review_type == expected_type,
             (
@@ -808,6 +931,10 @@ class WorkflowEngine:
         for finding in report.findings:
             if not finding.finding_id.startswith(prefix):
                 finding.finding_id = prefix + finding.finding_id
+            WorkflowEngine._require(
+                finding.scene_id in expected_scene_ids,
+                f"{task_id} Finding {finding.finding_id} must identify one supplied Scene ID",
+            )
 
     @staticmethod
     def _require(condition: bool, message: str) -> None:
@@ -890,6 +1017,31 @@ class WorkflowEngine:
         )
 
     def _outline_scene_count_bounds(self) -> tuple[int, int, int]:
+        if (
+            getattr(self, "workflow_policy_version", 2) >= 12
+            and self.config.visual_shot_mode is VisualShotMode.CADENCED
+            and self.config.content_format is not ContentFormat.NARRATIVE
+        ):
+            editorial_target = (
+                5 if self.config.content_format is ContentFormat.MYTHBUSTER else 4
+            )
+            feasible_minimum = max(
+                1,
+                math.ceil(self.config.duration_seconds / self.config.visual_max_seconds),
+            )
+            feasible_maximum = max(
+                feasible_minimum,
+                math.floor(self.config.duration_seconds / self.config.visual_min_seconds) + 1,
+            )
+            target_count = min(
+                max(editorial_target, feasible_minimum),
+                feasible_maximum,
+            )
+            return (
+                target_count,
+                max(feasible_minimum, target_count - 1),
+                min(feasible_maximum, target_count + 1),
+            )
         target_count = max(
             1,
             math.ceil(self.config.duration_seconds / self.config.visual_target_seconds),
@@ -917,7 +1069,14 @@ class WorkflowEngine:
         script_backend_id = getattr(self.config, "task_bindings", {}).get("script_draft", "")
         local_script_backend = script_backend_id.startswith("local:")
         if getattr(self, "workflow_policy_version", 2) >= 3:
-            minimum_duration_fraction = 0.85
+            minimum_duration_fraction = (
+                0.65
+                if local_script_backend
+                and getattr(self, "workflow_policy_version", 2) == 10
+                else 0.75
+                if local_script_backend
+                else 0.85
+            )
             maximum_word_tolerance = 1.0
         else:
             minimum_duration_fraction = (
@@ -969,26 +1128,471 @@ class WorkflowEngine:
                     ),
                 }
             )
+        minimum_total = max(
+            len(outline.scenes) * 8,
+            round(
+                self.config.duration_seconds
+                * minimum_duration_fraction
+                * words_per_second
+            ),
+        )
+        maximum_total = max(
+            len(outline.scenes) * 8,
+            round(
+                self.config.duration_seconds
+                * words_per_second
+                * maximum_word_tolerance
+            ),
+        )
+
+        def proportional_allocation(total: int) -> list[int]:
+            weights = [int(item["target_word_count"]) for item in scene_targets]
+            weight_total = sum(weights)
+            raw = [total * weight / weight_total for weight in weights]
+            result = [math.floor(value) for value in raw]
+            remainder = total - sum(result)
+            order = sorted(
+                range(len(raw)),
+                key=lambda index: (raw[index] - result[index], -index),
+                reverse=True,
+            )
+            for index in order[:remainder]:
+                result[index] += 1
+            return result
+
+        scene_minimums = proportional_allocation(minimum_total)
+        scene_maximums = proportional_allocation(maximum_total)
+        for scene_target, minimum, maximum in zip(
+            scene_targets,
+            scene_minimums,
+            scene_maximums,
+            strict=True,
+        ):
+            scene_target["minimum_word_count"] = minimum
+            scene_target["maximum_word_count"] = maximum
         return {
             "target_total_word_count": target_total,
-            "minimum_total_word_count": max(
-                len(outline.scenes) * 8,
-                round(
-                    self.config.duration_seconds
-                    * minimum_duration_fraction
-                    * words_per_second
-                ),
-            ),
-            "maximum_total_word_count": max(
-                len(outline.scenes) * 8,
-                round(
-                    self.config.duration_seconds
-                    * words_per_second
-                    * maximum_word_tolerance
-                ),
-            ),
+            "minimum_total_word_count": minimum_total,
+            "maximum_total_word_count": maximum_total,
             "scene_word_targets": scene_targets,
         }
+
+    def _scene_local_draft_stage(
+        self,
+        draft_input: dict[str, Any],
+        outline: OutlineLike,
+        research: ResearchPack | FactualResearchPack,
+        *,
+        invariant: Callable[[NarrationScript], None],
+    ) -> NarrationScript:
+        advisory_scene_words = self.workflow_policy_version >= 11
+        aggregate_input = {
+            "draft_strategy": "single-scene-v1",
+            "scene_word_policy": (
+                "advisory-with-host-aggregate-fit-v1"
+                if advisory_scene_words
+                else "strict-per-scene-v1"
+            ),
+            "draft": draft_input,
+        }
+        metadata = self._stage_metadata(
+            stage="script-draft",
+            task_id="script_draft",
+            input_data=aggregate_input,
+        )
+        metadata["config_hash"] = hash_value(
+            {
+                "strategy": (
+                    "single-scene-v2-host-aggregate-fit"
+                    if advisory_scene_words
+                    else "single-scene-v1"
+                ),
+                "backend_id": metadata["backend_id"],
+                "backend_revision": metadata["backend_revision"],
+                "language": self.config.output_language.value,
+            }
+        )
+        metadata["schema_hash"] = hash_value(
+            restricted_json_schema(ReplacementText.model_json_schema(mode="validation"))
+        )
+        reusable = self.store.reusable_record("script-draft", **metadata)
+        if reusable:
+            artifact = self.store.load_artifact(reusable, NarrationScript)
+            invariant(artifact)
+            return artifact
+
+        attempt = self.store.next_attempt("script-draft")
+        self.store.begin_stage("script-draft", attempt=attempt, **metadata)
+        target_by_scene = {
+            str(item["scene_id"]): item
+            for item in draft_input["scene_word_targets"]
+        }
+        outline_context = outline.model_dump(mode="json", exclude={"scenes"})
+        factual_evidence = (
+            [
+                {
+                    "evidence_id": item.evidence_id,
+                    "supported_statement": item.supported_statement,
+                    "confidence": item.confidence,
+                    "limitations": item.limitations,
+                }
+                for item in research.evidence
+            ]
+            if isinstance(research, FactualResearchPack)
+            else []
+        )
+        delivery = getattr(self.config, "narration_delivery_spec", None)
+        authored_pause = min(
+            float(getattr(delivery, "target_pause_seconds", 0.15)),
+            self._maximum_authored_pause_seconds(),
+        )
+        scenes: list[dict[str, Any]] = []
+        usage: list[UsageRecord] = []
+        for index, outline_scene in enumerate(outline.scenes):
+            scene_target = target_by_scene[outline_scene.scene_id]
+            minimum_words = int(scene_target["minimum_word_count"])
+            target_words = int(scene_target["target_word_count"])
+            maximum_words = int(scene_target["maximum_word_count"])
+            preferred_evidence_ids = list(getattr(outline_scene, "evidence_ids", []))
+            available_scene_evidence = (
+                [
+                    evidence
+                    for evidence in factual_evidence
+                    if evidence["evidence_id"] in preferred_evidence_ids
+                ]
+                if advisory_scene_words and isinstance(research, FactualResearchPack)
+                else factual_evidence
+            )
+            item_input = {
+                "draft_strategy": "single-scene-v1",
+                "scene_word_policy": (
+                    "advisory-with-host-aggregate-fit-v1"
+                    if advisory_scene_words
+                    else "strict-per-scene-v1"
+                ),
+                "outline_context": outline_context,
+                "outline_scene": outline_scene.model_dump(mode="json"),
+                "scene_position": index + 1,
+                "scene_count": len(outline.scenes),
+                "adjacent_context": {
+                    "previous_spoken_text": (
+                        str(scenes[-1]["spoken_text"]) if scenes else ""
+                    ),
+                    "next_outline_scene": (
+                        outline.scenes[index + 1].model_dump(mode="json")
+                        if index + 1 < len(outline.scenes)
+                        else None
+                    ),
+                },
+                "brief_constraints": {
+                    "idea_direction": self.brief.idea_direction,
+                    "tone": self.brief.tone,
+                    "themes": self.brief.themes,
+                    "must_include": self.brief.must_include,
+                    "avoid": self.brief.avoid,
+                    "audience": self.config.audience,
+                },
+                "available_factual_evidence": available_scene_evidence,
+                "preferred_evidence_ids": preferred_evidence_ids,
+                "output_language": self.config.output_language.value,
+                "content_mode": self.config.content_mode.value,
+                "content_format": self.config.content_format.value,
+                "narration_delivery": self._delivery_payload(),
+                "minimum_word_count": minimum_words,
+                "target_word_count": target_words,
+                "maximum_word_count": maximum_words,
+                "minimum_sentence_count": int(scene_target["minimum_sentence_count"]),
+                "maximum_sentence_count": int(scene_target["maximum_sentence_count"]),
+                "count_method": "len(spoken_text.split())",
+            }
+
+            def validate_scene_text(
+                replacement: ReplacementText,
+                *,
+                minimum: int = minimum_words,
+                maximum: int = maximum_words,
+            ) -> None:
+                NarrationScript.model_validate(
+                    {
+                        "schema_version": 1,
+                        "title": "Draft Scene",
+                        "scenes": [
+                            {
+                                "scene_id": "scene-001",
+                                "spoken_text": replacement.spoken_text,
+                                "pause_after_seconds": 0,
+                            }
+                        ],
+                    }
+                )
+                actual = len(replacement.spoken_text.split())
+                if not advisory_scene_words and not minimum <= actual <= maximum:
+                    target = minimum if actual < minimum else maximum
+                    raise BackendError(
+                        (
+                            f"Draft Scene has {actual} words; required inclusive range "
+                            f"is {minimum}-{maximum}"
+                        ),
+                        kind=ErrorKind.INVALID_OUTPUT,
+                        details={
+                            "actual_word_count": actual,
+                            "minimum_word_count": minimum,
+                            "maximum_word_count": maximum,
+                            "target_word_count": target,
+                            "word_delta": target - actual,
+                            "count_method": "len(spoken_text.split())",
+                        },
+                    )
+
+            replacement, item_usage = self._structured_item(
+                stage="script-draft",
+                item_id=f"draft-{outline_scene.scene_id}",
+                task_id="script_draft",
+                input_data=item_input,
+                output_model=ReplacementText,
+                invariant=validate_scene_text,
+                max_output_tokens=800,
+                instruction_suffix=((
+                    (
+                        "Return exactly one complete spoken_text for this Scene. Aim near "
+                        f"{target_words} words, using {minimum_words}-{maximum_words} only as "
+                        "planning guidance; Python reconciles the completed Script's aggregate "
+                        "length. Prefer useful natural language over filler or mechanical padding. "
+                    )
+                    if advisory_scene_words
+                    else (
+                        "Return exactly one complete spoken_text for this Scene. "
+                        f"It must contain {minimum_words}-{maximum_words} whitespace-separated "
+                        "words inclusive. "
+                    )
+                ) + "Do not return any host-owned field."),
+            )
+            scenes.append(
+                {
+                    "scene_id": outline_scene.scene_id,
+                    "spoken_text": replacement.spoken_text,
+                    "pause_after_seconds": (
+                        0 if index == len(outline.scenes) - 1 else round(authored_pause, 3)
+                    ),
+                }
+            )
+            usage.extend(item_usage)
+
+        script = NarrationScript(title=outline.title, scenes=scenes)
+        if advisory_scene_words:
+            script, fit_usage = self._fit_scene_local_script_word_range(
+                script=script,
+                outline=outline,
+                research=research,
+                scene_word_targets=draft_input["scene_word_targets"],
+                minimum_total=int(draft_input["minimum_total_word_count"]),
+                target_total=int(draft_input["target_total_word_count"]),
+                maximum_total=int(draft_input["maximum_total_word_count"]),
+            )
+            usage.extend(fit_usage)
+        invariant(script)
+        promoted = self.store.complete_fanout_stage(
+            "script-draft",
+            script,
+            usage=usage,
+        )
+        return NarrationScript.model_validate(promoted)
+
+    def _fit_scene_local_script_word_range(
+        self,
+        *,
+        script: NarrationScript,
+        outline: OutlineLike,
+        research: ResearchPack | FactualResearchPack,
+        scene_word_targets: list[dict[str, Any]],
+        minimum_total: int,
+        target_total: int,
+        maximum_total: int,
+        stage: str = "script-draft",
+        task_id: str = "script_draft",
+        strategy_field: str = "draft_strategy",
+        item_prefix: str = "word-fit",
+    ) -> tuple[NarrationScript, list[UsageRecord]]:
+        def total_words(scenes: Sequence[Any]) -> int:
+            return sum(len(scene.spoken_text.split()) for scene in scenes)
+
+        working_scenes = [scene.model_copy(deep=True) for scene in script.scenes]
+        total = total_words(working_scenes)
+        if minimum_total <= total <= maximum_total:
+            return script, []
+
+        targets = {str(item["scene_id"]): item for item in scene_word_targets}
+        outline_by_id = {scene.scene_id: scene for scene in outline.scenes}
+        factual_evidence = (
+            {
+                evidence.evidence_id: {
+                    "evidence_id": evidence.evidence_id,
+                    "supported_statement": evidence.supported_statement,
+                    "confidence": evidence.confidence,
+                    "limitations": evidence.limitations,
+                }
+                for evidence in research.evidence
+            }
+            if isinstance(research, FactualResearchPack)
+            else {}
+        )
+        usage: list[UsageRecord] = []
+        fitted_scene_ids: set[str] = set()
+        while not minimum_total <= total <= maximum_total:
+            direction = "lengthen" if total < minimum_total else "shorten"
+            candidates = [
+                scene
+                for scene in working_scenes
+                if scene.scene_id not in fitted_scene_ids
+                and (direction == "lengthen" or len(scene.spoken_text.split()) > 1)
+            ]
+            self._require(
+                bool(candidates),
+                "Host aggregate Script fitting exhausted all editable Scenes",
+            )
+
+            def rank(scene: Any) -> tuple[int, int, int]:
+                actual = len(scene.spoken_text.split())
+                target = int(targets[scene.scene_id]["target_word_count"])
+                evidence_backed = int(
+                    bool(getattr(outline_by_id[scene.scene_id], "evidence_ids", []))
+                )
+                if direction == "lengthen":
+                    return evidence_backed, target - actual, actual
+                return 0, actual - target, actual
+
+            selected = max(candidates, key=rank)
+            selected_index = next(
+                index
+                for index, scene in enumerate(working_scenes)
+                if scene.scene_id == selected.scene_id
+            )
+            actual_words = len(selected.spoken_text.split())
+            unchanged_total = total - actual_words
+            if direction == "lengthen":
+                minimum_words = max(actual_words + 1, minimum_total - unchanged_total)
+                maximum_words = max(minimum_words, maximum_total - unchanged_total)
+            else:
+                feasible_maximum = maximum_total - unchanged_total
+                if feasible_maximum < 1:
+                    minimum_words = maximum_words = 1
+                else:
+                    minimum_words = max(1, minimum_total - unchanged_total)
+                    maximum_words = min(actual_words - 1, feasible_maximum)
+                    self._require(
+                        minimum_words <= maximum_words,
+                        "Host aggregate Script fitting calculated an empty replacement range",
+                    )
+            target_words = min(
+                max(target_total - unchanged_total, minimum_words),
+                maximum_words,
+            )
+            outline_scene = outline_by_id[selected.scene_id]
+            preferred_evidence_ids = list(getattr(outline_scene, "evidence_ids", []))
+            item_input = {
+                strategy_field: "single-scene-word-fit-v1",
+                "direction": direction,
+                "spoken_text": selected.spoken_text,
+                "adjacent_context": {
+                    "previous_spoken_text": (
+                        working_scenes[selected_index - 1].spoken_text
+                        if selected_index > 0
+                        else ""
+                    ),
+                    "next_spoken_text": (
+                        working_scenes[selected_index + 1].spoken_text
+                        if selected_index + 1 < len(working_scenes)
+                        else ""
+                    ),
+                },
+                "outline_scene": outline_scene.model_dump(mode="json"),
+                "available_factual_evidence": [
+                    factual_evidence[evidence_id]
+                    for evidence_id in preferred_evidence_ids
+                    if evidence_id in factual_evidence
+                ],
+                "output_language": self.config.output_language.value,
+                "content_mode": self.config.content_mode.value,
+                "minimum_word_count": minimum_words,
+                "target_word_count": target_words,
+                "maximum_word_count": maximum_words,
+                "aggregate_word_counts": {
+                    "current": total,
+                    "minimum": minimum_total,
+                    "target": target_total,
+                    "maximum": maximum_total,
+                },
+                "count_method": "len(spoken_text.split())",
+            }
+
+            def validate_fit(
+                replacement: ReplacementText,
+                *,
+                minimum: int = minimum_words,
+                maximum: int = maximum_words,
+            ) -> None:
+                NarrationScript.model_validate(
+                    {
+                        "schema_version": 1,
+                        "title": "Script word fit",
+                        "scenes": [
+                            {
+                                "scene_id": "scene-001",
+                                "spoken_text": replacement.spoken_text,
+                                "pause_after_seconds": 0,
+                            }
+                        ],
+                    }
+                )
+                actual = len(replacement.spoken_text.split())
+                if not minimum <= actual <= maximum:
+                    boundary = minimum if actual < minimum else maximum
+                    raise BackendError(
+                        (
+                            f"Script word fit has {actual} words; required inclusive range "
+                            f"is {minimum}-{maximum}"
+                        ),
+                        kind=ErrorKind.INVALID_OUTPUT,
+                        details={
+                            "actual_word_count": actual,
+                            "minimum_word_count": minimum,
+                            "maximum_word_count": maximum,
+                            "target_word_count": boundary,
+                            "word_delta": boundary - actual,
+                            "count_method": "len(spoken_text.split())",
+                        },
+                    )
+
+            editing_instruction = (
+                "Expand with useful concrete explanation or a natural connective already supported "
+                "by the supplied Scene context. In factual mode, any added assertion must be directly "
+                "supported by available_factual_evidence. Do not pad with filler."
+                if direction == "lengthen"
+                else "Use a deletion-first edit that preserves the Scene's essential meaning and facts."
+            )
+            replacement, item_usage = self._structured_item(
+                stage=stage,
+                item_id=f"{item_prefix}-{selected.scene_id}",
+                task_id=task_id,
+                input_data=item_input,
+                output_model=ReplacementText,
+                invariant=validate_fit,
+                max_output_tokens=800,
+                instruction_suffix=(
+                    "Return only one complete replacement spoken_text. Python selected this Scene and "
+                    "computed a feasible aggregate residual range; do not return an ID, title, pause, "
+                    f"word count, or explanation. Use {minimum_words}-{maximum_words} words inclusive, "
+                    f"aiming near {target_words}. {editing_instruction}"
+                ),
+            )
+            working_scenes[selected_index] = selected.model_copy(
+                update={"spoken_text": replacement.spoken_text}
+            )
+            fitted_scene_ids.add(selected.scene_id)
+            usage.extend(item_usage)
+            total = total_words(working_scenes)
+
+        return NarrationScript(title=script.title, scenes=working_scenes), usage
 
     @classmethod
     def _validate_draft(
@@ -1044,12 +1648,21 @@ class WorkflowEngine:
     ) -> None:
         actual = sum(len(scene.spoken_text.split()) for scene in script.scenes)
         if not minimum_words <= actual <= maximum_words:
+            target_words = minimum_words if actual < minimum_words else maximum_words
             raise BackendError(
                 (
                     f"Narration Script has {actual} words; required inclusive range is "
                     f"{minimum_words}-{maximum_words}"
                 ),
                 kind=ErrorKind.INVALID_OUTPUT,
+                details={
+                    "actual_word_count": actual,
+                    "minimum_word_count": minimum_words,
+                    "maximum_word_count": maximum_words,
+                    "target_word_count": target_words,
+                    "word_delta": target_words - actual,
+                    "count_method": "whitespace-separated words across every spoken_text field",
+                },
             )
 
     def _validate_outline(
@@ -1072,7 +1685,7 @@ class WorkflowEngine:
         _, minimum_count, maximum_count = self._outline_scene_count_bounds()
         self._require(
             minimum_count <= len(outline.scenes) <= maximum_count,
-            f"outline must contain {minimum_count}-{maximum_count} Scenes for the configured visual cadence",
+            f"outline must contain {minimum_count}-{maximum_count} Scenes for the configured editorial cadence",
         )
         for index, scene in enumerate(outline.scenes):
             edge_scene = index in {0, len(outline.scenes) - 1}
@@ -1153,14 +1766,15 @@ class WorkflowEngine:
         )
         incomplete_scenes = [
             scene.scene_id
-            for scene in visual_plan.scenes
-            if not scene.continuity_from_previous
+            for index, scene in enumerate(visual_plan.scenes)
+            if (index > 0 and not scene.continuity_from_previous)
             or not scene.state_after_scene
             or (scene.character_ids and not scene.identity_requirements)
         ]
         WorkflowEngine._require(
             not incomplete_scenes,
-            "Visual Briefs need incoming state, resulting state, and character identity locks: "
+            "Visual Briefs need post-opening incoming state, resulting state, and character identity "
+            "locks: "
             + ", ".join(incomplete_scenes),
         )
 
@@ -1235,6 +1849,239 @@ class WorkflowEngine:
                 action="Increase shot_target_seconds, shorten the Run, or use scene_locked mode.",
             )
         return schedule
+
+    def _split_visual_plan_stage(
+        self,
+        visual_plan_input: dict[str, Any],
+        *,
+        outline: OutlineLike,
+        script: NarrationScript,
+        schedule: list[dict[str, Any]],
+        timed_visuals: bool,
+        output_model: type[VisualPlanLike],
+        invariant: Callable[[Any], None],
+    ) -> VisualPlanLike:
+        aggregate_input = {
+            "visual_strategy": "foundation-and-items-v1",
+            "visual_plan": visual_plan_input,
+        }
+        metadata = self._stage_metadata(
+            stage="visual-plan",
+            task_id="visual_plan",
+            input_data=aggregate_input,
+        )
+        metadata["config_hash"] = hash_value(
+            {
+                "strategy": "foundation-and-items-v1",
+                "backend_id": metadata["backend_id"],
+                "backend_revision": metadata["backend_revision"],
+                "language": self.prompts.output_language(
+                    "visual_plan", self.config.output_language
+                ).value,
+                "style_id": self.config.style,
+                "timed_visuals": timed_visuals,
+            }
+        )
+        metadata["schema_hash"] = hash_value(
+            {
+                "foundation": restricted_json_schema(
+                    VisualFoundation.model_json_schema(mode="validation")
+                ),
+                "visual_content": restricted_json_schema(
+                    VisualBriefContent.model_json_schema(mode="validation")
+                ),
+                "aggregate": restricted_json_schema(
+                    output_model.model_json_schema(mode="validation")
+                ),
+            }
+        )
+        reusable = self.store.reusable_record("visual-plan", **metadata)
+        if reusable:
+            artifact = self.store.load_artifact(reusable, output_model)
+            invariant(artifact)
+            return artifact
+
+        attempt = self.store.next_attempt("visual-plan")
+        self.store.begin_stage("visual-plan", attempt=attempt, **metadata)
+        foundation_input = {
+            "visual_strategy": "foundation-v1",
+            "brief": self.brief.model_dump(mode="json"),
+            "outline": outline.model_dump(mode="json"),
+            "script": script.model_dump(mode="json"),
+            "style_id": self.config.style,
+            "style_description": self.config.style_description,
+            "audience": self.config.audience,
+            "content_mode": self.config.content_mode.value,
+            "content_format": self.config.content_format.value,
+            "delivery": visual_plan_input["delivery"],
+            "visual_count": len(schedule) if timed_visuals else len(script.scenes),
+        }
+
+        def validate_foundation(value: VisualFoundation) -> None:
+            names = [character.name.casefold().strip() for character in value.characters]
+            self._require(
+                len(names) == len(set(names)),
+                "Visual Foundation contains duplicate Character names",
+            )
+            if self.config.content_format is ContentFormat.NARRATIVE:
+                self._require(
+                    bool(value.characters),
+                    "Narrative Visual Foundation requires at least one recurring Character",
+                )
+
+        foundation, foundation_usage = self._structured_item(
+            stage="visual-plan",
+            item_id="foundation",
+            task_id="visual_plan",
+            input_data=foundation_input,
+            output_model=VisualFoundation,
+            invariant=validate_foundation,
+            max_output_tokens=2400,
+            instruction_suffix=(
+                "Return only the reusable style content and complete recurring Character "
+                "identity content requested by the schema. Do not return style_id, Character "
+                "IDs, Shot IDs, Scene IDs, timing, narration excerpts, or visual items."
+            ),
+        )
+        style_data = foundation.style.model_dump(mode="json")
+        style_data["style_id"] = self.config.style
+        style_data["must_avoid"] = list(
+            dict.fromkeys(
+                [
+                    *style_data["must_avoid"],
+                    "written text",
+                    "captions",
+                    "labels",
+                    "logos",
+                    "watermarks",
+                ]
+            )
+        )
+        characters = [
+            {
+                "character_id": f"character-{index:03d}",
+                **character.model_dump(mode="json"),
+            }
+            for index, character in enumerate(foundation.characters, start=1)
+        ]
+        known_character_ids = {item["character_id"] for item in characters}
+        outline_by_id = {scene.scene_id: scene for scene in outline.scenes}
+        script_by_id = {scene.scene_id: scene for scene in script.scenes}
+        targets = (
+            schedule
+            if timed_visuals
+            else [
+                {
+                    "scene_id": scene.scene_id,
+                    "narration_excerpt": scene.spoken_text,
+                }
+                for scene in script.scenes
+            ]
+        )
+        visual_items: list[dict[str, Any]] = []
+        item_usage = list(foundation_usage)
+        for index, target in enumerate(targets):
+            scene_id = str(target["scene_id"])
+            visual_id = str(target.get("shot_id") or scene_id)
+            next_target = targets[index + 1] if index + 1 < len(targets) else None
+            item_input = {
+                "visual_strategy": "single-visual-v1",
+                "visual_target": target,
+                "parent_outline_scene": outline_by_id[scene_id].model_dump(mode="json"),
+                "parent_scene_spoken_text": script_by_id[scene_id].spoken_text,
+                "previous_visual": visual_items[-1] if visual_items else None,
+                "next_visual_target": next_target,
+                "style_profile": style_data,
+                "character_identities": characters,
+                "brief_constraints": {
+                    "tone": self.brief.tone,
+                    "must_include": self.brief.must_include,
+                    "avoid": self.brief.avoid,
+                    "audience": self.config.audience,
+                },
+                "content_mode": self.config.content_mode.value,
+                "content_format": self.config.content_format.value,
+                "delivery": visual_plan_input["delivery"],
+                "rule": (
+                    "Depict only visual_target.narration_excerpt. Adjacent inputs are read-only "
+                    "continuity context and must not leak future actions into this image."
+                ),
+            }
+
+            def validate_visual_content(
+                content: VisualBriefContent,
+                *,
+                item_index: int = index,
+                current_visual_id: str = visual_id,
+            ) -> None:
+                unknown = sorted(set(content.character_ids) - known_character_ids)
+                self._require(
+                    not unknown,
+                    f"{current_visual_id} references unknown Character IDs: "
+                    + ", ".join(unknown),
+                )
+                self._require(
+                    not content.character_ids or bool(content.identity_requirements),
+                    f"{current_visual_id} uses a Character without identity requirements",
+                )
+                if (
+                    not timed_visuals
+                    and self.config.content_format is ContentFormat.NARRATIVE
+                ):
+                    self._require(
+                        bool(content.state_after_scene),
+                        f"{current_visual_id} requires a resulting visible state",
+                    )
+                    if item_index > 0:
+                        self._require(
+                            bool(content.continuity_from_previous),
+                            f"{current_visual_id} requires incoming continuity state",
+                        )
+
+            content, usage = self._structured_item(
+                stage="visual-plan",
+                item_id=f"content-{visual_id}",
+                task_id="visual_plan",
+                input_data=item_input,
+                output_model=VisualBriefContent,
+                invariant=validate_visual_content,
+                max_output_tokens=1800,
+                instruction_suffix=(
+                    "Return only the visual content fields requested by the schema for this one "
+                    "image. Do not return a Shot ID, Scene ID, narration excerpt, timestamp, "
+                    "duration, Style Profile, Character definition, or surrounding visual item."
+                ),
+            )
+            content_data = content.model_dump(mode="json")
+            if timed_visuals:
+                visual_items.append({**content_data, **target})
+            else:
+                visual_items.append({"scene_id": scene_id, **content_data})
+            item_usage.extend(usage)
+
+        if timed_visuals:
+            plan_data = {
+                "schema_version": 1,
+                "style_profile": style_data,
+                "characters": characters,
+                "duration_seconds": float(schedule[-1]["end_seconds"]),
+                "shots": visual_items,
+            }
+        else:
+            plan_data = {
+                "schema_version": 1,
+                "style_profile": style_data,
+                "characters": characters,
+                "scenes": visual_items,
+            }
+        plan = output_model.model_validate(plan_data)
+        invariant(plan)
+        promoted = self.store.complete_fanout_stage(
+            "visual-plan",
+            plan,
+            usage=item_usage,
+        )
+        return output_model.model_validate(promoted)
 
     @staticmethod
     def _validate_timed_visual_plan(
@@ -1422,8 +2269,19 @@ class WorkflowEngine:
         input_data: dict[str, Any],
         output_model: type[BaseModel],
         invariant: Callable[[Any], None] | None = None,
+        max_output_tokens: int = 8000,
+        instruction_suffix: str = "",
+        target_image_backend: str | None = None,
     ) -> tuple[Any, list[UsageRecord]]:
-        metadata = self._stage_metadata(stage=stage, task_id=task_id, input_data=input_data)
+        metadata = self._stage_metadata(
+            stage=stage,
+            task_id=task_id,
+            input_data=input_data,
+            target_image_backend=target_image_backend,
+        )
+        metadata["schema_hash"] = hash_value(
+            restricted_json_schema(output_model.model_json_schema(mode="validation"))
+        )
         reusable = self.store.reusable_item(stage, item_id, **metadata)
         if reusable:
             artifact = self.store.load_item_artifact(reusable, output_model)
@@ -1435,7 +2293,10 @@ class WorkflowEngine:
             task_id,
             input_data,
             output_model,
+            max_output_tokens=max_output_tokens,
             invariant=invariant,
+            instruction_suffix=instruction_suffix,
+            target_image_backend=target_image_backend,
         )
         atomic_write_json(workspace.work_dir / "provider-response.json", execution.result.raw_response)
         usage = _usage_list([execution.result.usage])
@@ -1454,7 +2315,30 @@ class WorkflowEngine:
         item_prefix: str,
         script: NarrationScript,
         research: FactualResearchPack,
+        raise_on_failure: bool = True,
+        prior_inventory: ClaimInventory | None = None,
+        prior_review: FactualReviewReport | None = None,
+        changed_scene_ids: set[str] | None = None,
     ) -> tuple[ClaimInventory, FactualReviewReport, list[UsageRecord]]:
+        if self.workflow_policy_version >= 13:
+            return self._factual_audit_by_scene(
+                stage=stage,
+                item_prefix=item_prefix,
+                script=script,
+                research=research,
+                raise_on_failure=raise_on_failure,
+                prior_inventory=prior_inventory,
+                prior_review=prior_review,
+                changed_scene_ids=changed_scene_ids,
+            )
+        if self.workflow_policy_version >= 4:
+            return self._factual_audit_by_claim(
+                stage=stage,
+                item_prefix=item_prefix,
+                script=script,
+                research=research,
+                raise_on_failure=raise_on_failure,
+            )
         evidence_ids = {item.evidence_id for item in research.evidence}
         script_by_id = {scene.scene_id: scene for scene in script.scenes}
 
@@ -1528,7 +2412,7 @@ class WorkflowEngine:
             output_model=FactualReviewReport,
             invariant=validate_review,
         )
-        if not review.passed:
+        if not review.passed and raise_on_failure:
             failed_claims = [
                 claim.claim_id for claim in review.claims if claim.verdict != "supported"
             ]
@@ -1539,6 +2423,468 @@ class WorkflowEngine:
                 action="Revise the Script or improve bounded research evidence before narration.",
             )
         return inventory, review, [*inventory_usage, *review_usage]
+
+    def _factual_audit_by_scene(
+        self,
+        *,
+        stage: str,
+        item_prefix: str,
+        script: NarrationScript,
+        research: FactualResearchPack,
+        raise_on_failure: bool,
+        prior_inventory: ClaimInventory | None,
+        prior_review: FactualReviewReport | None,
+        changed_scene_ids: set[str] | None,
+    ) -> tuple[ClaimInventory, FactualReviewReport, list[UsageRecord]]:
+        evidence_by_id = {item.evidence_id: item for item in research.evidence}
+        script_by_id = {scene.scene_id: scene for scene in script.scenes}
+        self._require(
+            (prior_inventory is None) == (prior_review is None),
+            "Prior factual inventory and review must be supplied together",
+        )
+        if prior_inventory is not None:
+            self._require(
+                changed_scene_ids is not None,
+                "A partial factual re-audit requires explicit changed Scene IDs",
+            )
+        changed = set(script_by_id) if prior_inventory is None else set(changed_scene_ids or set())
+        unknown_changed = sorted(changed - set(script_by_id))
+        self._require(
+            not unknown_changed,
+            "Factual re-audit references unknown Scenes: " + ", ".join(unknown_changed),
+        )
+
+        prior_claims_by_scene: dict[str, list[ScriptClaim]] = {}
+        prior_decisions: dict[str, FactualClaimReview] = {}
+        if prior_inventory is not None and prior_review is not None:
+            prior_decisions = {item.claim_id: item for item in prior_review.claims}
+            self._require(
+                set(prior_decisions) == {item.claim_id for item in prior_inventory.claims},
+                "Prior factual review must cover every prior Claim exactly once",
+            )
+            for claim in prior_inventory.claims:
+                scene = script_by_id.get(claim.scene_id)
+                self._require(
+                    scene is not None,
+                    f"Prior Claim {claim.claim_id} references an unknown Scene",
+                )
+                if claim.scene_id not in changed:
+                    self._require(
+                        claim.exact_text in scene.spoken_text,
+                        f"Unchanged Claim {claim.claim_id} no longer preserves exact Script wording",
+                    )
+                    unknown = sorted(set(claim.evidence_ids) - set(evidence_by_id))
+                    self._require(
+                        not unknown,
+                        f"Prior Claim {claim.claim_id} references unknown Evidence IDs: "
+                        + ", ".join(unknown),
+                    )
+                    decision = prior_decisions[claim.claim_id]
+                    unsupported_citations = sorted(
+                        set(decision.evidence_ids) - set(claim.evidence_ids)
+                    )
+                    self._require(
+                        not unsupported_citations,
+                        f"Prior review for {claim.claim_id} cites Evidence not linked by its Claim: "
+                        + ", ".join(unsupported_citations),
+                    )
+                    if decision.verdict == "supported":
+                        self._require(
+                            bool(decision.evidence_ids),
+                            f"Prior supported Claim {claim.claim_id} has no direct Evidence IDs",
+                        )
+                    if decision.verdict == "not_a_factual_claim":
+                        self._require(
+                            not decision.evidence_ids,
+                            f"Prior non-factual Claim {claim.claim_id} cites Evidence IDs",
+                        )
+                    prior_claims_by_scene.setdefault(claim.scene_id, []).append(claim)
+
+        claims_with_prior: list[tuple[ScriptClaim, FactualClaimReview | None]] = []
+        usage: list[UsageRecord] = []
+        for scene in script.scenes:
+            if prior_inventory is not None and scene.scene_id not in changed:
+                claims_with_prior.extend(
+                    (claim, prior_decisions[claim.claim_id])
+                    for claim in prior_claims_by_scene.get(scene.scene_id, [])
+                )
+                continue
+
+            inventory_input = {
+                "inventory_strategy": "single-scene-claim-extraction-v2",
+                "spoken_text": scene.spoken_text,
+                "research_pack": {
+                    "evidence": [item.model_dump(mode="json") for item in research.evidence]
+                },
+                "output_language": self.config.output_language.value,
+                "content_format": self.config.content_format.value,
+            }
+
+            def validate_extraction(extraction: SceneClaimExtraction) -> None:
+                exact_texts: set[str] = set()
+                for claim in extraction.claims:
+                    self._require(
+                        claim.exact_text in scene.spoken_text,
+                        "Extracted Claim does not preserve exact Scene wording",
+                    )
+                    self._require(
+                        claim.exact_text not in exact_texts,
+                        "Scene Claim extraction contains duplicate exact wording",
+                    )
+                    exact_texts.add(claim.exact_text)
+                    unknown = sorted(set(claim.evidence_ids) - set(evidence_by_id))
+                    self._require(
+                        not unknown,
+                        "Extracted Claim references unknown Evidence IDs: "
+                        + ", ".join(unknown),
+                    )
+
+            extraction, extraction_usage = self._structured_item(
+                stage=stage,
+                item_id=f"{item_prefix}-claim-inventory-{scene.scene_id}",
+                task_id="claim_inventory",
+                input_data=inventory_input,
+                output_model=SceneClaimExtraction,
+                invariant=validate_extraction,
+                max_output_tokens=1200,
+                instruction_suffix=(
+                    "Extract Claims only from the supplied spoken_text. Return only claims with "
+                    "exact_text, evidence_ids, and qualification. An empty claims list is valid. "
+                    "Do not return a Scene ID, Claim ID, coverage note, or narration edit."
+                ),
+            )
+            usage.extend(extraction_usage)
+            claims_with_prior.extend(
+                (
+                    ScriptClaim(
+                        claim_id=f"{scene.scene_id}-claim-{index:03d}",
+                        scene_id=scene.scene_id,
+                        exact_text=claim.exact_text,
+                        evidence_ids=claim.evidence_ids,
+                        qualification=claim.qualification,
+                    ),
+                    None,
+                )
+                for index, claim in enumerate(extraction.claims, start=1)
+            )
+
+        claims = [claim for claim, _ in claims_with_prior]
+        self._require(
+            bool(claims),
+            "Factual Script contains no externally verifiable Claims",
+        )
+        inventory = ClaimInventory(
+            claims=claims,
+            coverage_notes=(
+                "Claims were extracted Scene by Scene; Python assigned stable Claim and Scene IDs."
+            ),
+        )
+        claim_reviews: list[FactualClaimReview] = []
+        for claim, prior_decision in claims_with_prior:
+            if prior_decision is not None:
+                claim_reviews.append(prior_decision.model_copy(update={"claim_id": claim.claim_id}))
+                continue
+            allowed_evidence_ids = set(claim.evidence_ids)
+            allowed_evidence = [
+                evidence_by_id[evidence_id].model_dump(mode="json")
+                for evidence_id in claim.evidence_ids
+            ]
+            review_input = {
+                "review_strategy": "single-claim-v1",
+                "claim": claim.model_dump(mode="json"),
+                "scene_spoken_text": script_by_id[claim.scene_id].spoken_text,
+                "evidence_records": allowed_evidence,
+                "research_pack": {"evidence": allowed_evidence},
+                "output_language": self.config.output_language.value,
+            }
+
+            def validate_decision(decision: ClaimReviewDecision) -> None:
+                unknown = sorted(set(decision.evidence_ids) - allowed_evidence_ids)
+                self._require(
+                    not unknown,
+                    "Factual Claim Review cites Evidence not linked by extraction: "
+                    + ", ".join(unknown),
+                )
+                if decision.verdict == "supported":
+                    self._require(
+                        bool(decision.evidence_ids),
+                        "A supported Claim requires at least one direct Evidence ID",
+                    )
+                if decision.verdict == "not_a_factual_claim":
+                    self._require(
+                        not decision.evidence_ids,
+                        "A non-factual Claim classification must not cite Evidence IDs",
+                    )
+
+            decision, decision_usage = self._structured_item(
+                stage=stage,
+                item_id=f"{item_prefix}-factual-review-{claim.claim_id}",
+                task_id="factual_review",
+                input_data=review_input,
+                output_model=ClaimReviewDecision,
+                invariant=validate_decision,
+                max_output_tokens=800,
+                instruction_suffix=(
+                    "Review exactly the one supplied Claim against only evidence_records. Return "
+                    "only verdict, evidence_ids, and rationale. Use not_a_factual_claim only for "
+                    "text with no independently asserted factual proposition."
+                ),
+            )
+            usage.extend(decision_usage)
+            claim_reviews.append(
+                FactualClaimReview(
+                    claim_id=claim.claim_id,
+                    verdict=decision.verdict,
+                    evidence_ids=decision.evidence_ids,
+                    rationale=decision.rationale,
+                )
+            )
+
+        accepted_verdicts = {"supported", "not_a_factual_claim"}
+        passed = all(item.verdict in accepted_verdicts for item in claim_reviews)
+        review = FactualReviewReport(
+            passed=passed,
+            claims=claim_reviews,
+            uncovered_claims=[],
+            summary=(
+                "Every extracted Claim passed its bounded individual review."
+                if passed
+                else "One or more extracted Claims require revision or evidence."
+            ),
+        )
+        if not passed and raise_on_failure:
+            failed_claims = [
+                item.claim_id for item in claim_reviews if item.verdict not in accepted_verdicts
+            ]
+            raise BackendError(
+                "factual accuracy gate blocked narration: " + ", ".join(failed_claims),
+                kind=ErrorKind.INVALID_OUTPUT,
+                action="Revise the Script or improve bounded research evidence before narration.",
+            )
+        return inventory, review, usage
+
+    def _factual_audit_by_claim(
+        self,
+        *,
+        stage: str,
+        item_prefix: str,
+        script: NarrationScript,
+        research: FactualResearchPack,
+        raise_on_failure: bool = True,
+    ) -> tuple[ClaimInventory, FactualReviewReport, list[UsageRecord]]:
+        evidence_ids = {item.evidence_id for item in research.evidence}
+        script_by_id = {scene.scene_id: scene for scene in script.scenes}
+
+        def validate_inventory(inventory: ClaimInventory) -> None:
+            for claim in inventory.claims:
+                scene = script_by_id.get(claim.scene_id)
+                self._require(scene is not None, f"Claim {claim.claim_id} references an unknown Scene")
+                self._require(
+                    claim.exact_text in scene.spoken_text,
+                    f"Claim {claim.claim_id} does not preserve exact Script wording",
+                )
+                unknown = sorted(set(claim.evidence_ids) - evidence_ids)
+                self._require(
+                    not unknown,
+                    f"Claim {claim.claim_id} references unknown Evidence IDs: {', '.join(unknown)}",
+                )
+
+        inventory_input = {
+            "script": script.model_dump(mode="json"),
+            "research_pack": research.model_dump(mode="json"),
+            "content_format": self.config.content_format.value,
+            "inventory_strategy": "script-claim-extraction-v1",
+        }
+        inventory, inventory_usage = self._structured_item(
+            stage=stage,
+            item_id=f"{item_prefix}-claim-inventory",
+            task_id="claim_inventory",
+            input_data=inventory_input,
+            output_model=ClaimInventory,
+            invariant=validate_inventory,
+            max_output_tokens=2400,
+        )
+        usage = list(inventory_usage)
+        claim_reviews: list[FactualClaimReview] = []
+        for claim in inventory.claims:
+            review_input = {
+                "review_strategy": "single-claim-v1",
+                "claim": claim.model_dump(mode="json"),
+                "scene_spoken_text": script_by_id[claim.scene_id].spoken_text,
+                "evidence_records": [
+                    item.model_dump(mode="json") for item in research.evidence
+                ],
+                "research_pack": {
+                    "evidence": [
+                        item.model_dump(mode="json") for item in research.evidence
+                    ]
+                },
+                "output_language": self.config.output_language.value,
+            }
+
+            def validate_decision(decision: ClaimReviewDecision) -> None:
+                unknown = sorted(set(decision.evidence_ids) - evidence_ids)
+                self._require(
+                    not unknown,
+                    "Factual Claim Review references unknown Evidence IDs: "
+                    + ", ".join(unknown),
+                )
+                if decision.verdict == "supported":
+                    self._require(
+                        bool(decision.evidence_ids),
+                        "A supported Claim requires at least one direct Evidence ID",
+                    )
+                if decision.verdict == "not_a_factual_claim":
+                    self._require(
+                        not decision.evidence_ids,
+                        "A non-factual Claim classification must not cite Evidence IDs",
+                    )
+
+            decision, decision_usage = self._structured_item(
+                stage=stage,
+                item_id=f"{item_prefix}-factual-review-{claim.claim_id}",
+                task_id="factual_review",
+                input_data=review_input,
+                output_model=ClaimReviewDecision,
+                invariant=validate_decision,
+                max_output_tokens=800,
+                instruction_suffix=(
+                    "Review exactly the one supplied Claim. Return only verdict, evidence_ids, "
+                    "and rationale. Use not_a_factual_claim only for text with no independently "
+                    "asserted factual proposition."
+                ),
+            )
+            usage.extend(decision_usage)
+            claim_reviews.append(
+                FactualClaimReview(
+                    claim_id=claim.claim_id,
+                    verdict=decision.verdict,
+                    evidence_ids=decision.evidence_ids,
+                    rationale=decision.rationale,
+                )
+            )
+        accepted_verdicts = {"supported", "not_a_factual_claim"}
+        passed = all(item.verdict in accepted_verdicts for item in claim_reviews)
+        review = FactualReviewReport(
+            passed=passed,
+            claims=claim_reviews,
+            uncovered_claims=[],
+            summary=(
+                "Every extracted Claim passed its bounded individual review."
+                if passed
+                else "One or more extracted Claims require revision or evidence."
+            ),
+        )
+        if not review.passed and raise_on_failure:
+            failed_claims = [
+                claim.claim_id
+                for claim in review.claims
+                if claim.verdict not in accepted_verdicts
+            ]
+            raise BackendError(
+                "factual accuracy gate blocked narration: " + ", ".join(failed_claims),
+                kind=ErrorKind.INVALID_OUTPUT,
+                action="Revise the Script or improve bounded research evidence before narration.",
+            )
+        return inventory, review, usage
+
+    def _repair_factual_script_once(
+        self,
+        *,
+        stage: str,
+        item_prefix: str,
+        script: NarrationScript,
+        research: FactualResearchPack,
+        inventory: ClaimInventory,
+        review: FactualReviewReport,
+    ) -> tuple[NarrationScript, list[UsageRecord]]:
+        accepted_verdicts = {"supported", "not_a_factual_claim"}
+        claims_by_id = {claim.claim_id: claim for claim in inventory.claims}
+        failures_by_scene: dict[str, list[tuple[Any, FactualClaimReview]]] = {}
+        for decision in review.claims:
+            if decision.verdict in accepted_verdicts:
+                continue
+            claim = claims_by_id.get(decision.claim_id)
+            self._require(
+                claim is not None,
+                f"Factual Review references unknown Claim {decision.claim_id}",
+            )
+            failures_by_scene.setdefault(claim.scene_id, []).append((claim, decision))
+
+        self._require(
+            bool(failures_by_scene),
+            "Factual repair requires at least one failed Claim",
+        )
+        working_scenes = [scene.model_copy(deep=True) for scene in script.scenes]
+        usage: list[UsageRecord] = []
+        for scene in working_scenes:
+            failures = failures_by_scene.get(scene.scene_id)
+            if not failures:
+                continue
+            allowed_evidence_ids = {
+                evidence_id
+                for claim, decision in failures
+                for evidence_id in [*claim.evidence_ids, *decision.evidence_ids]
+            }
+            item_input = {
+                "repair_strategy": "factual-claim-repair-v1",
+                "spoken_text": scene.spoken_text,
+                "failed_claims": [
+                    {
+                        "exact_text": claim.exact_text,
+                        "qualification": claim.qualification,
+                        "verdict": decision.verdict,
+                        "rationale": decision.rationale,
+                        "evidence_ids": decision.evidence_ids,
+                    }
+                    for claim, decision in failures
+                ],
+                "allowed_factual_evidence": [
+                    evidence.model_dump(mode="json")
+                    for evidence in research.evidence
+                    if evidence.evidence_id in allowed_evidence_ids
+                ],
+                "output_language": self.config.output_language.value,
+                "content_format": self.config.content_format.value,
+            }
+
+            def validate_repair(replacement: ReplacementText) -> None:
+                NarrationScript.model_validate(
+                    {
+                        "schema_version": 1,
+                        "title": "Factual scene repair",
+                        "scenes": [
+                            {
+                                "scene_id": "scene-001",
+                                "spoken_text": replacement.spoken_text,
+                                "pause_after_seconds": 0,
+                            }
+                        ],
+                    }
+                )
+
+            replacement, repair_usage = self._structured_item(
+                stage=stage,
+                item_id=f"{item_prefix}-{scene.scene_id}",
+                task_id="script_revision",
+                input_data=item_input,
+                output_model=ReplacementText,
+                invariant=validate_repair,
+                max_output_tokens=800,
+                instruction_suffix=(
+                    "Rewrite only the supplied Scene text so every factual assertion is directly "
+                    "supported by allowed_factual_evidence. Remove or narrow unsupported wording; "
+                    "do not invent a bridge claim. When no evidence is supplied, remove the factual "
+                    "assertion. Preserve the Scene's intent and output language. "
+                    "Keep the correction concise and naturally close to the original pacing; Python "
+                    "will reconcile the completed Script's aggregate length. Return only the single "
+                    "spoken_text field and no host-owned field."
+                ),
+            )
+            scene.spoken_text = replacement.spoken_text
+            usage.extend(repair_usage)
+
+        return NarrationScript(title=script.title, scenes=working_scenes), usage
 
     def _factual_revision_stage(
         self,
@@ -1618,6 +2964,328 @@ class WorkflowEngine:
         )
         return FactualRevisedScript.model_validate(promoted)
 
+    def _scene_local_revision_stage(
+        self,
+        revision_input: dict[str, Any],
+        reviews: Sequence[ReviewReport],
+        outline: OutlineLike,
+        research: ResearchPack | FactualResearchPack,
+        *,
+        invariant: Callable[[RevisedScript], None],
+    ) -> RevisedScript | FactualRevisedScript:
+        draft = NarrationScript.model_validate(revision_input["script"])
+        aggregate_input = {
+            "revision": revision_input,
+            "revision_strategy": "single-scene-replacement-v1",
+        }
+        metadata = self._stage_metadata(
+            stage="script-revision",
+            task_id="script_revision",
+            input_data=aggregate_input,
+        )
+        task_ids = ["script_revision"]
+        if isinstance(research, FactualResearchPack):
+            task_ids.extend(["claim_inventory", "factual_review"])
+        metadata["config_hash"] = hash_value(
+            {
+                "strategy": "single-scene-replacement-v1",
+                "factual_repair_strategy": (
+                    "factual-claim-repair-v2-partial-scene-reaudit"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 13
+                    else "factual-claim-repair-v1"
+                    if isinstance(research, FactualResearchPack)
+                    else None
+                ),
+                "factual_aggregate_fit_strategy": (
+                    "single-scene-word-fit-v1"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 11
+                    else None
+                ),
+                "claim_inventory_strategy": (
+                    "single-scene-claim-extraction-v2"
+                    if isinstance(research, FactualResearchPack)
+                    and self.workflow_policy_version >= 13
+                    else None
+                ),
+                "tasks": {
+                    task_id: {
+                        "backend_id": self.config.task_bindings[task_id],
+                        "backend_revision": self.registry.descriptor(
+                            self.config.task_bindings[task_id]
+                        ).revision,
+                    }
+                    for task_id in task_ids
+                },
+            }
+        )
+        metadata["prompt_version"] = str(
+            self.store.frozen_assets.get("prompt_set_version", "")
+        )
+        schema_payload: dict[str, Any] = {
+            "scene_replacement": restricted_json_schema(
+                ReplacementText.model_json_schema(mode="validation")
+            )
+        }
+        if isinstance(research, FactualResearchPack):
+            schema_payload.update(
+                {
+                    "factual_scene_repair": restricted_json_schema(
+                        ReplacementText.model_json_schema(mode="validation")
+                    ),
+                    "claim_inventory": (
+                        restricted_json_schema(
+                            SceneClaimExtraction.model_json_schema(mode="validation")
+                        )
+                        if self.workflow_policy_version >= 13
+                        else self.prompts.schema("claim_inventory")
+                    ),
+                    "claim_review_decision": restricted_json_schema(
+                        ClaimReviewDecision.model_json_schema(mode="validation")
+                    ),
+                }
+            )
+        metadata["schema_hash"] = hash_value(schema_payload)
+        artifact_model: type[RevisedScript | FactualRevisedScript] = (
+            FactualRevisedScript
+            if isinstance(research, FactualResearchPack)
+            else RevisedScript
+        )
+        reusable = self.store.reusable_record("script-revision", **metadata)
+        if reusable:
+            artifact = self.store.load_artifact(reusable, artifact_model)
+            invariant(artifact)
+            if isinstance(artifact, FactualRevisedScript) and not artifact.factual_review.passed:
+                raise BackendError(
+                    "cached factual accuracy gate did not pass",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                )
+            return artifact
+
+        attempt = self.store.next_attempt("script-revision")
+        self.store.begin_stage("script-revision", attempt=attempt, **metadata)
+        findings_by_scene: dict[str, list[Any]] = {}
+        for review in reviews:
+            for finding in review.findings:
+                if finding.scene_id is None:
+                    raise BackendError(
+                        f"Review Finding {finding.finding_id} has no Scene ID",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                findings_by_scene.setdefault(finding.scene_id, []).append(finding)
+
+        minimum_total = int(revision_input["minimum_total_word_count"])
+        maximum_total = int(revision_input["maximum_total_word_count"])
+        outline_by_id = {scene.scene_id: scene for scene in outline.scenes}
+        working_scenes = [scene.model_copy(deep=True) for scene in draft.scenes]
+        dispositions: list[RevisionDisposition] = []
+        item_usage: list[UsageRecord] = []
+        for index, scene in enumerate(working_scenes):
+            findings = findings_by_scene.get(scene.scene_id, [])
+            if not findings:
+                continue
+            current_total = sum(len(item.spoken_text.split()) for item in working_scenes)
+            original_count = len(scene.spoken_text.split())
+            unchanged_total = current_total - original_count
+            minimum_words = max(1, minimum_total - unchanged_total)
+            maximum_words = max(minimum_words, maximum_total - unchanged_total)
+            maximum_words = min(maximum_words, max(minimum_words, original_count + 8))
+            target_words = min(max(original_count, minimum_words), maximum_words)
+            outline_scene = outline_by_id[scene.scene_id]
+            scene_evidence_ids = set(getattr(outline_scene, "evidence_ids", []))
+            allowed_evidence = []
+            if isinstance(research, FactualResearchPack):
+                allowed_evidence = [
+                    evidence.model_dump(mode="json")
+                    for evidence in research.evidence
+                    if evidence.evidence_id in scene_evidence_ids
+                ]
+            item_input = {
+                "revision_strategy": "single-scene-replacement-v1",
+                "spoken_text": scene.spoken_text,
+                "adjacent_context": {
+                    "previous_spoken_text": (
+                        working_scenes[index - 1].spoken_text if index > 0 else ""
+                    ),
+                    "next_spoken_text": (
+                        working_scenes[index + 1].spoken_text
+                        if index + 1 < len(working_scenes)
+                        else ""
+                    ),
+                },
+                "outline_scene": outline_scene.model_dump(mode="json"),
+                "findings": [
+                    {
+                        "severity": finding.severity,
+                        "evidence": finding.evidence,
+                        "recommendation": finding.recommendation,
+                    }
+                    for finding in findings
+                ],
+                "brief_constraints": {
+                    "tone": self.brief.tone,
+                    "must_include": self.brief.must_include,
+                    "avoid": self.brief.avoid,
+                },
+                "allowed_factual_evidence": allowed_evidence,
+                "output_language": self.config.output_language.value,
+                "content_mode": self.config.content_mode.value,
+                "content_format": self.config.content_format.value,
+                "minimum_word_count": minimum_words,
+                "target_word_count": target_words,
+                "maximum_word_count": maximum_words,
+                "count_method": "len(spoken_text.split())",
+            }
+
+            def validate_replacement(
+                replacement: ReplacementText,
+                *,
+                minimum: int = minimum_words,
+                maximum: int = maximum_words,
+            ) -> None:
+                NarrationScript.model_validate(
+                    {
+                        "schema_version": 1,
+                        "title": "Scene replacement",
+                        "scenes": [
+                            {
+                                "scene_id": "scene-001",
+                                "spoken_text": replacement.spoken_text,
+                                "pause_after_seconds": 0,
+                            }
+                        ],
+                    }
+                )
+                actual = len(replacement.spoken_text.split())
+                if not minimum <= actual <= maximum:
+                    target = minimum if actual < minimum else maximum
+                    raise BackendError(
+                        (
+                            f"Scene replacement has {actual} words; required inclusive range "
+                            f"is {minimum}-{maximum}"
+                        ),
+                        kind=ErrorKind.INVALID_OUTPUT,
+                        details={
+                            "actual_word_count": actual,
+                            "minimum_word_count": minimum,
+                            "maximum_word_count": maximum,
+                            "target_word_count": target,
+                            "word_delta": target - actual,
+                            "count_method": "len(spoken_text.split())",
+                        },
+                    )
+
+            original_text = scene.spoken_text
+            replacement, usage = self._structured_item(
+                stage="script-revision",
+                item_id=f"replacement-{scene.scene_id}",
+                task_id="script_revision",
+                input_data=item_input,
+                output_model=ReplacementText,
+                invariant=validate_replacement,
+                max_output_tokens=1200,
+                instruction_suffix=(
+                    "Return exactly one complete replacement spoken_text for this Scene. "
+                    f"It must contain {minimum_words}-{maximum_words} whitespace-separated "
+                    "words inclusive. Do not return any host-owned field."
+                ),
+            )
+            scene.spoken_text = replacement.spoken_text
+            item_usage.extend(usage)
+            changed = replacement.spoken_text.strip() != original_text.strip()
+            dispositions.extend(
+                RevisionDisposition(
+                    finding_id=finding.finding_id,
+                    disposition="applied" if changed else "rejected",
+                    explanation=(
+                        "Applied through a bounded Scene text replacement."
+                        if changed
+                        else "The bounded replacement returned no textual change."
+                    ),
+                )
+                for finding in findings
+            )
+
+        revision = RevisedScript(
+            script=NarrationScript(title=draft.title, scenes=working_scenes),
+            dispositions=dispositions,
+        )
+        invariant(revision)
+        if isinstance(research, FactualResearchPack):
+            inventory, review, audit_usage = self._factual_audit(
+                stage="script-revision",
+                item_prefix="approved-script",
+                script=revision.script,
+                research=research,
+                raise_on_failure=self.workflow_policy_version < 9,
+            )
+            item_usage.extend(audit_usage)
+            if not review.passed:
+                audited_script = revision.script
+                repaired_script, repair_usage = self._repair_factual_script_once(
+                    stage="script-revision",
+                    item_prefix="factual-repair",
+                    script=revision.script,
+                    research=research,
+                    inventory=inventory,
+                    review=review,
+                )
+                if self.workflow_policy_version >= 11:
+                    repaired_script, fit_usage = self._fit_scene_local_script_word_range(
+                        script=repaired_script,
+                        outline=outline,
+                        research=research,
+                        scene_word_targets=revision_input["scene_word_targets"],
+                        minimum_total=int(revision_input["minimum_total_word_count"]),
+                        target_total=int(revision_input["target_total_word_count"]),
+                        maximum_total=int(revision_input["maximum_total_word_count"]),
+                        stage="script-revision",
+                        task_id="script_revision",
+                        strategy_field="revision_strategy",
+                        item_prefix="factual-aggregate-word-fit",
+                    )
+                    repair_usage.extend(fit_usage)
+                revision = RevisedScript(
+                    script=repaired_script,
+                    dispositions=revision.dispositions,
+                )
+                invariant(revision)
+                changed_scene_ids = {
+                    before.scene_id
+                    for before, after in zip(
+                        audited_script.scenes,
+                        repaired_script.scenes,
+                        strict=True,
+                    )
+                    if before.spoken_text != after.spoken_text
+                }
+                inventory, review, repaired_audit_usage = self._factual_audit(
+                    stage="script-revision",
+                    item_prefix="repaired-script",
+                    script=revision.script,
+                    research=research,
+                    prior_inventory=inventory,
+                    prior_review=review,
+                    changed_scene_ids=changed_scene_ids,
+                )
+                item_usage.extend(repair_usage)
+                item_usage.extend(repaired_audit_usage)
+            artifact: RevisedScript | FactualRevisedScript = FactualRevisedScript(
+                script=revision.script,
+                dispositions=revision.dispositions,
+                claim_inventory=inventory,
+                factual_review=review,
+            )
+        else:
+            artifact = revision
+        promoted = self.store.complete_fanout_stage(
+            "script-revision",
+            artifact,
+            usage=item_usage,
+        )
+        return artifact_model.model_validate(promoted)
+
     def _research(self) -> ResearchPack | FactualResearchPack:
         queries = []
         if not self.config.offline and self.config.research_query_limit:
@@ -1661,9 +3329,14 @@ class WorkflowEngine:
             for query_index, query in enumerate(queries, start=1):
                 if len(sources) >= self.config.research_source_limit:
                     break
+                remaining_slots = self.config.research_source_limit - len(sources)
+                remaining_queries = len(queries) - query_index + 1
                 request = SearchRequest(
                     query=query,
-                    max_results=min(5, self.config.research_source_limit - len(sources)),
+                    max_results=min(
+                        5,
+                        max(1, math.ceil(remaining_slots / remaining_queries)),
+                    ),
                     language=self.config.output_language,
                 )
                 item_id = f"query-{query_index:03d}"
@@ -1773,6 +3446,7 @@ class WorkflowEngine:
         script: NarrationScript,
         *,
         factual_research: FactualResearchPack | None = None,
+        outline: OutlineLike | None = None,
     ) -> NarrationBundle:
         input_data = {
             "script": script.model_dump(mode="json"),
@@ -1809,6 +3483,41 @@ class WorkflowEngine:
                     self.config.duration_seconds,
                 ):
                     bundle = pause_fitted_bundle
+        if (
+            self.workflow_policy_version >= 6
+            and not duration_is_accepted(bundle.timeline, self.config.duration_seconds)
+        ):
+            tempo_items, tempo = self._tempo_fit_narration_items(
+                items,
+                pause_seconds=sum(scene.pause_after_seconds for scene in script.scenes),
+                budget_seconds=self.config.duration_seconds,
+                output_root=aggregate_workspace.work_dir / "tempo-adjusted-initial",
+            )
+            if tempo_items is not None and tempo is not None:
+                tempo_bundle = self._assemble_narration(
+                    script,
+                    tempo_items,
+                    duration_repaired=True,
+                    tempo_adjustment=tempo,
+                )
+                tempo_pause_script = self._fit_pauses_to_budget(
+                    script,
+                    tempo_bundle.timeline,
+                    self.config.duration_seconds,
+                    allow_expansion=False,
+                )
+                if tempo_pause_script is not None:
+                    tempo_bundle = self._assemble_narration(
+                        tempo_pause_script,
+                        tempo_items,
+                        duration_repaired=True,
+                        tempo_adjustment=tempo,
+                    )
+                if duration_is_accepted(
+                    tempo_bundle.timeline,
+                    self.config.duration_seconds,
+                ):
+                    bundle = tempo_bundle
         if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
             target = self.config.duration_seconds * 0.95
             selected = [scene.scene_id for scene in script.scenes]
@@ -1817,22 +3526,73 @@ class WorkflowEngine:
                 target_seconds=target,
                 selected_scene_ids=set(selected),
             )
-            repaired_bundle, llm_repair_usage = self._duration_repair(
+            repaired_revision, llm_repair_usage, scene_repair_targets = self._duration_repair(
                 script=script,
                 measured_timeline=bundle.timeline,
                 target_seconds=target,
                 duration_scale=scale,
                 selected_scene_ids=selected,
+                factual_research=factual_research,
+                outline=outline,
             )
-            repaired = repaired_bundle.script
+            repaired = repaired_revision.script
             if factual_research is not None:
-                _, _, factual_usage = self._factual_audit(
+                inventory, review, factual_usage = self._factual_audit(
                     stage="narration",
                     item_prefix="duration-repaired-script",
                     script=repaired,
                     research=factual_research,
+                    raise_on_failure=self.workflow_policy_version < 9,
                 )
                 usage.extend(factual_usage)
+                if not review.passed:
+                    audited_repaired_script = repaired
+                    repaired, repair_usage = self._repair_factual_script_once(
+                        stage="narration",
+                        item_prefix="duration-factual-repair",
+                        script=repaired,
+                        research=factual_research,
+                        inventory=inventory,
+                        review=review,
+                    )
+                    if self.workflow_policy_version >= 11:
+                        repaired, fit_usage, _ = self._fit_duration_repair_word_range(
+                            script=repaired,
+                            original=script,
+                            scene_repair_targets=scene_repair_targets,
+                            selected_scene_ids=set(selected),
+                            factual_research=factual_research,
+                            outline=outline,
+                            item_prefix="duration-factual-word-fit",
+                        )
+                        repair_usage.extend(fit_usage)
+                    self._validate_duration_revision(
+                        RevisedScript(script=repaired, dispositions=[]),
+                        script,
+                        set(selected),
+                        scene_repair_targets=scene_repair_targets,
+                        enforce_scene_ranges=self.workflow_policy_version < 11,
+                    )
+                    changed_scene_ids = {
+                        before.scene_id
+                        for before, after in zip(
+                            audited_repaired_script.scenes,
+                            repaired.scenes,
+                            strict=True,
+                        )
+                        if before.spoken_text != after.spoken_text
+                    }
+                    _, _, repaired_factual_usage = self._factual_audit(
+                        stage="narration",
+                        item_prefix="duration-repaired-script-recheck",
+                        script=repaired,
+                        research=factual_research,
+                        prior_inventory=inventory,
+                        prior_review=review,
+                        changed_scene_ids=changed_scene_ids,
+                    )
+                    usage.extend(repair_usage)
+                    usage.extend(repaired_factual_usage)
             repair_items, tts_repair_usage = self._synthesize_script(
                 repaired, repair=True, selected_scene_ids=set(selected), existing_items=items
             )
@@ -2097,6 +3857,12 @@ class WorkflowEngine:
         pause_seconds: float,
         budget_seconds: float,
     ) -> float | None:
+        if speech_seconds + pause_seconds > budget_seconds:
+            desired_speech_seconds = budget_seconds * 0.98 - pause_seconds
+            if desired_speech_seconds <= 0:
+                return None
+            tempo = speech_seconds / desired_speech_seconds
+            return tempo if 1.0 < tempo <= 1.15 else None
         desired_speech_seconds = budget_seconds * 0.90 - pause_seconds
         if desired_speech_seconds <= speech_seconds:
             return None
@@ -2182,15 +3948,31 @@ class WorkflowEngine:
         target_seconds: float,
         duration_scale: float,
         selected_scene_ids: list[str],
-    ) -> tuple[RevisedScript, list[UsageRecord]]:
+        factual_research: FactualResearchPack | None = None,
+        outline: OutlineLike | None = None,
+    ) -> tuple[RevisedScript, list[UsageRecord], list[dict[str, int | str]]]:
         task_id = "duration_repair"
         backend_id = self.config.task_bindings[task_id]
         descriptor = self.registry.descriptor(backend_id)
         prompt = self.prompts.get(task_id, language=self.config.output_language)
-        schema_hash = hash_value(
-            restricted_json_schema(ExpandedSceneText.model_json_schema())
-            if duration_scale > 1
-            else self.prompts.schema(task_id)
+        scene_local_repair = self.workflow_policy_version >= 6
+        schema_hash = (
+            hash_value(
+                {
+                    "scene_output": restricted_json_schema(
+                        ReplacementText.model_json_schema(mode="validation")
+                    ),
+                    "aggregate": restricted_json_schema(
+                        RevisedScript.model_json_schema(mode="validation")
+                    ),
+                }
+            )
+            if scene_local_repair
+            else hash_value(
+                restricted_json_schema(ExpandedSceneText.model_json_schema())
+                if duration_scale > 1
+                else self.prompts.schema(task_id)
+            )
         )
         selected = set(selected_scene_ids)
         scene_repair_targets = []
@@ -2199,22 +3981,26 @@ class WorkflowEngine:
                 continue
             original_words = len(scene.spoken_text.split())
             target_words = max(1, round(original_words * duration_scale))
-            word_tolerance = 6 if duration_scale > 1 else 2
-            minimum_words = (
-                max(original_words + 1, target_words - word_tolerance)
-                if duration_scale > 1
-                else max(1, target_words - word_tolerance)
-            )
+            word_tolerance = 2 if scene_local_repair else 6 if duration_scale > 1 else 2
+            if duration_scale > 1:
+                minimum_words = max(original_words + 1, target_words - word_tolerance)
+                maximum_words = max(minimum_words, target_words + word_tolerance)
+            elif scene_local_repair and original_words > 1:
+                maximum_words = min(original_words - 1, target_words + word_tolerance)
+                minimum_words = min(maximum_words, max(1, target_words - word_tolerance))
+            else:
+                minimum_words = max(1, target_words - word_tolerance)
+                maximum_words = target_words + word_tolerance
             scene_repair_targets.append(
                 {
                     "scene_id": scene.scene_id,
                     "original_word_count": original_words,
                     "target_word_count": target_words,
                     "minimum_word_count": minimum_words,
-                    "maximum_word_count": target_words + word_tolerance,
+                    "maximum_word_count": maximum_words,
                     "minimum_word_delta": minimum_words - original_words,
                     "target_word_delta": target_words - original_words,
-                    "maximum_word_delta": target_words + word_tolerance - original_words,
+                    "maximum_word_delta": maximum_words - original_words,
                 }
             )
         item_input = {
@@ -2228,9 +4014,25 @@ class WorkflowEngine:
             "scene_repair_targets": scene_repair_targets,
             "output_language": self.config.output_language.value,
             "repair_strategy": (
-                "per-scene-lengthening-v1" if duration_scale > 1 else "full-script-v1"
+                "per-scene-text-v4-host-aggregate-fit"
+                if scene_local_repair and self.workflow_policy_version >= 11
+                else "per-scene-text-v3"
+                if scene_local_repair
+                else "per-scene-lengthening-v1"
+                if duration_scale > 1
+                else "full-script-v1"
             ),
         }
+        if factual_research is not None:
+            item_input["available_factual_evidence"] = [
+                {
+                    "evidence_id": item.evidence_id,
+                    "supported_statement": item.supported_statement,
+                    "confidence": item.confidence,
+                    "limitations": item.limitations,
+                }
+                for item in factual_research.evidence
+            ]
         item_id = "duration-repair-script"
         input_hash = hash_run_input(item_input)
         config_hash = hash_value(
@@ -2238,6 +4040,7 @@ class WorkflowEngine:
                 "backend": backend_id,
                 "language": self.config.output_language.value,
                 "duration_seconds": self.config.duration_seconds,
+                "strategy": item_input["repair_strategy"],
             }
         )
         reusable = self.store.reusable_item(
@@ -2257,10 +4060,21 @@ class WorkflowEngine:
                 script,
                 selected,
                 scene_repair_targets=scene_repair_targets,
+                enforce_scene_ranges=self.workflow_policy_version < 11,
             )
-            return repaired, reusable.usage
+            return repaired, reusable.usage, scene_repair_targets
         workspace = self.store.workspace("narration", item_id=item_id)
-        if duration_scale > 1:
+        if scene_local_repair:
+            repaired, item_usage, provider_response = self._repair_duration_by_scene(
+                script=script,
+                measured_timeline=measured_timeline,
+                duration_scale=duration_scale,
+                scene_repair_targets=scene_repair_targets,
+                selected_scene_ids=selected,
+                factual_research=factual_research,
+                outline=outline,
+            )
+        elif duration_scale > 1:
             repaired, item_usage, provider_response = self._lengthen_duration_by_scene(
                 script=script,
                 measured_timeline=measured_timeline,
@@ -2295,7 +4109,433 @@ class WorkflowEngine:
             schema_hash=schema_hash,
             usage=item_usage,
         )
-        return RevisedScript.model_validate(promoted), item_usage
+        return RevisedScript.model_validate(promoted), item_usage, scene_repair_targets
+
+    def _repair_duration_by_scene(
+        self,
+        *,
+        script: NarrationScript,
+        measured_timeline: NarrationTimeline,
+        duration_scale: float,
+        scene_repair_targets: list[dict[str, int | str]],
+        selected_scene_ids: set[str],
+        factual_research: FactualResearchPack | None,
+        outline: OutlineLike | None = None,
+    ) -> tuple[RevisedScript, list[UsageRecord], dict[str, Any]]:
+        advisory_scene_words = getattr(self, "workflow_policy_version", 6) >= 11
+        targets = {str(target["scene_id"]): target for target in scene_repair_targets}
+        timeline = {scene.scene_id: scene for scene in measured_timeline.scenes}
+        evidence_by_id = (
+            {
+                item.evidence_id: {
+                    "evidence_id": item.evidence_id,
+                    "supported_statement": item.supported_statement,
+                    "confidence": item.confidence,
+                    "limitations": item.limitations,
+                }
+                for item in factual_research.evidence
+            }
+            if factual_research is not None
+            else {}
+        )
+        outline_by_id = (
+            {scene.scene_id: scene for scene in outline.scenes}
+            if outline is not None
+            else {}
+        )
+        repaired_scenes = []
+        usage: list[UsageRecord] = []
+        response_index: dict[str, Any] = {
+            "repair_strategy": (
+                "per-scene-text-v4-host-aggregate-fit"
+                if advisory_scene_words
+                else "per-scene-text-v3"
+            ),
+            "items": {},
+        }
+        for index, scene in enumerate(script.scenes):
+            if scene.scene_id not in selected_scene_ids:
+                repaired_scenes.append(scene)
+                continue
+            target = targets[scene.scene_id]
+            measured_scene = timeline[scene.scene_id]
+            speech_seconds = measured_scene.speech_end_seconds - measured_scene.start_seconds
+            pause_seconds = measured_scene.end_seconds - measured_scene.speech_end_seconds
+            minimum_words = int(target["minimum_word_count"])
+            target_words = int(target["target_word_count"])
+            maximum_words = int(target["maximum_word_count"])
+            original_words = int(target["original_word_count"])
+            direction = "lengthen" if duration_scale > 1 else "shorten"
+            outline_scene = outline_by_id.get(scene.scene_id)
+            preferred_evidence_ids = list(
+                getattr(outline_scene, "evidence_ids", [])
+            )
+            available_scene_evidence = (
+                [
+                    evidence_by_id[evidence_id]
+                    for evidence_id in preferred_evidence_ids
+                    if evidence_id in evidence_by_id
+                ]
+                if advisory_scene_words and outline is not None
+                else list(evidence_by_id.values())
+            )
+            item_input = {
+                "repair_strategy": "single-scene-text-v3",
+                "scene_word_policy": (
+                    "advisory-with-host-aggregate-fit-v1"
+                    if advisory_scene_words
+                    else "strict-per-scene-v1"
+                ),
+                "direction": direction,
+                "spoken_text": scene.spoken_text,
+                "adjacent_context": {
+                    "previous_spoken_text": (
+                        script.scenes[index - 1].spoken_text if index > 0 else ""
+                    ),
+                    "next_spoken_text": (
+                        script.scenes[index + 1].spoken_text
+                        if index + 1 < len(script.scenes)
+                        else ""
+                    ),
+                },
+                "measured_timing": {
+                    "speech_seconds": speech_seconds,
+                    "pause_seconds": pause_seconds,
+                    "target_seconds": speech_seconds * duration_scale + pause_seconds,
+                    "duration_scale": duration_scale,
+                },
+                "available_factual_evidence": available_scene_evidence,
+                "content_mode": self.config.content_mode.value,
+                "output_language": self.config.output_language.value,
+                "original_word_count": original_words,
+                "minimum_word_count": minimum_words,
+                "target_word_count": target_words,
+                "maximum_word_count": maximum_words,
+                "count_method": "len(spoken_text.split())",
+            }
+
+            def validate_repair_text(
+                replacement: ReplacementText,
+                *,
+                minimum: int = minimum_words,
+                maximum: int = maximum_words,
+            ) -> None:
+                NarrationScript.model_validate(
+                    {
+                        "schema_version": 1,
+                        "title": "Duration Repair Scene",
+                        "scenes": [
+                            {
+                                "scene_id": "scene-001",
+                                "spoken_text": replacement.spoken_text,
+                                "pause_after_seconds": 0,
+                            }
+                        ],
+                    }
+                )
+                actual = len(replacement.spoken_text.split())
+                if not advisory_scene_words and not minimum <= actual <= maximum:
+                    boundary = minimum if actual < minimum else maximum
+                    raise BackendError(
+                        (
+                            f"single-Scene Duration Repair has {actual} words; required "
+                            f"inclusive range is {minimum}-{maximum}"
+                        ),
+                        kind=ErrorKind.INVALID_OUTPUT,
+                        details={
+                            "actual_word_count": actual,
+                            "minimum_word_count": minimum,
+                            "maximum_word_count": maximum,
+                            "target_word_count": boundary,
+                            "word_delta": boundary - actual,
+                            "count_method": "len(spoken_text.split())",
+                        },
+                    )
+
+            if direction == "lengthen" and advisory_scene_words:
+                editing_instruction = (
+                    "Add only useful explanation that belongs in this Scene; the target is guidance, "
+                    "not permission to pad. In factual mode, any added assertion must be directly "
+                    "supported by available_factual_evidence. Returning a naturally shorter Scene is "
+                    "allowed because Python reconciles the complete Script."
+                )
+            elif direction == "lengthen":
+                editing_instruction = (
+                    "Preserve the useful original wording and sentence order, then add only enough "
+                    "complete spoken wording to reach the range. In factual mode, every added assertion "
+                    "must be directly supported by available_factual_evidence; otherwise add only a "
+                    "non-factual connective or clarification already implicit in the original."
+                )
+            else:
+                editing_instruction = (
+                    "Make a deletion-first minimal edit. Preserve the original sentence order and "
+                    "wording, removing only enough nonessential wording to reach the range. Do not "
+                    "introduce or paraphrase any claim."
+                )
+            item_id = f"duration-text-{scene.scene_id}"
+            replacement, item_usage = self._structured_item(
+                stage="narration",
+                item_id=item_id,
+                task_id="duration_repair",
+                input_data=item_input,
+                output_model=ReplacementText,
+                invariant=validate_repair_text,
+                max_output_tokens=800,
+                instruction_suffix=(
+                    (
+                        "Return exactly one complete replacement spoken_text and no host-owned field. "
+                        f"Aim naturally near {target_words} words; {minimum_words}-{maximum_words} is "
+                        "per-Scene planning guidance while Python enforces the aggregate range. "
+                    )
+                    if advisory_scene_words
+                    else (
+                        "Return exactly one complete replacement spoken_text and no host-owned field. "
+                        f"It must contain {minimum_words}-{maximum_words} whitespace-separated words "
+                        f"inclusive, aiming for {target_words}. "
+                    )
+                ) + editing_instruction,
+            )
+            repaired_scenes.append(
+                scene.model_copy(update={"spoken_text": replacement.spoken_text})
+            )
+            usage.extend(item_usage)
+            response_index["items"][scene.scene_id] = {"item_id": item_id}
+
+        revision = RevisedScript(
+            script=NarrationScript(title=script.title, scenes=repaired_scenes),
+            dispositions=[],
+        )
+        if advisory_scene_words:
+            fitted_script, fit_usage, fit_items = self._fit_duration_repair_word_range(
+                script=revision.script,
+                original=script,
+                scene_repair_targets=scene_repair_targets,
+                selected_scene_ids=selected_scene_ids,
+                factual_research=factual_research,
+                outline=outline,
+            )
+            revision = RevisedScript(script=fitted_script, dispositions=[])
+            usage.extend(fit_usage)
+            response_index["word_fit_items"] = fit_items
+        self._validate_duration_revision(
+            revision,
+            script,
+            selected_scene_ids,
+            scene_repair_targets=scene_repair_targets,
+            enforce_scene_ranges=not advisory_scene_words,
+        )
+        return revision, usage, response_index
+
+    def _fit_duration_repair_word_range(
+        self,
+        *,
+        script: NarrationScript,
+        original: NarrationScript,
+        scene_repair_targets: list[dict[str, int | str]],
+        selected_scene_ids: set[str],
+        factual_research: FactualResearchPack | None,
+        outline: OutlineLike | None,
+        item_prefix: str = "duration-word-fit",
+    ) -> tuple[NarrationScript, list[UsageRecord], list[dict[str, str]]]:
+        targets = {str(item["scene_id"]): item for item in scene_repair_targets}
+        minimum_total = sum(int(item["minimum_word_count"]) for item in scene_repair_targets)
+        target_total = sum(int(item["target_word_count"]) for item in scene_repair_targets)
+        maximum_total = sum(int(item["maximum_word_count"]) for item in scene_repair_targets)
+        working_scenes = [scene.model_copy(deep=True) for scene in script.scenes]
+
+        def selected_total() -> int:
+            return sum(
+                len(scene.spoken_text.split())
+                for scene in working_scenes
+                if scene.scene_id in selected_scene_ids
+            )
+
+        total = selected_total()
+        if minimum_total <= total <= maximum_total:
+            return script, [], []
+
+        original_by_id = {scene.scene_id: scene for scene in original.scenes}
+        outline_by_id = (
+            {scene.scene_id: scene for scene in outline.scenes}
+            if outline is not None
+            else {}
+        )
+        evidence_by_id = (
+            {
+                evidence.evidence_id: {
+                    "evidence_id": evidence.evidence_id,
+                    "supported_statement": evidence.supported_statement,
+                    "confidence": evidence.confidence,
+                    "limitations": evidence.limitations,
+                }
+                for evidence in factual_research.evidence
+            }
+            if factual_research is not None
+            else {}
+        )
+        fitted_scene_ids: set[str] = set()
+        usage: list[UsageRecord] = []
+        fit_items: list[dict[str, str]] = []
+        while not minimum_total <= total <= maximum_total:
+            direction = "lengthen" if total < minimum_total else "shorten"
+            candidates = [
+                scene
+                for scene in working_scenes
+                if scene.scene_id in selected_scene_ids
+                and scene.scene_id not in fitted_scene_ids
+                and (direction == "lengthen" or len(scene.spoken_text.split()) > 1)
+            ]
+            self._require(
+                bool(candidates),
+                "Host aggregate Duration Repair fitting exhausted all editable Scenes",
+            )
+
+            def rank(scene: Any) -> tuple[int, int, int]:
+                actual = len(scene.spoken_text.split())
+                desired = int(targets[scene.scene_id]["target_word_count"])
+                evidence_backed = int(
+                    bool(getattr(outline_by_id.get(scene.scene_id), "evidence_ids", []))
+                )
+                if direction == "lengthen":
+                    return evidence_backed, desired - actual, actual
+                return 0, actual - desired, actual
+
+            selected = max(candidates, key=rank)
+            selected_index = next(
+                index
+                for index, scene in enumerate(working_scenes)
+                if scene.scene_id == selected.scene_id
+            )
+            actual_words = len(selected.spoken_text.split())
+            unchanged_total = total - actual_words
+            if direction == "lengthen":
+                minimum_words = max(actual_words + 1, minimum_total - unchanged_total)
+                maximum_words = max(minimum_words, maximum_total - unchanged_total)
+            else:
+                feasible_maximum = maximum_total - unchanged_total
+                if feasible_maximum < 1:
+                    minimum_words = maximum_words = 1
+                else:
+                    minimum_words = max(1, minimum_total - unchanged_total)
+                    maximum_words = min(actual_words - 1, feasible_maximum)
+                    self._require(
+                        minimum_words <= maximum_words,
+                        "Host Duration Repair fitting calculated an empty replacement range",
+                    )
+            target_words = min(
+                max(target_total - unchanged_total, minimum_words),
+                maximum_words,
+            )
+            outline_scene = outline_by_id.get(selected.scene_id)
+            preferred_evidence_ids = list(
+                getattr(outline_scene, "evidence_ids", [])
+            )
+            item_input = {
+                "repair_strategy": "single-scene-word-fit-v1",
+                "direction": direction,
+                "spoken_text": selected.spoken_text,
+                "original_spoken_text": original_by_id[selected.scene_id].spoken_text,
+                "adjacent_context": {
+                    "previous_spoken_text": (
+                        working_scenes[selected_index - 1].spoken_text
+                        if selected_index > 0
+                        else ""
+                    ),
+                    "next_spoken_text": (
+                        working_scenes[selected_index + 1].spoken_text
+                        if selected_index + 1 < len(working_scenes)
+                        else ""
+                    ),
+                },
+                "available_factual_evidence": [
+                    evidence_by_id[evidence_id]
+                    for evidence_id in preferred_evidence_ids
+                    if evidence_id in evidence_by_id
+                ],
+                "content_mode": self.config.content_mode.value,
+                "output_language": self.config.output_language.value,
+                "minimum_word_count": minimum_words,
+                "target_word_count": target_words,
+                "maximum_word_count": maximum_words,
+                "aggregate_word_counts": {
+                    "current": total,
+                    "minimum": minimum_total,
+                    "target": target_total,
+                    "maximum": maximum_total,
+                },
+                "count_method": "len(spoken_text.split())",
+            }
+
+            def validate_fit(
+                replacement: ReplacementText,
+                *,
+                minimum: int = minimum_words,
+                maximum: int = maximum_words,
+            ) -> None:
+                NarrationScript.model_validate(
+                    {
+                        "schema_version": 1,
+                        "title": "Duration word fit",
+                        "scenes": [
+                            {
+                                "scene_id": "scene-001",
+                                "spoken_text": replacement.spoken_text,
+                                "pause_after_seconds": 0,
+                            }
+                        ],
+                    }
+                )
+                actual = len(replacement.spoken_text.split())
+                if not minimum <= actual <= maximum:
+                    boundary = minimum if actual < minimum else maximum
+                    raise BackendError(
+                        (
+                            f"Duration word fit has {actual} words; required inclusive range "
+                            f"is {minimum}-{maximum}"
+                        ),
+                        kind=ErrorKind.INVALID_OUTPUT,
+                        details={
+                            "actual_word_count": actual,
+                            "minimum_word_count": minimum,
+                            "maximum_word_count": maximum,
+                            "target_word_count": boundary,
+                            "word_delta": boundary - actual,
+                            "count_method": "len(spoken_text.split())",
+                        },
+                    )
+
+            editing_instruction = (
+                "Add only useful explanation that belongs in this Scene. In factual mode, every added "
+                "assertion must be directly supported by available_factual_evidence; do not pad with "
+                "filler."
+                if direction == "lengthen"
+                else "Use a deletion-first edit and preserve the Scene's essential meaning and facts."
+            )
+            item_id = f"{item_prefix}-{selected.scene_id}"
+            replacement, item_usage = self._structured_item(
+                stage="narration",
+                item_id=item_id,
+                task_id="duration_repair",
+                input_data=item_input,
+                output_model=ReplacementText,
+                invariant=validate_fit,
+                max_output_tokens=800,
+                instruction_suffix=(
+                    "Return only one complete replacement spoken_text. Python selected this Scene and "
+                    "computed a feasible aggregate residual range; do not return an ID, title, pause, "
+                    f"word count, or explanation. Use {minimum_words}-{maximum_words} words inclusive, "
+                    f"aiming near {target_words}. {editing_instruction}"
+                ),
+            )
+            working_scenes[selected_index] = selected.model_copy(
+                update={"spoken_text": replacement.spoken_text}
+            )
+            fitted_scene_ids.add(selected.scene_id)
+            usage.extend(item_usage)
+            fit_items.append({"scene_id": selected.scene_id, "item_id": item_id})
+            total = selected_total()
+
+        return NarrationScript(title=script.title, scenes=working_scenes), usage, fit_items
 
     def _lengthen_duration_by_scene(
         self,
@@ -2405,6 +4645,7 @@ class WorkflowEngine:
         selected_scene_ids: set[str],
         *,
         scene_repair_targets: list[dict[str, int | str]] | None = None,
+        enforce_scene_ranges: bool = True,
     ) -> None:
         repaired = revision.script
         if [scene.scene_id for scene in repaired.scenes] != [scene.scene_id for scene in original.scenes]:
@@ -2460,7 +4701,9 @@ class WorkflowEngine:
                     f"(target {desired}; {delta})"
                 )
             total_invalid = not total_minimum - 1 <= total_actual <= total_maximum + 1
-            if violations and (total_invalid or severe_scene_error):
+            if violations and (
+                total_invalid or (enforce_scene_ranges and severe_scene_error)
+            ):
                 if total_actual < total_minimum:
                     total_delta = (
                         f"add {total_minimum - total_actual}-{total_maximum - total_actual} words"
@@ -2692,7 +4935,13 @@ class WorkflowEngine:
                 "audio": timeline_scene.audio.model_dump(mode="json"),
             }
             item_hash = hash_run_input(item_input)
-            item_config_hash = hash_value({"backend": backend_id, "language": self.config.output_language.value})
+            item_config_hash = hash_value(
+                {
+                    "backend": backend_id,
+                    "language": self.config.output_language.value,
+                    "reconciliation_revision": CAPTION_RECONCILIATION_REVISION,
+                }
+            )
             reusable_item = self.store.reusable_item(
                 "captions",
                 timeline_scene.scene_id,
@@ -2815,6 +5064,26 @@ class WorkflowEngine:
             input_data=input_data,
             target_image_backend=target_backend_id,
         )
+        if self.workflow_policy_version >= 8:
+            metadata["config_hash"] = hash_value(
+                {
+                    "strategy": "prompt-content-v1",
+                    "compiler_backend": metadata["backend_id"],
+                    "compiler_revision": metadata["backend_revision"],
+                    "target_backend": target_backend_id,
+                    "target_revision": target_descriptor.revision,
+                }
+            )
+            metadata["schema_hash"] = hash_value(
+                {
+                    "prompt_content": restricted_json_schema(
+                        ImagePromptContent.model_json_schema(mode="validation")
+                    ),
+                    "aggregate": restricted_json_schema(
+                        ImageRequestSet.model_json_schema(mode="validation")
+                    ),
+                }
+            )
         reusable = self.store.reusable_record("image-prompt-compile", **metadata)
         if reusable:
             return self.store.load_artifact(reusable, ImageRequestSet)
@@ -2873,6 +5142,8 @@ class WorkflowEngine:
                 "image_quality": "low" if self.config.quality is Quality.DRAFT else "high",
                 "reference_paths": [],
             }
+            if self.workflow_policy_version >= 8:
+                item_input["compiler_strategy"] = "prompt-content-v1"
             if self.continuity_policy_enabled:
                 item_input["continuity_context"] = {
                     "previous_brief": (
@@ -2881,6 +5152,50 @@ class WorkflowEngine:
                     "next_brief": next_brief.model_dump(mode="json") if next_brief else None,
                     "rule": "Context only: depict the current Visual Brief, never an adjacent action.",
                 }
+            if self.workflow_policy_version >= 8:
+                prompt_content, item_usage = self._structured_item(
+                    stage="image-prompt-compile",
+                    item_id=visual_id,
+                    task_id="image_prompt_compile",
+                    input_data=item_input,
+                    output_model=ImagePromptContent,
+                    invariant=self._validate_image_request_language,
+                    max_output_tokens=1600,
+                    instruction_suffix=(
+                        "Return only prompt and negative_prompt for this one image. Python owns "
+                        "the Scene/Shot identity, target Backend, dimensions, quality, seed, "
+                        "reference paths, and generation settings; do not return any of them."
+                    ),
+                    target_image_backend=target_backend_id,
+                )
+                request_data = {
+                    "schema_version": 1,
+                    "scene_id": visual_brief.scene_id,
+                    "target_backend_id": target_backend_id,
+                    "prompt": prompt_content.prompt,
+                    "negative_prompt": prompt_content.negative_prompt,
+                    "width": generation_width,
+                    "height": generation_height,
+                    "quality": item_input["image_quality"],
+                    "reference_paths": item_input["reference_paths"],
+                    "settings": {},
+                }
+                if isinstance(visual_plan, TimedVisualPlan):
+                    request_data["shot_id"] = visual_id
+                image_request = request_model.model_validate(request_data)
+                image_request = self._canonical_image_request(
+                    image_request,
+                    scene_id=visual_brief.scene_id,
+                    shot_id=getattr(visual_brief, "shot_id", None),
+                    target_backend_id=target_backend_id,
+                    width=generation_width,
+                    height=generation_height,
+                    quality=item_input["image_quality"],
+                    reference_paths=item_input["reference_paths"],
+                )
+                requests.append(image_request)
+                usage.extend(item_usage)
+                continue
             item_hash = hash_run_input(item_input)
             item_config_hash = hash_value(
                 {

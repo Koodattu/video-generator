@@ -31,8 +31,9 @@ def test_review_finding_ids_are_canonical_and_unique_across_roles() -> None:
     story = _report("story")
     spoken = _report("spoken")
 
-    WorkflowEngine._validate_review(story, "story", "review_story")
-    WorkflowEngine._validate_review(spoken, "spoken", "review_spoken")
+    scene_ids = {"scene-001", "scene-002"}
+    WorkflowEngine._validate_review(story, "story", "review_story", scene_ids)
+    WorkflowEngine._validate_review(spoken, "spoken", "review_spoken", scene_ids)
 
     assert [finding.finding_id for finding in story.findings] == [
         "story:finding-001",

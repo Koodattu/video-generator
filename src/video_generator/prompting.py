@@ -17,7 +17,7 @@ from .task_models import task_output_models
 
 
 PROMPT_SET_VERSION = "2026-07-12.v14"
-MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-13.v15"
+MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-14.v28"
 
 
 SHARED_RULES = """
@@ -131,6 +131,7 @@ allows. End the final Scene with pause_after_seconds equal to zero.
 Review the draft only for causal coherence, weak turns, generic beats, emotional setup/payoff,
 interchangeable characters, coincidence, and research-copy risk. Quote short exact evidence and
 identify the Scene ID. Findings must be actionable and severity-calibrated. Do not rewrite prose.
+Every Finding must identify exactly one supplied Scene ID.
 Set review_type exactly to "story". Set passed=false for any blocking finding.
 Also check opening pressure, an event-based unanswered question and any planned midpoint renewal or
 payoff, distributed agency, a motivated counterforce, overly neat growth or chronology, useful
@@ -145,7 +146,7 @@ pronunciation risk, number/name handling, and natural use of the selected langua
 must catch translated-English syntax, unnatural cases/clitics/compounds, and awkward loanwords.
 English review must catch stiff written prose and unnatural formality. Identify exact Scene evidence
 and recommendations, but do not rewrite the story or silently change facts. Set review_type exactly
-to "spoken".
+to "spoken". Every Finding must identify exactly one supplied Scene ID.
 Return findings only for defects that warrant a script change; do not emit praise, maintenance
 suggestions, or voice-acting directions.
 """,
@@ -154,13 +155,26 @@ Review hard constraints: Creative Brief inclusions/exclusions, Audience Profile,
 continuity obligations, duration risk, single-language narration, missing setup/payoff, unsupported
 real-world claims, and non-spoken markup. Hard safety or brief violations are blocking. Do not waive a
 rule because the draft is otherwise good, and do not rewrite the draft. Set review_type exactly to
-"constraints".
+"constraints". Every Finding must identify exactly one supplied Scene ID.
 Return findings only for defects that warrant a script change; do not emit praise, maintenance
 suggestions, or voice-acting directions.
 """,
     "script_revision": """
-Produce one complete revised Narration Script after reconciling all three review reports. Resolve
-conflicts in this order: hard safety/evidence constraints, causal coherence, spoken clarity,
+When revision_strategy is single-scene-replacement-v1, perform only that bounded edit. Reconcile the
+supplied Findings against the one spoken_text and its adjacent read-only context. Return only the
+complete replacement spoken_text required by the output schema. Do not return an ID, title, pause,
+disposition, diff, explanation, or unchanged surrounding Scene. Preserve facts and satisfy the supplied
+inclusive word-count range; Python owns every other field.
+
+When revision_strategy is single-scene-word-fit-v1, return only one complete replacement spoken_text.
+Python selected the Scene and calculated a feasible residual range for the complete Script. Preserve
+meaning, facts, and adjacent continuity; use the broad minimum/maximum range and aim near
+target_word_count. In factual mode, added assertions require direct available_factual_evidence. Never
+pad with filler or return host-owned fields.
+
+When neither revision_strategy nor repair_strategy is supplied, produce one complete revised Narration
+Script after reconciling all three review reports.
+Resolve conflicts in this order: hard safety/evidence constraints, causal coherence, spoken clarity,
 Duration Budget, then stylistic preference. Preserve Scene IDs/order and story facts unless a review
 identifies a factual or causal defect. Return one disposition for every material finding; rejection
 requires a concise reason. The input required_finding_ids is exhaustive: return exactly one
@@ -176,13 +190,37 @@ decorative sensory language or an explanation of the theme. Preserve intentional
 make event-based curiosity payoffs legible.
 """,
     "claim_inventory": """
+When inventory_strategy is single-scene-claim-extraction-v2, inspect only the supplied spoken_text.
+Return only semantic claims with exact_text, evidence_ids, and qualification. Python owns and assigns
+the Scene ID, Claim IDs, ordering across Scenes, coverage notes, and final Claim Inventory. Returning
+an empty claims list is correct when the Scene contains only a constructed presentational setup,
+hypothetical example, viewer direction, or description of what the current illustration shows. Do not
+turn those framing details into claims about an externally observed real-world event.
+
 Extract every externally verifiable assertion from the approved Narration Script. Preserve the exact
 spoken wording and Scene ID for each claim. Link only Evidence IDs that directly support that exact
 assertion; leave evidence_ids empty when support is missing or only inferential. Do not treat opinions,
-clearly signposted speculation, or fictional framing as factual claims. Do not repair, soften, or omit a
-claim to make coverage appear complete. The inventory is an audit artifact, not narration.
+clearly signposted speculation, fictional framing, or explicitly nonliteral comparisons and analogies as
+factual claims. For wording such as "acts like" or "think of it as", inventory only an independently
+asserted factual proposition, not the comparison itself. Do not repair, soften, or omit a factual claim to
+make coverage appear complete. Return Claims in Script and Scene order. The inventory is an audit
+artifact, not narration.
 """,
     "duration_repair": """
+When repair_strategy is single-scene-text-v3, edit only the supplied spoken_text and return only its
+complete replacement in the output schema. Do not return a title, Scene ID, pause, disposition,
+timing, word count, explanation, or adjacent text; Python owns and preserves those fields. Treat
+adjacent_context as read-only. In factual mode, additions may assert only what
+available_factual_evidence directly supports and must preserve its qualifications. If the evidence
+does not support another factual detail, use only a non-factual connective or clarification already
+implicit in the original text.
+
+When repair_strategy is single-scene-word-fit-v1, return only one complete replacement spoken_text.
+Python selected the Scene and calculated a feasible residual range for the complete Script. Preserve
+meaning, facts, and adjacent continuity; use the broad minimum/maximum range and aim near
+target_word_count. In factual mode, added assertions require direct available_factual_evidence. Never
+pad with filler or return host-owned fields.
+
 Perform the single allowed measured Duration Repair. Change only selected_scene_ids, preserving every
 Scene ID, order, narrative purpose, fact, continuity obligation, tone, and payoff. Use measured Scene
 durations and duration_scale to shorten or lengthen those passages naturally toward the accepted
@@ -190,18 +228,14 @@ durations and duration_scale to shorten or lengthen those passages naturally tow
 unselected text. When shortening, make a deletion-first minimal edit: retain the original sentence
 order and wording, removing only enough nonessential modifiers, clauses, or complete sentences to
 meet the target. Do not paraphrase or rewrite the passage from scratch. When lengthening, restore
-concrete detail from the input rather than adding filler. A positive minimum_word_delta is an
-explicit requirement to add at least that many whitespace-separated words to that Scene: preserve
-its useful existing text, then insert enough complete, causally relevant spoken sentences. Never
-return an unchanged or shorter Scene when its minimum_word_delta is positive. For every selected Scene, keep
-pause_after_seconds unchanged and meet the supplied
-target_word_count within its inclusive minimum_word_count/maximum_word_count bounds. The validator
-counts words exactly as len(spoken_text.split()): every nonempty whitespace-separated token is one
-word. Count and verify each selected Scene before returning. If correcting an invalid response,
-change the deficient spoken_text by the exact reported add/remove delta; changing only dispositions
-is not a repair. A claimed edit with unchanged word count is not a repair. Return exactly the
-supplied output schema. A whole-script repair returns the full script plus dispositions; a bounded
-single-Scene expansion returns only that Scene ID and its complete expanded spoken_text.
+concrete detail from the input rather than adding filler. When scene_word_policy is
+advisory-with-host-aggregate-fit-v1, aim naturally near target_word_count and treat the per-Scene
+minimum/maximum as planning guidance; Python enforces and, if needed, fits the aggregate Script range.
+Do not add weak wording merely to hit an individual count. Otherwise, a positive minimum_word_delta is
+an explicit requirement and every selected Scene must meet its inclusive range. Keep every
+pause_after_seconds unchanged. Return exactly the supplied output schema. A whole-script repair returns
+the full script plus dispositions; a bounded legacy single-Scene expansion returns that Scene ID and its
+complete expanded spoken_text.
 """,
     "visual_plan": """
 Create one provider-neutral storyboard for the entire finished narration, using the Creative Brief,
@@ -298,12 +332,18 @@ queries. The later Script may use only claims supported by these Evidence Record
 
 
 FACTUAL_REVIEW_INSTRUCTIONS = """
+When review_strategy is single-claim-v1, review only the supplied Claim and return only verdict,
+evidence_ids, and rationale. Use not_a_factual_claim only when the exact text is solely a directive,
+question, opinion, or explicitly nonliteral analogy with no independently asserted factual proposition.
+Never use that verdict to excuse an unsupported factual assertion.
+
 Independently verify every inventoried claim against the supplied Evidence Records and their source
 metadata. Use supported only when the exact spoken assertion is directly entailed by cited evidence;
 use needs_qualification when scope, certainty, attribution, or time sensitivity must be narrowed; use
 unsupported when support is absent or contradictory. List any factual assertions in the Script that the
 inventory missed under uncovered_claims. Set passed=true only when every inventoried claim is supported
-and uncovered_claims is empty. Do not rewrite the Script or reward plausible but uncited knowledge.
+and uncovered_claims is empty. Return Claim reviews in the supplied inventory order. Do not rewrite the
+Script or reward plausible but uncited knowledge.
 """
 
 
@@ -356,12 +396,13 @@ are blocking. Identify exact Scene evidence without rewriting and set review_typ
 "constraints".
 """,
     "script_revision": """
-Produce one complete revised factual Narration Script after reconciling all review reports. Preserve Scene
-IDs, order, documented events, chronology, attribution, uncertainty, and the evidence-grounded narrative
-arc. Resolve conflicts in this order: safety and factual support, chronology and causal clarity, spoken
-clarity, Duration Budget, then style. Return exactly one disposition for every required_finding_id and no
-others. Do not add claims, quotations, motives, composite events, citations, commentary, or visual
-directions. Keep the complete Script within the supplied total and per-Scene word envelopes.
+When neither revision_strategy nor repair_strategy is supplied, produce one complete revised factual
+Narration Script after reconciling all review reports. Preserve Scene IDs, order, documented events,
+chronology, attribution, uncertainty, and the evidence-grounded narrative arc. Resolve conflicts in this
+order: safety and factual support, chronology and causal clarity, spoken clarity, Duration Budget, then
+style. Return exactly one disposition for every required_finding_id and no others. Do not add claims,
+quotations, motives, composite events, citations, commentary, or visual directions. Keep the complete
+Script within the supplied total and per-Scene word envelopes.
 """,
 }
 
@@ -402,7 +443,8 @@ citations, markdown, stage directions, visual notes, or review comments in spoke
 Make the argument understandable on one hearing. Start directly on the modern anchor, question, or
 contrast; do not announce an agenda. Move one logical step per Scene, define unfamiliar terms in plain
 language, and make each evidence step earn the next. For factual content, state no assertion beyond the
-Evidence IDs attached to that Outline Scene and preserve uncertainty. For mythbuster format, represent
+supplied Evidence Records, prioritize Evidence IDs attached to that Outline Scene, and preserve
+uncertainty. For mythbuster format, represent
 the misconception fairly, pivot cleanly, escalate from intuitive to surprising evidence, and return to
 the anchor in the landing. Direct address is useful when it genuinely places the viewer in the idea, not
 as repetitive engagement bait. End the final Scene with pause_after_seconds equal to zero.
@@ -422,12 +464,13 @@ required format beats are blocking. Identify exact Scene evidence without rewrit
 exactly to "constraints".
 """,
     "script_revision": """
-Produce one complete revised Narration Script after reconciling all review reports. Preserve Scene IDs,
-order, format arc, modern anchor, thesis, evidence meaning, and landing callback. Resolve conflicts in
-this order: safety and factual support, logical coherence, spoken clarity, Duration Budget, then style.
-Return exactly one disposition for every required_finding_id and no other IDs. Rejection requires a
-concise reason. Keep the complete Script within the supplied total and per-Scene word envelopes. Do not
-add claims, evidence, commentary, citations, or visual directions while revising.
+When neither revision_strategy nor repair_strategy is supplied, produce one complete revised Narration
+Script after reconciling all review reports. Preserve Scene IDs, order, format arc, modern anchor, thesis,
+evidence meaning, and landing callback. Resolve conflicts in this order: safety and factual support,
+logical coherence, spoken clarity, Duration Budget, then style. Return exactly one disposition for every
+required_finding_id and no other IDs. Rejection requires a concise reason. Keep the complete Script within
+the supplied total and per-Scene word envelopes. Do not add claims, evidence, commentary, citations, or
+visual directions while revising.
 """,
 }
 
@@ -517,6 +560,73 @@ def _task_instructions(task_id: str, config: ResolvedRunConfig | None) -> str:
         instructions = EXPLAINER_TASK_INSTRUCTIONS.get(task_id, instructions).strip()
     if config.visual_shot_mode is VisualShotMode.CADENCED:
         instructions = CADENCED_TASK_INSTRUCTIONS.get(task_id, instructions).strip()
+    if task_id == "script_draft":
+        instructions += """
+
+When draft_strategy is single-scene-v1, write only the complete spoken_text for the one supplied
+Outline Scene. Return no title, Scene ID, pause, word count, explanation, or surrounding Scene;
+Python owns those fields and assembles the script. Treat previous_spoken_text as read-only continuity
+context and next_outline_scene as read-only setup context. When scene_word_policy is
+advisory-with-host-aggregate-fit-v1, aim naturally near target_word_count and treat the per-Scene
+minimum/maximum as planning guidance; Python owns aggregate fitting. Otherwise stay within the supplied
+inclusive range. Use the supplied sentence-count range. In factual mode, assert only what
+available_factual_evidence directly supports, prefer preferred_evidence_ids where applicable, preserve
+necessary qualifications, and do not turn an analogy or direct instruction into a factual claim.
+Preferred IDs are prioritization, not an exclusive evidence boundary. Do not repeat the previous Scene.
+
+When draft_strategy is single-scene-word-fit-v1, return only one complete replacement spoken_text for
+the supplied Scene. Python selected that Scene and calculated a feasible residual range for the complete
+Script. Preserve meaning, facts, and adjacent continuity; use the broad minimum/maximum range and aim
+near target_word_count. In factual mode, added assertions require direct available_factual_evidence.
+Never pad with filler or return host-owned fields.
+"""
+    if task_id == "script_revision":
+        instructions += """
+
+When revision_strategy is single-scene-replacement-v1, return only one complete replacement
+spoken_text for the supplied Scene. Python preserves the title, Scene ID, order, pause, and all
+unchanged Scenes. Treat adjacent_context as read-only. Apply only the supplied findings, stay inside
+the stated word envelope, and do not return a disposition or any other host-owned field.
+
+When revision_strategy is single-scene-word-fit-v1, return only one complete replacement spoken_text
+for the supplied Scene. Python selected that Scene and calculated a feasible residual range for the
+complete Script. Preserve meaning, facts, and adjacent continuity; use the broad minimum/maximum
+range and aim near target_word_count. In factual mode, added assertions require direct
+available_factual_evidence. Never pad with filler or return host-owned fields.
+
+When repair_strategy is factual-claim-repair-v1, return only one complete replacement spoken_text
+for the supplied Scene. Every factual assertion must be directly supported by
+allowed_factual_evidence. Remove or narrow the failed wording described in failed_claims without
+inventing a bridge claim. If allowed_factual_evidence is empty, remove the factual assertion instead of
+substituting another one. Keep the correction concise and naturally close to the original pacing;
+Python validates and, only when needed, reconciles the complete Script's aggregate word range. Python
+also preserves every identity, timing, ordering, and review field and performs a fresh audit.
+"""
+    if task_id == "visual_plan":
+        instructions += """
+
+When visual_strategy is foundation-v1, return only a reusable style description and any recurring
+Character identity content required across the whole video. Do not return style_id, Character IDs,
+Scene IDs, Shot IDs, timestamps, narration excerpts, or per-image content. A Character is a recurring
+identity that needs visual locking, not every hand, object, diagram element, or one-off subject. Every
+returned Character must completely specify body form, proportions, face/markings, and immutable
+identity constraints.
+
+When visual_strategy is single-visual-v1, return only the content fields for visual_target. Python
+owns the Shot/Scene identity, narration excerpt, timing, duration, order, style contract, and Character
+definitions. Select only supplied character_identities that are visibly present. Depict the current
+narration excerpt literally and immediately; use previous_visual and next_visual_target only as
+read-only continuity context. Do not repeat host-owned fields or describe another image.
+"""
+    if task_id == "image_prompt_compile":
+        instructions += """
+
+When compiler_strategy is prompt-content-v1, return only prompt and negative_prompt for the current
+image. Python owns and attaches the Scene/Shot identity, target Backend, dimensions, quality, seed,
+reference paths, and every generation setting. Use those supplied values as constraints, but do not
+repeat them as fields. Both returned strings must be English; negative_prompt may be empty only when
+the target Backend does not benefit from one.
+"""
 
     context_tasks = {
         "ideate",
@@ -635,7 +745,7 @@ def build_frozen_assets(config: ResolvedRunConfig | None = None) -> dict[str, An
     }
     assets: dict[str, Any] = {
         "prompt_set_version": prompt_set_version,
-        "workflow_policy_version": 2 if legacy_pack else 3,
+        "workflow_policy_version": 2 if legacy_pack else 13,
         "prompts": prompts,
         "image_targets": TARGET_IMAGE_GUIDANCE,
         "schemas": schemas,

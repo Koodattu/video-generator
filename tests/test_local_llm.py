@@ -121,7 +121,9 @@ class _FakeOpener:
         return _FakeResponse(
             {
                 "id": "local-request",
-                "choices": [{"message": {"content": '{"title":"Yö"}'}}],
+                "choices": [
+                    {"message": {"content": '{"title":"Yö"}'}, "finish_reason": "stop"}
+                ],
                 "usage": {"prompt_tokens": 7, "completion_tokens": 3},
             }
         )
@@ -237,7 +239,9 @@ def test_llama_worker_maps_finnish_schema_request(monkeypatch, tmp_path: Path) -
             captured.append(payload)
             return {
                 "id": "request-fi",
-                "choices": [{"message": {"content": '{"title":"Yö"}'}}],
+                "choices": [
+                    {"message": {"content": '{"title":"Yö"}'}, "finish_reason": "stop"}
+                ],
                 "usage": {"prompt_tokens": 5, "completion_tokens": 2},
             }
 

@@ -275,6 +275,7 @@ class OpenAIStructuredTextBackend(_OpenAIClient):
                 "status": payload.get("status"),
                 "model": payload.get("model"),
                 "usage": payload.get("usage"),
+                "structured_data": data,
             },
             provider_request_id=str(payload.get("id") or ""),
             usage=usage,

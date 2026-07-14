@@ -679,6 +679,16 @@ class ScriptClaim(ContractModel):
     qualification: Annotated[str, Field(max_length=2000)] = ""
 
 
+class ExtractedClaim(ContractModel):
+    exact_text: Annotated[str, Field(min_length=1, max_length=4000)]
+    evidence_ids: Annotated[list[str], Field(max_length=20)] = Field(default_factory=list)
+    qualification: Annotated[str, Field(max_length=2000)] = ""
+
+
+class SceneClaimExtraction(ContractModel):
+    claims: Annotated[list[ExtractedClaim], Field(max_length=20)] = Field(default_factory=list)
+
+
 class ClaimInventory(VersionedContract):
     claims: Annotated[list[ScriptClaim], Field(min_length=1)]
     coverage_notes: Annotated[str, Field(max_length=4000)] = ""
@@ -694,7 +704,12 @@ class ClaimInventory(VersionedContract):
 
 class FactualClaimReview(ContractModel):
     claim_id: str
-    verdict: Literal["supported", "needs_qualification", "unsupported"]
+    verdict: Literal[
+        "supported",
+        "needs_qualification",
+        "unsupported",
+        "not_a_factual_claim",
+    ]
     evidence_ids: list[str] = Field(default_factory=list)
     rationale: Annotated[str, Field(min_length=1, max_length=4000)]
 
@@ -710,8 +725,10 @@ class FactualReviewReport(VersionedContract):
         ids = [item.claim_id for item in self.claims]
         if len(ids) != len(set(ids)):
             raise ValueError("factual review Claim IDs must be unique")
+        accepted_verdicts = {"supported", "not_a_factual_claim"}
         if self.passed and (
-            self.uncovered_claims or any(item.verdict != "supported" for item in self.claims)
+            self.uncovered_claims
+            or any(item.verdict not in accepted_verdicts for item in self.claims)
         ):
             raise ValueError("a passed factual review cannot contain uncovered or unsupported claims")
         return self

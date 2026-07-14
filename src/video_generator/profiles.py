@@ -51,12 +51,16 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         backend_id="ddgs:duckduckgo",
         provider="ddgs",
         model_id="duckduckgo-text",
-        revision="ddgs-9.14.4",
+        revision="ddgs-9.14.4-keyless-fallback-v4",
         protocols={ProtocolName.SEARCH},
         cloud=True,
         languages=_all_languages(),
         license_name="MIT",
-        notes="Keyless bounded DuckDuckGo search through the pinned DDGS package; no page extraction.",
+        notes=(
+            "Keyless bounded DDGS search with DuckDuckGo first, DDGS keyless fallbacks, then a "
+            "fixed-host MediaWiki search fallback with bounded relevant page excerpts; no "
+            "arbitrary-host extraction."
+        ),
     ),
     "openai:web": BackendDescriptor(
         backend_id="openai:web",

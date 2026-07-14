@@ -246,6 +246,31 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             "scenes": scenes,
         }
     if task == "script_draft":
+        if data.get("draft_strategy") == "single-scene-word-fit-v1":
+            desired_words = int(data["target_word_count"])
+            text = str(data["spoken_text"])
+            language = OutputLanguage(
+                data.get("output_language", request.output_language.value)
+            )
+            sentence_index = 0
+            while len(text.split()) < desired_words:
+                text += " " + _fixture_sentence(language, sentence_index)
+                sentence_index += 1
+            return {
+                "spoken_text": " ".join(text.split()[:desired_words]).rstrip(".,;:") + "."
+            }
+        if data.get("draft_strategy") == "single-scene-v1":
+            language = OutputLanguage(
+                data.get("output_language", request.output_language.value)
+            )
+            desired_words = int(data.get("target_word_count", 12))
+            sentence_index = max(0, int(data.get("scene_position", 1)) - 1)
+            text = ""
+            while len(text.split()) < desired_words:
+                text = (text + " " + _fixture_sentence(language, sentence_index)).strip()
+                sentence_index += 1
+            text = " ".join(text.split()[:desired_words]).rstrip(".,;:") + "."
+            return {"spoken_text": text}
         outline = data.get("outline", {})
         language = OutputLanguage(data.get("output_language", request.output_language.value))
         target_by_scene = {
@@ -278,8 +303,42 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
         }[task]
         return {"schema_version": 1, "review_type": review_type, "passed": True, "findings": []}
     if task == "script_revision":
+        if data.get("repair_strategy") == "factual-claim-repair-v1":
+            return {"spoken_text": data["spoken_text"]}
+        if data.get("revision_strategy") == "single-scene-word-fit-v1":
+            desired_words = int(data["target_word_count"])
+            text = str(data["spoken_text"])
+            language = OutputLanguage(
+                data.get("output_language", request.output_language.value)
+            )
+            sentence_index = 0
+            while len(text.split()) < desired_words:
+                text += " " + _fixture_sentence(language, sentence_index)
+                sentence_index += 1
+            return {
+                "spoken_text": " ".join(text.split()[:desired_words]).rstrip(".,;:") + "."
+            }
+        if data.get("revision_strategy") == "single-scene-replacement-v1":
+            return {"spoken_text": data["spoken_text"]}
         return {"schema_version": 1, "script": data["script"], "dispositions": []}
     if task == "claim_inventory":
+        if data.get("inventory_strategy") == "single-scene-claim-extraction-v2":
+            evidence = data.get("research_pack", {}).get("evidence", [])
+            evidence_ids = [str(item["evidence_id"]) for item in evidence[:1]]
+            exact_text = str(data.get("spoken_text", "")).split(".", 1)[0].strip()
+            return {
+                "claims": (
+                    [
+                        {
+                            "exact_text": exact_text,
+                            "evidence_ids": evidence_ids,
+                            "qualification": "",
+                        }
+                    ]
+                    if exact_text
+                    else []
+                )
+            }
         script = data["script"]
         evidence = data.get("research_pack", {}).get("evidence", [])
         evidence_ids = [str(item["evidence_id"]) for item in evidence[:1]]
@@ -299,6 +358,13 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             )
         return {"schema_version": 1, "claims": claims, "coverage_notes": "Fixture audit."}
     if task == "factual_review":
+        if data.get("review_strategy") == "single-claim-v1":
+            claim = data["claim"]
+            return {
+                "verdict": "supported",
+                "evidence_ids": claim.get("evidence_ids", []),
+                "rationale": "The deterministic fixture treats its bounded evidence as direct support.",
+            }
         claims = data.get("claim_inventory", {}).get("claims", [])
         return {
             "schema_version": 1,
@@ -316,6 +382,32 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             "summary": "All fixture claims are covered.",
         }
     if task == "duration_repair":
+        if data.get("repair_strategy") == "single-scene-word-fit-v1":
+            desired = int(data["target_word_count"])
+            text = str(data["spoken_text"])
+            language = OutputLanguage(
+                data.get("output_language", request.output_language.value)
+            )
+            sentence_index = 0
+            while len(text.split()) < desired:
+                text += " " + _fixture_sentence(language, sentence_index)
+                sentence_index += 1
+            return {
+                "spoken_text": " ".join(text.split()[:desired]).rstrip(".,;:") + "."
+            }
+        if data.get("repair_strategy") == "single-scene-text-v3":
+            desired = int(data["target_word_count"])
+            text = str(data["spoken_text"])
+            language = OutputLanguage(
+                data.get("output_language", request.output_language.value)
+            )
+            sentence_index = 0
+            while len(text.split()) < desired:
+                text += " " + _fixture_sentence(language, sentence_index)
+                sentence_index += 1
+            return {
+                "spoken_text": " ".join(text.split()[:desired]).rstrip(".,;:") + "."
+            }
         if data.get("repair_strategy") == "single-scene-lengthening-v2":
             scene = data["script"]["scenes"][0]
             target = data["scene_repair_targets"][0]
@@ -349,6 +441,82 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                 scene["spoken_text"] = " ".join(text.split()[:desired]).rstrip(".,;:") + "."
         return {"schema_version": 1, "script": script, "dispositions": []}
     if task == "visual_plan":
+        if data.get("visual_strategy") == "foundation-v1":
+            has_character = data.get("content_format", "narrative") == "narrative"
+            return {
+                "style": {
+                    "description": data.get("style_description")
+                    or "Naive hand-drawn shapes on a nearly white raster canvas.",
+                    "palette": ["black", "white", "red", "blue", "pale gray"],
+                    "line_style": "thin, slightly uneven black lines",
+                    "background": "sparse naive marks with generous empty space",
+                    "must_avoid": [
+                        "written words",
+                        "watermarks",
+                        "photorealism",
+                        "3D",
+                        "gradients",
+                    ],
+                },
+                "characters": (
+                    [
+                        {
+                            "name": "Aino",
+                            "signature_traits": ["round head", "red triangular scarf"],
+                            "color_anchors": ["red scarf"],
+                            "recurring_props": ["blue tin lantern"],
+                            "body_form": "small upright stick figure; always bipedal",
+                            "proportions": [
+                                "round head",
+                                "short straight limbs",
+                                "same small scale",
+                            ],
+                            "face_and_markings": [
+                                "two black dot eyes",
+                                "no nose",
+                                "plain white face",
+                            ],
+                            "wardrobe": ["red triangular scarf tied at the neck"],
+                            "identity_constraints": [
+                                "never quadrupedal",
+                                "never remove or recolor the scarf",
+                            ],
+                        }
+                    ]
+                    if has_character
+                    else []
+                ),
+            }
+        if data.get("visual_strategy") == "single-visual-v1":
+            target = data["visual_target"]
+            characters = data.get("character_identities", [])
+            character_ids = [item["character_id"] for item in characters]
+            has_previous = data.get("previous_visual") is not None
+            return {
+                "story_moment": target["narration_excerpt"],
+                "subjects": (
+                    ["Aino", "blue tin lantern"]
+                    if character_ids
+                    else ["hand", "literal narrated objects"]
+                ),
+                "action": "Show the literal visible action described by the current narration.",
+                "emotion": "clear focused curiosity",
+                "environment": "a sparse setting consistent with the parent Outline Scene",
+                "composition": "one large focal action centered in a readable 16:9 frame",
+                "must_show": ["the current narrated object and action", "clear silhouettes"],
+                "must_avoid": ["written words", "labels", "future events"],
+                "character_ids": character_ids,
+                "continuity_from_previous": (
+                    ["preserve the incoming visible state"] if has_previous else []
+                ),
+                "state_after_scene": ["the current action leaves a visible result"],
+                "identity_requirements": (
+                    ["preserve every supplied Aino identity trait exactly"]
+                    if character_ids
+                    else []
+                ),
+                "persistent_elements": ["keep the established palette and object design"],
+            }
         script = data["script"]
         has_character = data.get("content_format", "narrative") == "narrative"
         style = {
@@ -437,6 +605,13 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             f"Must show: {', '.join(visual['must_show'])}. No letters, labels, captions, logos, signatures, "
             "watermarks, photorealism, 3D, gradients, polished vector geometry, or elaborate shading."
         )
+        if data.get("compiler_strategy") == "prompt-content-v1":
+            return {
+                "prompt": prompt,
+                "negative_prompt": (
+                    "text, watermark, logo, photorealism, 3D, gradient, glossy concept art"
+                ),
+            }
         payload = {
             "schema_version": 1,
             "scene_id": visual["scene_id"],
@@ -528,9 +703,10 @@ class DeterministicStructuredTextBackend(_DeterministicBackend):
     descriptor = BACKEND_DESCRIPTORS["deterministic:structured"]
 
     def complete(self, request: StructuredTextRequest) -> StructuredTextResult:
+        data = _fake_structured(request)
         return StructuredTextResult(
-            data=_fake_structured(request),
-            raw_response={"fixture": True},
+            data=data,
+            raw_response={"fixture": True, "structured_data": data},
             usage=UsageRecord(task_id=request.task_id, backend_id=self.descriptor.backend_id),
         )
 

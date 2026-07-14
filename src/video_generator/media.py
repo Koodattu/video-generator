@@ -340,12 +340,19 @@ def _normalize_token(value: str) -> str:
     return "".join(character for character in value if unicodedata.category(character)[0] in {"L", "N"})
 
 
+CAPTION_RECONCILIATION_REVISION = "canonical-gap-v2"
+
+
 def _tokens_are_close(left: str, right: str) -> bool:
     if left == right:
         return True
-    if min(len(left), len(right)) < 5:
+    if min(len(left), len(right)) < 4:
         return False
-    return difflib.SequenceMatcher(a=left, b=right, autojunk=False).ratio() >= 0.72
+    return _token_similarity(left, right) >= 0.72
+
+
+def _token_similarity(left: str, right: str) -> float:
+    return difflib.SequenceMatcher(a=left, b=right, autojunk=False).ratio()
 
 
 def _merged_word_timing(words: Sequence[WordTiming]) -> WordTiming:
@@ -374,26 +381,34 @@ def _map_reconciliation_gap(
     while canonical_index < canonical_end and recognized_index < recognized_end:
         canonical_token = canonical_tokens[canonical_index]
         recognized_token = recognized_tokens[recognized_index]
-        if (
-            recognized_index + 1 < recognized_end
-            and _tokens_are_close(
-                canonical_token,
-                recognized_token + recognized_tokens[recognized_index + 1],
-            )
-        ):
+        direct_score = (
+            _token_similarity(canonical_token, recognized_token)
+            if _tokens_are_close(canonical_token, recognized_token)
+            else -1.0
+        )
+        recognized_pair_score = -1.0
+        if recognized_index + 1 < recognized_end:
+            recognized_pair = recognized_token + recognized_tokens[recognized_index + 1]
+            if _tokens_are_close(canonical_token, recognized_pair):
+                recognized_pair_score = _token_similarity(canonical_token, recognized_pair)
+        canonical_pair_score = -1.0
+        if canonical_index + 1 < canonical_end:
+            canonical_pair = canonical_token + canonical_tokens[canonical_index + 1]
+            if _tokens_are_close(canonical_pair, recognized_token):
+                canonical_pair_score = _token_similarity(canonical_pair, recognized_token)
+        if direct_score >= 0 and direct_score >= max(recognized_pair_score, canonical_pair_score):
+            mapped[canonical_index] = recognized[recognized_index]
+            canonical_index += 1
+            recognized_index += 1
+            continue
+        if recognized_pair_score >= 0 and recognized_pair_score >= canonical_pair_score:
             mapped[canonical_index] = _merged_word_timing(
                 recognized[recognized_index : recognized_index + 2]
             )
             canonical_index += 1
             recognized_index += 2
             continue
-        if (
-            canonical_index + 1 < canonical_end
-            and _tokens_are_close(
-                canonical_token + canonical_tokens[canonical_index + 1],
-                recognized_token,
-            )
-        ):
+        if canonical_pair_score >= 0:
             timing = recognized[recognized_index]
             total_length = len(canonical_token) + len(canonical_tokens[canonical_index + 1])
             first_fraction = len(canonical_token) / total_length
@@ -413,11 +428,6 @@ def _map_reconciliation_gap(
                 confidence=timing.confidence,
             )
             canonical_index += 2
-            recognized_index += 1
-            continue
-        if _tokens_are_close(canonical_token, recognized_token):
-            mapped[canonical_index] = recognized[recognized_index]
-            canonical_index += 1
             recognized_index += 1
             continue
         if (

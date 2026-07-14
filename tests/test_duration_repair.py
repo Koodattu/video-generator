@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from video_generator.contracts import (
+    ContentMode,
     MediaReference,
     NarrationScript,
     NarrationTimeline,
@@ -220,6 +221,324 @@ def test_duration_repair_scale_uses_midpoint_speech_window_without_fixed_pause()
     assert scale == pytest.approx((28.5 - 2.0) / (14.24 + 16.32))
     assert round(47 * scale) == 41
     assert round(55 * scale) == 48
+
+
+def test_scene_local_duration_repair_returns_only_replacement_text() -> None:
+    audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id=f"scene-{index:03d}",
+                spoken_text="one two three four five six seven eight nine ten",
+                pause_after_seconds=0.15 if index == 1 else 0,
+            )
+            for index in range(1, 3)
+        ],
+    )
+    timeline = NarrationTimeline(
+        narration_audio=audio,
+        duration_seconds=10,
+        delivery_duration_seconds=10,
+        scenes=[
+            TimelineScene(
+                scene_id=f"scene-{index:03d}",
+                audio=audio,
+                start_seconds=(index - 1) * 5,
+                speech_end_seconds=index * 5 - (0.15 if index == 1 else 0),
+                end_seconds=index * 5,
+            )
+            for index in range(1, 3)
+        ],
+    )
+    targets = [
+        {
+            "scene_id": f"scene-{index:03d}",
+            "original_word_count": 10,
+            "target_word_count": 8,
+            "minimum_word_count": 7,
+            "maximum_word_count": 9,
+        }
+        for index in range(1, 3)
+    ]
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        content_mode=ContentMode.FICTION,
+        output_language=OutputLanguage.ENGLISH,
+    )
+    requests = []
+
+    def structured_item(**kwargs):
+        requests.append(kwargs)
+        words = kwargs["input_data"]["spoken_text"].split()
+        replacement = kwargs["output_model"](
+            spoken_text=" ".join(words[: kwargs["input_data"]["target_word_count"]]) + "."
+        )
+        kwargs["invariant"](replacement)
+        return replacement, []
+
+    engine._structured_item = structured_item
+
+    repaired, usage, response = engine._repair_duration_by_scene(
+        script=script,
+        measured_timeline=timeline,
+        duration_scale=0.8,
+        scene_repair_targets=targets,
+        selected_scene_ids={"scene-001", "scene-002"},
+        factual_research=None,
+    )
+
+    assert usage == []
+    assert response["repair_strategy"] == "per-scene-text-v3"
+    assert len(requests) == 2
+    assert all(
+        set(request["output_model"].model_json_schema()["properties"])
+        == {"spoken_text"}
+        for request in requests
+    )
+    assert all("script" not in request["input_data"] for request in requests)
+    assert [scene.scene_id for scene in repaired.script.scenes] == [
+        "scene-001",
+        "scene-002",
+    ]
+    assert [scene.pause_after_seconds for scene in repaired.script.scenes] == [0.15, 0]
+    assert all(len(scene.spoken_text.split()) == 8 for scene in repaired.script.scenes)
+
+
+def test_policy_v11_duration_repair_allows_scene_counts_to_compensate() -> None:
+    audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id=f"scene-{index:03d}",
+                spoken_text="one two three four five six seven eight nine ten",
+                pause_after_seconds=0.15 if index == 1 else 0,
+            )
+            for index in range(1, 3)
+        ],
+    )
+    timeline = NarrationTimeline(
+        narration_audio=audio,
+        duration_seconds=10,
+        delivery_duration_seconds=10,
+        scenes=[
+            TimelineScene(
+                scene_id=f"scene-{index:03d}",
+                audio=audio,
+                start_seconds=(index - 1) * 5,
+                speech_end_seconds=index * 5 - (0.15 if index == 1 else 0),
+                end_seconds=index * 5,
+            )
+            for index in range(1, 3)
+        ],
+    )
+    targets = [
+        {
+            "scene_id": f"scene-{index:03d}",
+            "original_word_count": 10,
+            "target_word_count": 8,
+            "minimum_word_count": 7,
+            "maximum_word_count": 9,
+        }
+        for index in range(1, 3)
+    ]
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 11
+    engine.config = SimpleNamespace(
+        content_mode=ContentMode.FICTION,
+        output_language=OutputLanguage.ENGLISH,
+    )
+    requests = []
+
+    def structured_item(**kwargs):
+        requests.append(kwargs)
+        count = 5 if len(requests) == 1 else 9
+        replacement = kwargs["output_model"](spoken_text=" ".join(["word"] * count))
+        kwargs["invariant"](replacement)
+        return replacement, []
+
+    engine._structured_item = structured_item
+
+    repaired, usage, response = engine._repair_duration_by_scene(
+        script=script,
+        measured_timeline=timeline,
+        duration_scale=0.8,
+        scene_repair_targets=targets,
+        selected_scene_ids={"scene-001", "scene-002"},
+        factual_research=None,
+    )
+
+    assert usage == []
+    assert response["repair_strategy"] == "per-scene-text-v4-host-aggregate-fit"
+    assert response["word_fit_items"] == []
+    assert len(requests) == 2
+    assert [len(scene.spoken_text.split()) for scene in repaired.script.scenes] == [5, 9]
+    assert [scene.scene_id for scene in repaired.script.scenes] == ["scene-001", "scene-002"]
+    assert [scene.pause_after_seconds for scene in repaired.script.scenes] == [0.15, 0]
+
+
+def test_policy_v11_duration_repair_fits_only_one_scene_when_aggregate_is_short() -> None:
+    audio = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id=f"scene-{index:03d}",
+                spoken_text="one two three four five six seven eight nine ten",
+                pause_after_seconds=0.15 if index == 1 else 0,
+            )
+            for index in range(1, 3)
+        ],
+    )
+    timeline = NarrationTimeline(
+        narration_audio=audio,
+        duration_seconds=10,
+        delivery_duration_seconds=10,
+        scenes=[
+            TimelineScene(
+                scene_id=f"scene-{index:03d}",
+                audio=audio,
+                start_seconds=(index - 1) * 5,
+                speech_end_seconds=index * 5 - (0.15 if index == 1 else 0),
+                end_seconds=index * 5,
+            )
+            for index in range(1, 3)
+        ],
+    )
+    targets = [
+        {
+            "scene_id": f"scene-{index:03d}",
+            "original_word_count": 10,
+            "target_word_count": 8,
+            "minimum_word_count": 7,
+            "maximum_word_count": 9,
+        }
+        for index in range(1, 3)
+    ]
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 11
+    engine.config = SimpleNamespace(
+        content_mode=ContentMode.FICTION,
+        output_language=OutputLanguage.ENGLISH,
+    )
+    requests = []
+
+    def structured_item(**kwargs):
+        requests.append(kwargs)
+        input_data = kwargs["input_data"]
+        count = (
+            int(input_data["target_word_count"])
+            if input_data["repair_strategy"] == "single-scene-word-fit-v1"
+            else 5
+        )
+        replacement = kwargs["output_model"](spoken_text=" ".join(["word"] * count))
+        kwargs["invariant"](replacement)
+        return replacement, []
+
+    engine._structured_item = structured_item
+
+    repaired, usage, response = engine._repair_duration_by_scene(
+        script=script,
+        measured_timeline=timeline,
+        duration_scale=0.8,
+        scene_repair_targets=targets,
+        selected_scene_ids={"scene-001", "scene-002"},
+        factual_research=None,
+    )
+
+    assert usage == []
+    assert len(requests) == 3
+    fit_request = requests[-1]
+    assert fit_request["input_data"]["repair_strategy"] == "single-scene-word-fit-v1"
+    assert set(fit_request["output_model"].model_json_schema()["properties"]) == {
+        "spoken_text"
+    }
+    assert "script" not in fit_request["input_data"]
+    assert response["word_fit_items"] == [
+        {"scene_id": "scene-001", "item_id": "duration-word-fit-scene-001"}
+    ]
+    counts = [len(scene.spoken_text.split()) for scene in repaired.script.scenes]
+    assert 14 <= sum(counts) <= 18
+    assert counts[1] == 5
+    assert [scene.scene_id for scene in repaired.script.scenes] == ["scene-001", "scene-002"]
+    assert [scene.pause_after_seconds for scene in repaired.script.scenes] == [0.15, 0]
+
+
+def test_post_factual_duration_fit_uses_distinct_item_and_can_edit_second_scene() -> None:
+    original = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id=f"scene-{index:03d}",
+                spoken_text="one two three four five six seven eight nine ten",
+                pause_after_seconds=0.15 if index == 1 else 0,
+            )
+            for index in range(1, 3)
+        ],
+    )
+    repaired = NarrationScript(
+        title="Fixture",
+        scenes=[
+            original.scenes[0].model_copy(
+                update={"spoken_text": "one two three four five six seven"}
+            ),
+            original.scenes[1].model_copy(update={"spoken_text": "Verified."}),
+        ],
+    )
+    targets = [
+        {
+            "scene_id": f"scene-{index:03d}",
+            "original_word_count": 10,
+            "target_word_count": 8,
+            "minimum_word_count": 7,
+            "maximum_word_count": 9,
+        }
+        for index in range(1, 3)
+    ]
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        content_mode=ContentMode.FACTUAL,
+        output_language=OutputLanguage.ENGLISH,
+    )
+    requests = []
+
+    def structured_item(**kwargs):
+        requests.append(kwargs)
+        count = int(kwargs["input_data"]["target_word_count"])
+        replacement = kwargs["output_model"](spoken_text=" ".join(["word"] * count))
+        kwargs["invariant"](replacement)
+        return replacement, []
+
+    engine._structured_item = structured_item
+
+    fitted, usage, fit_items = engine._fit_duration_repair_word_range(
+        script=repaired,
+        original=original,
+        scene_repair_targets=targets,
+        selected_scene_ids={"scene-001", "scene-002"},
+        factual_research=None,
+        outline=None,
+        item_prefix="duration-factual-word-fit",
+    )
+
+    assert usage == []
+    assert len(requests) == 1
+    request = requests[0]
+    assert request["item_id"] == "duration-factual-word-fit-scene-002"
+    assert request["input_data"]["spoken_text"] == "Verified."
+    assert set(request["output_model"].model_json_schema()["properties"]) == {
+        "spoken_text"
+    }
+    assert fit_items == [
+        {
+            "scene_id": "scene-002",
+            "item_id": "duration-factual-word-fit-scene-002",
+        }
+    ]
+    counts = [len(scene.spoken_text.split()) for scene in fitted.scenes]
+    assert counts[0] == 7
+    assert 14 <= sum(counts) <= 18
 
 
 def test_pause_fit_removes_only_excess_silence_when_speech_fits_budget() -> None:
@@ -611,7 +930,7 @@ def test_duration_lengthening_repairs_each_scene_independently() -> None:
     assert set(responses) == {"scene-001", "scene-002"}
 
 
-def test_tempo_fit_uses_small_pitch_preserving_slowdown_only() -> None:
+def test_tempo_fit_uses_small_pitch_preserving_slowdown() -> None:
     tempo = WorkflowEngine._tempo_fit_rate(
         speech_seconds=92,
         pause_seconds=4,
@@ -620,6 +939,28 @@ def test_tempo_fit_uses_small_pitch_preserving_slowdown_only() -> None:
 
     assert tempo == pytest.approx(92 / (108 - 4))
     assert 0.88 < tempo < 0.89
+
+
+def test_tempo_fit_uses_small_pitch_preserving_speedup() -> None:
+    tempo = WorkflowEngine._tempo_fit_rate(
+        speech_seconds=29.6,
+        pause_seconds=0.75,
+        budget_seconds=28,
+    )
+
+    assert tempo == pytest.approx(29.6 / (28 * 0.98 - 0.75))
+    assert 1.10 < tempo < 1.15
+
+
+def test_tempo_fit_rejects_large_speedup() -> None:
+    assert (
+        WorkflowEngine._tempo_fit_rate(
+            speech_seconds=35,
+            pause_seconds=1,
+            budget_seconds=28,
+        )
+        is None
+    )
 
 
 def test_tempo_fit_rejects_large_slowdown() -> None:

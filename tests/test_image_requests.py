@@ -228,6 +228,33 @@ def test_continuity_visual_plan_accepts_a_recurring_identity_mapping() -> None:
     WorkflowEngine._validate_visual_plan(plan, outline=outline, script=script)
 
 
+def test_continuity_visual_plan_allows_no_previous_state_for_opening_scene() -> None:
+    outline, script = _continuity_inputs()
+    scenes = _visual_briefs(character_ids=["character-aino"])
+    scenes[0].continuity_from_previous = []
+    plan = VisualPlan(
+        style_profile=_style_profile(),
+        characters=[_aino_identity()],
+        scenes=scenes,
+    )
+
+    WorkflowEngine._validate_visual_plan(plan, outline=outline, script=script)
+
+
+def test_continuity_visual_plan_requires_previous_state_after_opening_scene() -> None:
+    outline, script = _continuity_inputs()
+    scenes = _visual_briefs(character_ids=["character-aino"])
+    scenes[1].continuity_from_previous = []
+    plan = VisualPlan(
+        style_profile=_style_profile(),
+        characters=[_aino_identity()],
+        scenes=scenes,
+    )
+
+    with pytest.raises(BackendError, match="post-opening incoming state.*scene-002"):
+        WorkflowEngine._validate_visual_plan(plan, outline=outline, script=script)
+
+
 def test_character_reference_is_carried_forward_without_copying_composition() -> None:
     request = ImageRequest(
         scene_id="scene-002",

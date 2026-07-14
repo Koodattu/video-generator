@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,198 @@ class StructuredExecution:
     result: StructuredTextResult
     prompt_version: str
     schema_hash: str
+
+
+def _canonicalize_host_owned_fields(
+    task_id: str,
+    input_data: dict[str, Any],
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = copy.deepcopy(data)
+
+    if task_id == "ideate":
+        candidates = normalized.get("candidates")
+        if isinstance(candidates, list):
+            for index, candidate in enumerate(candidates, start=1):
+                if isinstance(candidate, dict):
+                    candidate["candidate_id"] = f"candidate-{index:03d}"
+
+    if task_id == "outline":
+        scenes = normalized.get("scenes")
+        if isinstance(scenes, list):
+            research_pack = input_data.get("research_pack")
+            known_evidence_ids: set[str] | None = None
+            if isinstance(research_pack, dict):
+                known_evidence_ids = {
+                    str(item[id_field])
+                    for collection_name, id_field in (
+                        ("evidence", "evidence_id"),
+                        ("findings", "finding_id"),
+                    )
+                    for item in research_pack.get(collection_name, [])
+                    if isinstance(item, dict) and item.get(id_field)
+                }
+            for index, scene in enumerate(scenes, start=1):
+                if isinstance(scene, dict):
+                    scene["scene_id"] = f"scene-{index:03d}"
+                    if known_evidence_ids is not None and isinstance(
+                        scene.get("evidence_ids"), list
+                    ):
+                        scene["evidence_ids"] = [
+                            evidence_id
+                            for evidence_id in scene["evidence_ids"]
+                            if evidence_id in known_evidence_ids
+                        ]
+
+    review_types = {
+        "review_story": "story",
+        "review_spoken": "spoken",
+        "review_constraints": "constraints",
+    }
+    if task_id in review_types:
+        review_type = review_types[task_id]
+        normalized["review_type"] = review_type
+        findings = normalized.get("findings")
+        if isinstance(findings, list):
+            for index, finding in enumerate(findings, start=1):
+                if isinstance(finding, dict):
+                    finding["finding_id"] = f"{review_type}:finding-{index:03d}"
+            normalized["passed"] = not findings
+
+    if task_id == "claim_inventory":
+        claims = normalized.get("claims")
+        scene_extraction = (
+            input_data.get("inventory_strategy") == "single-scene-claim-extraction-v2"
+        )
+        source_script = input_data.get("script")
+        script_scenes = source_script.get("scenes") if isinstance(source_script, dict) else None
+        research_pack = input_data.get("research_pack")
+        known_evidence_ids = {
+            str(item["evidence_id"])
+            for item in research_pack.get("evidence", [])
+            if isinstance(item, dict) and item.get("evidence_id")
+        } if isinstance(research_pack, dict) else set()
+        if isinstance(claims, list):
+            for index, claim in enumerate(claims, start=1):
+                if not isinstance(claim, dict):
+                    continue
+                if not scene_extraction:
+                    claim["claim_id"] = f"claim-{index:03d}"
+                if isinstance(claim.get("evidence_ids"), list):
+                    claim["evidence_ids"] = [
+                        evidence_id
+                        for evidence_id in claim["evidence_ids"]
+                        if evidence_id in known_evidence_ids
+                    ]
+                exact_text = claim.get("exact_text")
+                if (
+                    not scene_extraction
+                    and isinstance(exact_text, str)
+                    and isinstance(script_scenes, list)
+                ):
+                    matching_scene_ids = [
+                        scene.get("scene_id")
+                        for scene in script_scenes
+                        if isinstance(scene, dict)
+                        and isinstance(scene.get("spoken_text"), str)
+                        and exact_text in scene["spoken_text"]
+                    ]
+                    if len(matching_scene_ids) == 1:
+                        claim["scene_id"] = matching_scene_ids[0]
+
+    if task_id == "factual_review":
+        reviews = normalized.get("claims")
+        inventory = input_data.get("claim_inventory")
+        inventory_claims = inventory.get("claims") if isinstance(inventory, dict) else None
+        research_pack = input_data.get("research_pack")
+        known_evidence_ids = {
+            str(item["evidence_id"])
+            for item in research_pack.get("evidence", [])
+            if isinstance(item, dict) and item.get("evidence_id")
+        } if isinstance(research_pack, dict) else set()
+        if isinstance(normalized.get("evidence_ids"), list):
+            normalized["evidence_ids"] = [
+                evidence_id
+                for evidence_id in normalized["evidence_ids"]
+                if evidence_id in known_evidence_ids
+            ]
+        if isinstance(reviews, list) and isinstance(inventory_claims, list):
+            for expected, review in zip(inventory_claims, reviews, strict=False):
+                if not isinstance(expected, dict) or not isinstance(review, dict):
+                    continue
+                if expected.get("claim_id"):
+                    review["claim_id"] = expected["claim_id"]
+                if isinstance(review.get("evidence_ids"), list):
+                    review["evidence_ids"] = [
+                        evidence_id
+                        for evidence_id in review["evidence_ids"]
+                        if evidence_id in known_evidence_ids
+                    ]
+        if "passed" in normalized or "claims" in normalized:
+            uncovered = normalized.get("uncovered_claims")
+            normalized["passed"] = (
+                isinstance(reviews, list)
+                and len(reviews) == len(inventory_claims or [])
+                and not uncovered
+                and all(
+                    isinstance(review, dict)
+                    and review.get("verdict") in {"supported", "not_a_factual_claim"}
+                    for review in reviews
+                )
+            )
+
+    expected_script_scenes: Any = None
+    output_script_scenes: Any = None
+    if task_id == "script_draft":
+        outline = input_data.get("outline")
+        expected_script_scenes = outline.get("scenes") if isinstance(outline, dict) else None
+        output_script_scenes = normalized.get("scenes")
+    elif task_id == "script_revision":
+        source_script = input_data.get("script")
+        expected_script_scenes = (
+            source_script.get("scenes") if isinstance(source_script, dict) else None
+        )
+        revised_script = normalized.get("script")
+        output_script_scenes = (
+            revised_script.get("scenes") if isinstance(revised_script, dict) else None
+        )
+    if isinstance(expected_script_scenes, list) and isinstance(output_script_scenes, list):
+        for expected, output in zip(expected_script_scenes, output_script_scenes, strict=False):
+            if isinstance(expected, dict) and isinstance(output, dict) and "scene_id" in expected:
+                output["scene_id"] = expected["scene_id"]
+
+    if task_id == "visual_plan":
+        schedule = input_data.get("canonical_shot_schedule")
+        shots = normalized.get("shots")
+        if isinstance(schedule, list) and schedule and isinstance(shots, list):
+            canonical_fields = (
+                "shot_id",
+                "scene_id",
+                "narration_excerpt",
+                "start_seconds",
+                "end_seconds",
+            )
+            for expected, shot in zip(schedule, shots, strict=False):
+                if not isinstance(expected, dict) or not isinstance(shot, dict):
+                    continue
+                for field_name in canonical_fields:
+                    if field_name in expected:
+                        shot[field_name] = expected[field_name]
+            final = schedule[-1]
+            if isinstance(final, dict) and "end_seconds" in final:
+                normalized["duration_seconds"] = final["end_seconds"]
+        else:
+            source_script = input_data.get("script")
+            expected_scenes = (
+                source_script.get("scenes") if isinstance(source_script, dict) else None
+            )
+            visual_scenes = normalized.get("scenes")
+            if isinstance(expected_scenes, list) and isinstance(visual_scenes, list):
+                for expected, visual in zip(expected_scenes, visual_scenes, strict=False):
+                    if isinstance(expected, dict) and isinstance(visual, dict) and "scene_id" in expected:
+                        visual["scene_id"] = expected["scene_id"]
+
+    return normalized
 
 
 class TaskExecutor:
@@ -193,6 +386,23 @@ class TaskExecutor:
             target_image_backend=target_image_backend,
         )
         schema = restricted_json_schema(output_model.model_json_schema())
+        required_finding_ids = input_data.get("required_finding_ids")
+        if task_id == "script_revision" and isinstance(required_finding_ids, list):
+            if not required_finding_ids:
+                schema.get("properties", {})["dispositions"] = {"const": []}
+            else:
+                dispositions_schema = schema.get("properties", {}).get("dispositions")
+                finding_id_schema = (
+                    schema.get("$defs", {})
+                    .get("RevisionDisposition", {})
+                    .get("properties", {})
+                    .get("finding_id")
+                )
+                if isinstance(dispositions_schema, dict):
+                    dispositions_schema["minItems"] = len(required_finding_ids)
+                    dispositions_schema["maxItems"] = len(required_finding_ids)
+                if isinstance(finding_id_schema, dict):
+                    finding_id_schema["enum"] = required_finding_ids
         schema_hash = hash_value(schema)
         request = StructuredTextRequest(
             task_id=task_id,
@@ -219,7 +429,9 @@ class TaskExecutor:
             reservation=text_reservation,
         )
         def validate(data: dict[str, Any]) -> M:
-            artifact = output_model.model_validate(data)
+            artifact = output_model.model_validate(
+                _canonicalize_host_owned_fields(task_id, input_data, data)
+            )
             if invariant:
                 invariant(artifact)
             return artifact
@@ -233,7 +445,14 @@ class TaskExecutor:
                 )
             if error.kind is not ErrorKind.INVALID_OUTPUT:
                 raise error
-            return [{"type": "invariant", "msg": error.message, "loc": []}]
+            diagnostic: dict[str, Any] = {
+                "type": "invariant",
+                "msg": error.message,
+                "loc": [],
+            }
+            if error.details:
+                diagnostic["details"] = error.details
+            return [diagnostic]
 
         cloud_length_sensitive_tasks = {
             "script_draft",
@@ -267,20 +486,96 @@ class TaskExecutor:
                 if result.usage:
                     prior_usage.append(result.usage.model_copy(deep=True))
                 repair_count += 1
+            word_count_guidance = ""
+            for validation_error in errors:
+                details = validation_error.get("details", {})
+                word_delta = details.get("word_delta") if isinstance(details, dict) else None
+                actual_word_count = (
+                    details.get("actual_word_count") if isinstance(details, dict) else None
+                )
+                minimum_word_count = (
+                    details.get("minimum_word_count") if isinstance(details, dict) else None
+                )
+                maximum_word_count = (
+                    details.get("maximum_word_count") if isinstance(details, dict) else None
+                )
+                target_word_count = (
+                    details.get("target_word_count") if isinstance(details, dict) else None
+                )
+                if (
+                    isinstance(actual_word_count, int)
+                    and isinstance(minimum_word_count, int)
+                    and isinstance(maximum_word_count, int)
+                    and minimum_word_count <= maximum_word_count
+                ):
+                    target_guidance = (
+                        f", aiming near {target_word_count}"
+                        if isinstance(target_word_count, int)
+                        and minimum_word_count <= target_word_count <= maximum_word_count
+                        else ""
+                    )
+                    word_count_guidance = (
+                        f" The invalid script has {actual_word_count} words. Return between "
+                        f"{minimum_word_count} and {maximum_word_count} whitespace-separated words "
+                        f"inclusive{target_guidance}; recount before returning."
+                    )
+                    break
+                if (
+                    isinstance(word_delta, int)
+                    and word_delta != 0
+                    and isinstance(actual_word_count, int)
+                    and isinstance(target_word_count, int)
+                ):
+                    direction = "add" if word_delta > 0 else "remove"
+                    word_count_guidance = (
+                        f" The invalid script has {actual_word_count} words. "
+                        f"{direction.capitalize()} exactly {abs(word_delta)} whitespace-separated "
+                        f"words across spoken_text so the repaired total is "
+                        f"{target_word_count}; recount before returning."
+                    )
+                    break
+            if word_count_guidance:
+                output_fields = set(request.output_schema.get("properties", {}))
+                if output_fields == {"spoken_text"}:
+                    repair_instructions = (
+                        "Repair only the supplied invalid spoken_text and return corrected JSON with "
+                        "exactly the single spoken_text field. Preserve its facts, events, intent, and "
+                        "unrelated wording. Returning unchanged text is invalid. For additions, use only "
+                        "neutral clarification or connective wording and do not introduce a new claim, "
+                        "event, quotation, or direction."
+                        + word_count_guidance
+                    )
+                else:
+                    repair_instructions = (
+                        "Repair only the supplied invalid structured output and return only corrected "
+                        "JSON. Preserve its title, Scene IDs and order, pause values, facts, events, "
+                        "intent, and all unrelated wording exactly. Edit spoken_text; returning the "
+                        "unchanged script is invalid. For additions, use only neutral clarification or "
+                        "connective wording and do not introduce a new claim, event, quotation, or "
+                        "direction."
+                        + word_count_guidance
+                    )
+                repair_input_data = {
+                    "invalid_output": result.data,
+                    "validation_errors": errors,
+                }
+            else:
+                repair_instructions = (
+                    request.instructions
+                    + "\n\nThe prior response failed schema or invariant validation. Repair only the output; "
+                    "do not change the task or add commentary. Treat every validation error as a "
+                    "hard constraint. If an error gives an inclusive numeric range, count using the "
+                    "stated method and return a value comfortably inside that range."
+                )
+                repair_input_data = {
+                    "original_input": input_data,
+                    "invalid_output": result.data,
+                    "validation_errors": errors,
+                }
             repair_request = request.model_copy(
                 update={
-                    "instructions": (
-                        request.instructions
-                        + "\n\nThe prior response failed schema or invariant validation. Repair only the output; "
-                        "do not change the task or add commentary. Treat every validation error as a "
-                        "hard constraint. If an error gives an inclusive numeric range, count using the "
-                        "stated method and return a value comfortably inside that range."
-                    ),
-                    "input_data": {
-                        "original_input": input_data,
-                        "invalid_output": result.data,
-                        "validation_errors": errors,
-                    },
+                    "instructions": repair_instructions,
+                    "input_data": repair_input_data,
                 }
             )
             result = self._call(

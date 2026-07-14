@@ -313,6 +313,7 @@ class GeminiStructuredTextBackend(_GeminiClient):
                 "id": provider_request_id,
                 "model": payload.get("model"),
                 "usage": payload.get("usage") or payload.get("usage_metadata"),
+                "structured_data": data,
             },
             provider_request_id=provider_request_id,
             usage=_gemini_usage(

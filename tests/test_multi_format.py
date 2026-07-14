@@ -38,6 +38,23 @@ def test_production_profiles_never_select_the_programmatic_image_backend() -> No
         assert image_backend.provider != "deterministic", profile_name
 
 
+def test_cadenced_mythbuster_scene_count_follows_editorial_arc_not_image_target() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 12
+    engine.config = SimpleNamespace(
+        duration_seconds=24,
+        visual_target_seconds=10,
+        visual_min_seconds=6,
+        visual_max_seconds=14,
+        visual_shot_mode=VisualShotMode.CADENCED,
+        content_format=ContentFormat.MYTHBUSTER,
+    )
+
+    assert engine._outline_scene_count_bounds() == (5, 4, 5)
+    engine.config.content_format = ContentFormat.EXPLAINER
+    assert engine._outline_scene_count_bounds() == (4, 3, 5)
+
+
 def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> None:
     delivery = resolve_narration_delivery(OutputLanguage.ENGLISH, NarrationPace.FAST)
     config = resolved_config.model_copy(
@@ -56,7 +73,11 @@ def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> No
     assert models["visual_plan"] is TimedVisualPlan
     assert models["image_prompt_compile"] is TimedImageRequest
     assert assets["prompt_set_version"] == MULTI_FORMAT_PROMPT_SET_VERSION
-    assert assets["workflow_policy_version"] == 3
+    assert assets["workflow_policy_version"] == 13
+    claim_properties = assets["schemas"]["claim_inventory"]["$defs"]["ExtractedClaim"][
+        "properties"
+    ]
+    assert set(claim_properties) == {"exact_text", "evidence_ids", "qualification"}
     assert "shots" in assets["schemas"]["visual_plan"]["properties"]
     assert "evidence" in assets["schemas"]["research"]["properties"]
     assert "urgent" in assets["prompts"]["script_draft"]["instructions"].lower()

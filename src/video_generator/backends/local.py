@@ -130,6 +130,8 @@ class LocalStructuredTextBackend(_LocalBackend):
                 "speculation": result.get("speculation"),
                 "startup_elapsed_seconds": result.get("startup_elapsed_seconds"),
                 "server_timings": result.get("server_timings"),
+                "finish_reason": result.get("finish_reason"),
+                "structured_data": data,
             },
             provider_request_id=provider_request_id,
             usage=_usage(

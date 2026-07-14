@@ -46,6 +46,45 @@ def test_reconciliation_maps_recognized_compound_to_two_script_words() -> None:
     assert words[0].end_seconds == words[1].start_seconds
 
 
+def test_reconciliation_prefers_word_match_before_compound_match() -> None:
+    canonical = "Nyt portaalla näkyy nestemäistä vettä jään pinnalla."
+    recognized = _timings(
+        ["Nyt", "portaalla", "näkyy", "nestämäistä", "vettäjää", "pinnalla."]
+    )
+
+    words, coverage = reconcile_word_timings(canonical, recognized, scene_duration=3)
+
+    assert coverage == 1
+    assert [word.text for word in words] == canonical.split()
+    assert words[4].end_seconds == words[5].start_seconds
+
+
+def test_reconciliation_accepts_short_spelling_variant_with_one_real_miss() -> None:
+    canonical = "As dawn breaks a single grey speck drifts into the massive approaching storm"
+    recognized = _timings(
+        [
+            "As",
+            "stone",
+            "breaks",
+            "a",
+            "single",
+            "gray",
+            "speck",
+            "drifts",
+            "into",
+            "the",
+            "massive",
+            "approaching",
+            "storm",
+        ]
+    )
+
+    words, coverage = reconcile_word_timings(canonical, recognized, scene_duration=6.5)
+
+    assert coverage == 12 / 13
+    assert [word.text for word in words] == canonical.split()
+
+
 def test_reconciliation_still_rejects_unrelated_transcript() -> None:
     canonical = "alpha bravo charlie delta echo foxtrot golf hotel india juliet"
     recognized = _timings(["winter", "forest", "lantern", "quiet", "river"])

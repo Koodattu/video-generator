@@ -4,7 +4,6 @@ from pydantic import BaseModel
 
 from .contracts import (
     CandidateSet,
-    ClaimInventory,
     ContentFormat,
     ContentMode,
     ExplainerCandidateSet,
@@ -19,6 +18,7 @@ from .contracts import (
     ResolvedRunConfig,
     ReviewReport,
     RevisedScript,
+    SceneClaimExtraction,
     SelectionReport,
     StoryOutline,
     TimedImageRequest,
@@ -54,7 +54,7 @@ def task_output_models(config: ResolvedRunConfig | None = None) -> dict[str, typ
         models.update(
             {
                 "research": FactualResearchPack,
-                "claim_inventory": ClaimInventory,
+                "claim_inventory": SceneClaimExtraction,
                 "factual_review": FactualReviewReport,
             }
         )
