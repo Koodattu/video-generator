@@ -17,7 +17,7 @@ from .task_models import task_output_models
 
 
 PROMPT_SET_VERSION = "2026-07-12.v14"
-MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-14.v43"
+MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-15.v50"
 
 
 SHARED_RULES = """
@@ -685,6 +685,12 @@ owns the Shot/Scene identity, narration excerpt, timing, duration, order, style 
 definitions. Select only supplied character_identities that are visibly present. Depict the current
 narration excerpt literally and immediately; use previous_visual and next_visual_target only as
 read-only continuity context. Do not repeat host-owned fields or describe another image.
+
+When visual_strategy is single-factual-depiction-v1, return only one depiction string for the current
+image. Name the visible subjects, their static spatial arrangement, and only the relationship directly
+authorized by active supported Claims and allowed Evidence. Do not return IDs, narration, timing,
+style, continuity, constraints, lists, or generation settings; Python owns and assembles those fields.
+Do not request written text, numerals, units, labels, readable scales, or a visible measurement readout.
 """
     if task_id == "image_prompt_compile":
         instructions += """
@@ -813,7 +819,7 @@ def build_frozen_assets(config: ResolvedRunConfig | None = None) -> dict[str, An
     }
     assets: dict[str, Any] = {
         "prompt_set_version": prompt_set_version,
-        "workflow_policy_version": 2 if legacy_pack else 26,
+        "workflow_policy_version": 2 if legacy_pack else 33,
         "prompts": prompts,
         "image_targets": TARGET_IMAGE_GUIDANCE,
         "schemas": schemas,

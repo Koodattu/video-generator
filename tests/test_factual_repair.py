@@ -2434,6 +2434,466 @@ def test_policy_twenty_six_no_claim_visual_uses_host_neutral_fallback() -> None:
     ]
 
 
+@pytest.mark.parametrize("workflow_policy_version", [27, 29, 31])
+@pytest.mark.parametrize("initial_verdict", ["underillustrated", "unsupported"])
+def test_policy_twenty_seven_and_later_uses_host_threshold_compiler(
+    workflow_policy_version: int,
+    initial_verdict: str,
+) -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = workflow_policy_version
+    initial = _visual_content(
+        action="A solid ice layer sits below a different amount of liquid water.",
+        state_after_scene=["the unequal liquid layers remain"],
+    ).model_copy(
+        update={
+            "story_moment": "Pure water visibly freezes into a thick layer of ice.",
+            "subjects": ["pure water layer", "solid ice layer"],
+            "environment": "a layered frozen surface",
+            "composition": "different liquid levels above unequal amounts of ice",
+            "must_show": ["thick ice", "thin liquid layer"],
+            "must_avoid": ["text", "salt grains"],
+            "character_ids": ["character-001"],
+            "continuity_from_previous": ["preserve the old ice layer"],
+            "identity_requirements": ["preserve the round glasses"],
+            "persistent_elements": ["old ice layer"],
+        }
+    )
+    verdicts = iter([initial_verdict, "grounded"])
+    calls: list[dict] = []
+
+    def structured_item(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["task_id"] == "factual_review"
+        value = FactualVisualDecision(
+            verdict=next(verdicts),
+            rationale=(
+                "The complete comparison was checked against the supported salinity threshold."
+            ),
+        )
+        kwargs["invariant"](value)
+        return value, []
+
+    claim = "Veden jäätymispiste laskee, kun veden suolaisuus kasvaa."
+    engine._structured_item = structured_item
+    result, usage = engine._audit_and_repair_factual_visual_content(
+        visual_id="shot-004",
+        content=initial,
+        grounding={
+            "supported_claims": [
+                {
+                    "scene_id": "scene-003",
+                    "exact_text": claim,
+                    "evidence_ids": ["evidence-001"],
+                }
+            ],
+            "nonfactual_framing": [],
+            "allowed_evidence_records": [
+                {
+                    "evidence_id": "evidence-001",
+                    "supported_statement": claim,
+                }
+            ],
+        },
+        staging_context={
+            "narration_excerpt": claim,
+            "modern_anchor": "salt beside a frozen step",
+        },
+        style_profile={"description": "paper cut"},
+        character_identities=[{"character_id": "character-001"}],
+        invariant=lambda value: None,
+    )
+
+    assert usage == []
+    assert [call["item_id"] for call in calls] == [
+        "audit-content-shot-004",
+        "recheck-content-shot-004",
+    ]
+    assert all(call["output_model"] is FactualVisualDecision for call in calls)
+
+    positive_fields = " ".join(
+        [
+            result.story_moment,
+            *result.subjects,
+            result.action,
+            result.emotion,
+            result.environment,
+            result.composition,
+            *result.must_show,
+            *result.continuity_from_previous,
+            *result.state_after_scene,
+            *result.persistent_elements,
+        ]
+    ).casefold()
+    assert "lower-salinity water" in positive_fields
+    assert "higher-salinity water" in positive_fields
+    assert "equal liquid levels" in positive_fields
+    assert "marker beside higher-salinity water" in positive_fields
+    assert "denser uniform salt-particle pattern" in positive_fields
+    assert "solid ice" not in positive_fields
+    assert "different amount" not in positive_fields
+    assert not any(character.isnumeric() for character in positive_fields)
+    assert "°" not in positive_fields
+    assert result.must_avoid != initial.must_avoid
+    assert "salt grains" not in result.must_avoid
+    assert any("phase change" in item for item in result.must_avoid)
+    assert result.character_ids == initial.character_ids
+    assert result.identity_requirements == initial.identity_requirements
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "Meriveden jäätymispiste on noin miinus kaksi astetta.",
+        "Basalt has a lower freezing point than granite.",
+        "Salinity is 5 percent and the freezing point is minus 2 degrees.",
+        "Choose salt rather than basalt because its freezing point is lower.",
+        "Salt does not lower the freezing point of water.",
+        "Lower salinity decreases the freezing point.",
+        "Jäätymispiste ei alene, vaikka suolaisuus kasvaa.",
+        "Matala suolaisuus laskee jäätymispistettä.",
+        "Salt lowers viscosity, while the freezing point rises.",
+        "Higher salinity causes corrosion. The freezing point lowers under pressure.",
+        "Suola laskee lämpötilaa, mutta jäätymispiste nousee.",
+    ],
+)
+def test_factual_threshold_compiler_rejects_non_relational_claims(claim: str) -> None:
+    grounding = {
+        "supported_claims": [
+            {
+                "scene_id": "scene-001",
+                "exact_text": claim,
+                "evidence_ids": ["evidence-001"],
+            }
+        ]
+    }
+
+    assert not WorkflowEngine._has_supported_salinity_freezing_threshold_relation(
+        grounding
+    )
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "Veden jäätymispiste laskee, kun veden suolaisuus kasvaa.",
+        "Kun suolaisuus kasvaa, veden jäätymispiste laskee.",
+        "As salinity increases, the freezing point drops.",
+        "The freezing point is lower at higher salinity.",
+        "Salt lowers the freezing point of water.",
+        "Increasing salinity lowers the freezing point.",
+        "Suolaisuuden kasvu laskee jäätymispistettä.",
+    ],
+)
+def test_factual_threshold_compiler_accepts_affirmative_directional_claims(
+    claim: str,
+) -> None:
+    grounding = {
+        "supported_claims": [
+            {
+                "scene_id": "scene-001",
+                "exact_text": claim,
+                "evidence_ids": ["evidence-001"],
+            }
+        ]
+    }
+
+    assert WorkflowEngine._has_supported_salinity_freezing_threshold_relation(
+        grounding
+    )
+
+
+def test_policy_twenty_nine_accepts_safe_underillustrated_visual_without_editing() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 29
+    content = _visual_content(
+        action="Salt grains and ice remain separate and motionless.",
+        state_after_scene=["the static arrangement remains unchanged"],
+    )
+    calls: list[dict] = []
+
+    def structured_item(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["task_id"] == "factual_review"
+        value = FactualVisualDecision(
+            verdict="underillustrated",
+            rationale="The static candidate is safe but does not encode the active relationship.",
+        )
+        kwargs["invariant"](value)
+        return value, []
+
+    engine._structured_item = structured_item
+    claim = "Salinity affects water density and freezing point."
+    result, usage = engine._audit_and_repair_factual_visual_content(
+        visual_id="shot-007",
+        content=content,
+        grounding={
+            "supported_claims": [
+                {
+                    "scene_id": "scene-004",
+                    "exact_text": claim,
+                    "evidence_ids": ["evidence-001"],
+                }
+            ],
+            "nonfactual_framing": [],
+            "allowed_evidence_records": [
+                {
+                    "evidence_id": "evidence-001",
+                    "supported_statement": claim,
+                }
+            ],
+        },
+        staging_context={"modern_anchor": "salt beside a frozen step"},
+        style_profile={"description": "paper cut"},
+        character_identities=[],
+        invariant=lambda value: None,
+    )
+
+    assert result is content
+    assert usage == []
+    assert [call["item_id"] for call in calls] == ["audit-content-shot-007"]
+    assert engine._visual_plan_warnings == [
+        "shot-007 uses a factually safe but underillustrated visual because bounded "
+        "generation and review did not produce a more specific grounded depiction."
+    ]
+
+
+def test_policy_twenty_nine_accepts_safe_bounded_repair_without_coverage_loop() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 29
+    content = _visual_content(
+        action="Salt melts the ice into a liquid pool.",
+        state_after_scene=["a liquid pool surrounds the salt"],
+    )
+    decisions = iter(["unsupported", "underillustrated"])
+    calls: list[dict] = []
+    safe_depiction = "Salt grains and ice remain separate and motionless in a static arrangement."
+
+    def structured_item(**kwargs):
+        calls.append(kwargs)
+        if kwargs["task_id"] == "factual_review":
+            value = FactualVisualDecision(
+                verdict=next(decisions),
+                rationale="The complete candidate was checked against the vague supported claim.",
+            )
+        else:
+            assert kwargs["output_model"] is FactualVisualDepiction
+            value = FactualVisualDepiction(depiction=safe_depiction)
+        kwargs["invariant"](value)
+        return value, []
+
+    engine._structured_item = structured_item
+    claim = "Salinity affects water density and freezing point."
+    result, usage = engine._audit_and_repair_factual_visual_content(
+        visual_id="shot-007",
+        content=content,
+        grounding={
+            "supported_claims": [
+                {
+                    "scene_id": "scene-004",
+                    "exact_text": claim,
+                    "evidence_ids": ["evidence-001"],
+                }
+            ],
+            "nonfactual_framing": [],
+            "allowed_evidence_records": [
+                {
+                    "evidence_id": "evidence-001",
+                    "supported_statement": claim,
+                }
+            ],
+        },
+        staging_context={"modern_anchor": "salt beside a frozen step"},
+        style_profile={"description": "paper cut"},
+        character_identities=[],
+        invariant=lambda value: None,
+    )
+
+    assert usage == []
+    assert result.story_moment == safe_depiction
+    assert [call["item_id"] for call in calls] == [
+        "audit-content-shot-007",
+        "repair-content-shot-007",
+        "recheck-content-shot-007",
+    ]
+    assert sum(call["task_id"] == "visual_plan" for call in calls) == 1
+    assert engine._visual_plan_warnings == [
+        "shot-007 uses a factually safe but underillustrated visual because bounded "
+        "generation and review did not produce a more specific grounded depiction."
+    ]
+
+
+def test_policy_twenty_nine_uses_host_fallback_after_unsupported_repair() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 29
+    content = _visual_content(
+        action="Salt melts the ice into a liquid pool.",
+        state_after_scene=["a liquid pool surrounds the salt"],
+    ).model_copy(
+        update={
+            "subjects": ["salt crystals", "melting ice"],
+            "composition": "Salt visibly melts a thick layer of ice.",
+            "character_ids": ["character-001"],
+            "identity_requirements": ["preserve the round glasses"],
+            "persistent_elements": ["melting ice"],
+        }
+    )
+    decisions = iter(["unsupported", "unsupported", "underillustrated"])
+    calls: list[dict] = []
+
+    def structured_item(**kwargs):
+        calls.append(kwargs)
+        if kwargs["task_id"] == "factual_review":
+            value = FactualVisualDecision(
+                verdict=next(decisions),
+                rationale="The complete candidate was checked for unsupported factual semantics.",
+            )
+        else:
+            assert kwargs["output_model"] is FactualVisualDepiction
+            value = FactualVisualDepiction(
+                depiction="Salt rapidly transforms the ice into liquid water."
+            )
+        kwargs["invariant"](value)
+        return value, []
+
+    engine._structured_item = structured_item
+    claim = "Salinity affects water density and freezing point."
+    result, usage = engine._audit_and_repair_factual_visual_content(
+        visual_id="shot-008",
+        content=content,
+        grounding={
+            "supported_claims": [
+                {
+                    "scene_id": "scene-004",
+                    "exact_text": claim,
+                    "evidence_ids": ["evidence-001"],
+                }
+            ],
+            "nonfactual_framing": [],
+            "allowed_evidence_records": [
+                {
+                    "evidence_id": "evidence-001",
+                    "supported_statement": claim,
+                }
+            ],
+        },
+        staging_context={"modern_anchor": "salt beside a frozen step"},
+        style_profile={"description": "paper cut"},
+        character_identities=[
+            {"character_id": "character-001", "identity": "round glasses"}
+        ],
+        invariant=lambda value: None,
+    )
+
+    assert usage == []
+    assert [call["item_id"] for call in calls] == [
+        "audit-content-shot-008",
+        "repair-content-shot-008",
+        "recheck-content-shot-008",
+        "fallback-recheck-content-shot-008",
+    ]
+    assert sum(call["task_id"] == "visual_plan" for call in calls) == 1
+    fallback_review = calls[-1]
+    assert fallback_review["input_data"]["review_requirement"] == {
+        "claim_depiction_required": True,
+        "active_supported_claim_count": 1,
+        "numeric_claims_need_no_written_text": True,
+    }
+    assert result.subjects == [
+        "the approved recurring characters against an unmarked neutral backdrop"
+    ]
+    assert result.character_ids == content.character_ids
+    assert result.identity_requirements == content.identity_requirements
+    assert result.persistent_elements == []
+    positive_fields = " ".join(
+        [
+            result.story_moment,
+            *result.subjects,
+            result.action,
+            result.environment,
+            result.composition,
+            *result.must_show,
+            *result.continuity_from_previous,
+            *result.state_after_scene,
+            *result.persistent_elements,
+        ]
+    ).casefold()
+    assert "salt" not in positive_fields
+    assert "ice" not in positive_fields
+    assert "liquid" not in positive_fields
+    assert fallback_review["input_data"]["candidate"][
+        "visible_character_identities"
+    ] == [{"character_id": "character-001", "identity": "round glasses"}]
+    assert engine._visual_plan_warnings == [
+        "shot-008 uses a prop-free host safety fallback because bounded generation and one "
+        "safety repair remained unsupported."
+    ]
+
+
+def test_policy_twenty_nine_rejects_unsupported_host_fallback() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 29
+    content = _visual_content(
+        action="Salt melts the ice into a liquid pool.",
+        state_after_scene=["a liquid pool surrounds the salt"],
+    )
+    reviews = iter(
+        [
+            FactualVisualDecision(
+                verdict="unsupported",
+                rationale="The initial candidate invents an unsupported physical outcome.",
+            ),
+            FactualVisualDecision(
+                verdict="unsupported",
+                rationale="The bounded repair still invents an unsupported physical outcome.",
+            ),
+            FactualVisualDecision(
+                verdict="unsupported",
+                rationale="The host fallback unexpectedly retains an unsupported factual assertion.",
+            ),
+        ]
+    )
+    engine._review_factual_visual_candidate = lambda **kwargs: (next(reviews), [])
+
+    def structured_item(**kwargs):
+        value = FactualVisualDepiction(
+            depiction="Salt rapidly transforms the ice into liquid water."
+        )
+        kwargs["invariant"](value)
+        return value, []
+
+    engine._structured_item = structured_item
+    claim = "Salinity affects water density and freezing point."
+
+    with pytest.raises(BackendError, match="after host safety fallback"):
+        engine._audit_and_repair_factual_visual_content(
+            visual_id="shot-009",
+            content=content,
+            grounding={
+                "supported_claims": [
+                    {
+                        "scene_id": "scene-004",
+                        "exact_text": claim,
+                        "evidence_ids": ["evidence-001"],
+                    }
+                ],
+                "nonfactual_framing": [],
+                "allowed_evidence_records": [
+                    {
+                        "evidence_id": "evidence-001",
+                        "supported_statement": claim,
+                    }
+                ],
+            },
+            staging_context={"modern_anchor": "salt beside a frozen step"},
+            style_profile={"description": "paper cut"},
+            character_identities=[],
+            invariant=lambda value: None,
+        )
+
+    assert not hasattr(engine, "_visual_plan_warnings")
+
+
 def test_policy_twenty_three_visual_repair_changes_only_the_depiction_fields() -> None:
     engine = object.__new__(WorkflowEngine)
     engine.workflow_policy_version = 23
@@ -2509,6 +2969,124 @@ def test_policy_twenty_three_visual_repair_changes_only_the_depiction_fields() -
         "persistent_elements",
     ):
         assert getattr(result, field_name) == getattr(initial, field_name)
+
+
+def test_factual_depiction_repair_merges_host_safety_constraints() -> None:
+    initial = _visual_content(
+        action="A thermometer shows a labeled value while ice changes phase.",
+        state_after_scene=["the original state remains"],
+    ).model_copy(
+        update={
+            "must_avoid": [
+                "numbers and units",
+                "phase change",
+                "a fixture-specific hazard",
+            ]
+        }
+    )
+
+    repaired = WorkflowEngine._apply_factual_visual_depiction(
+        initial,
+        FactualVisualDepiction(
+            depiction="A blank thermometer shape remains beside an unchanged sample."
+        ),
+    )
+
+    combined = " ".join(repaired.must_avoid).casefold()
+    assert "numbers" in combined
+    assert "units" in combined
+    assert "readable scales" in combined
+    assert "phase change" in combined
+    assert "a fixture-specific hazard" in repaired.must_avoid
+
+
+def test_policy_thirty_one_compiles_scalar_temperature_without_written_value() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 31
+    initial = _visual_content(
+        action="A labeled thermometer points exactly to −1,9 °C.",
+        state_after_scene=["the labeled value remains visible"],
+    ).model_copy(
+        update={
+            "character_ids": ["character-001"],
+            "identity_requirements": ["preserve the round glasses"],
+        }
+    )
+    engine._structured_item = lambda **kwargs: pytest.fail(
+        "the scalar host compiler must bypass semantic generation and review"
+    )
+    claim = "Meriveden jäätymispiste on noin −1,9 °C."
+
+    result, usage = engine._audit_and_repair_factual_visual_content(
+        visual_id="shot-007",
+        content=initial,
+        grounding={
+            "supported_claims": [
+                {
+                    "scene_id": "scene-004",
+                    "exact_text": claim,
+                    "evidence_ids": ["evidence-001"],
+                }
+            ],
+            "nonfactual_framing": [],
+            "allowed_evidence_records": [
+                {
+                    "evidence_id": "evidence-001",
+                    "supported_statement": claim,
+                }
+            ],
+        },
+        staging_context={"modern_anchor": "salt beside a frozen step"},
+        style_profile={"description": "paper cut"},
+        character_identities=[{"character_id": "character-001"}],
+        invariant=lambda value: None,
+    )
+
+    positive = WorkflowEngine._factual_visual_positive_text(result).casefold()
+    assert usage == []
+    assert "1,9" not in positive
+    assert "1.9" not in positive
+    assert "°" not in positive
+    assert result.character_ids == initial.character_ids
+    assert result.identity_requirements == initial.identity_requirements
+    combined_avoid = " ".join(result.must_avoid).casefold()
+    assert "numbers" in combined_avoid
+    assert "units" in combined_avoid
+    assert "readable scales" in combined_avoid
+    assert engine._visual_plan_warnings == [
+        "shot-007 uses a factually safe but underillustrated visual because bounded "
+        "generation and review did not produce a more specific grounded depiction."
+    ]
+
+
+def test_compact_factual_depiction_compiler_owns_constraints_and_characters() -> None:
+    content = WorkflowEngine._compile_factual_visual_content_from_depiction(
+        FactualVisualDepiction(
+            depiction="A sealed sample sits beside a blank thermometer shape."
+        ),
+        style_profile={
+            "background": "pale paper",
+            "must_avoid": [f"style hazard {index}" for index in range(40)],
+        },
+        character_identities=[
+            {
+                "character_id": "character-001",
+                "name": "Aino",
+                "signature_traits": ["round glasses"],
+                "body_form": "small upright figure",
+                "identity_constraints": ["keep the blue scarf"],
+            }
+        ],
+        has_previous=False,
+    )
+
+    assert content.character_ids == ["character-001"]
+    assert content.identity_requirements
+    assert content.continuity_from_previous == []
+    assert content.state_after_scene
+    assert len(content.must_avoid) == 30
+    assert "numbers" in content.must_avoid[0]
+    assert "unsupported factual mechanisms" in content.must_avoid[1]
 
 
 def test_policy_twenty_five_visual_repair_uses_compact_input_and_safe_refinement() -> None:
@@ -2651,3 +3229,45 @@ def test_factual_image_prompt_is_assembled_from_approved_fields() -> None:
     assert style.description in compiled.prompt
     assert "liquid water" not in compiled.prompt
     assert "liquid water" in compiled.negative_prompt
+
+
+@pytest.mark.parametrize(
+    "measurement",
+    ["−1,9 °C", "1.9 degrees Celsius", "5 percent", "35 PSU"],
+)
+def test_factual_image_prompt_rejects_literal_measurements(
+    measurement: str,
+) -> None:
+    engine = object.__new__(WorkflowEngine)
+    brief = VisualBrief(
+        scene_id="scene-001",
+        story_moment=f"A thermometer visibly reads {measurement}.",
+        subjects=["thermometer"],
+        action=f"The marker points to {measurement}.",
+        emotion="neutral",
+        environment="a blank paper background",
+        composition="one centered object",
+        must_show=[f"the exact {measurement} readout"],
+        must_avoid=["written text", "numbers", "units"],
+    )
+    style = StyleProfile(
+        style_id="paper_cut",
+        description="Layered paper-cut illustration.",
+        palette=["icy blue", "white"],
+        line_style="clean cut-paper edges",
+        background="soft pale-blue paper",
+        must_avoid=["photorealism"],
+    )
+
+    with pytest.raises(BackendError, match="literal measurement value"):
+        engine._compile_factual_image_prompt_content(
+            visual_brief=brief,
+            style_profile=style,
+            characters=[],
+        )
+
+
+def test_literal_measurement_lint_ignores_aspect_ratio_and_style_dimension() -> None:
+    assert not WorkflowEngine._contains_literal_measurement_value(
+        "A clear 16:9 composition in a flat 2D paper-cut style."
+    )

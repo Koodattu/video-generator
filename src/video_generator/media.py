@@ -340,7 +340,66 @@ def _normalize_token(value: str) -> str:
     return "".join(character for character in value if unicodedata.category(character)[0] in {"L", "N"})
 
 
-CAPTION_RECONCILIATION_REVISION = "canonical-gap-v4-bounded-recognized-lookahead"
+CAPTION_RECONCILIATION_REVISION = "canonical-gap-v6-cued-measurement-span"
+
+_SPOKEN_NUMBER_PREFIXES = (
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+    "minus",
+    "negative",
+    "nolla",
+    "yksi",
+    "kaksi",
+    "kolme",
+    "neljä",
+    "viisi",
+    "kuusi",
+    "seitsemän",
+    "kahdeksan",
+    "yhdeksän",
+    "kymmenen",
+    "miinus",
+)
+
+
+def _is_numeric_measurement_pair(number: str, unit: str) -> bool:
+    normalized_number = unicodedata.normalize("NFKC", number)
+    normalized_unit = unicodedata.normalize("NFKC", unit).casefold()
+    if not re.search(r"\d", normalized_number):
+        return False
+    return (
+        re.match(
+            r"^(?:°\s*[cfk]|%|kg|g|mg|µg|l|ml|m|cm|mm|km|s|ms|h|hz|khz|mhz|ghz|w|kw|v|a|pa|kpa|bar|psi)(?:\W|$)",
+            normalized_unit,
+        )
+        is not None
+    )
+
+
+def _has_spoken_numeric_cue(value: str) -> bool:
+    normalized = _normalize_token(value)
+    return any(character.isdigit() for character in normalized) or any(
+        normalized.startswith(prefix) for prefix in _SPOKEN_NUMBER_PREFIXES
+    )
 
 
 def _tokens_are_close(left: str, right: str) -> bool:
@@ -366,6 +425,7 @@ def _merged_word_timing(words: Sequence[WordTiming]) -> WordTiming:
 
 
 def _map_reconciliation_gap(
+    canonical_words: Sequence[str],
     canonical_tokens: Sequence[str],
     recognized: Sequence[WordTiming],
     *,
@@ -381,6 +441,40 @@ def _map_reconciliation_gap(
     while canonical_index < canonical_end and recognized_index < recognized_end:
         canonical_token = canonical_tokens[canonical_index]
         recognized_token = recognized_tokens[recognized_index]
+        if (
+            canonical_end - canonical_index == 2
+            and recognized_end - recognized_index == 1
+            and _is_numeric_measurement_pair(
+                canonical_words[canonical_index],
+                canonical_words[canonical_index + 1],
+            )
+            and _has_spoken_numeric_cue(recognized[recognized_index].text)
+        ):
+            timing = recognized[recognized_index]
+            first_length = max(1, len(canonical_token))
+            second_length = max(
+                1,
+                len(canonical_tokens[canonical_index + 1]),
+            )
+            first_fraction = first_length / (first_length + second_length)
+            split = timing.start_seconds + (
+                timing.end_seconds - timing.start_seconds
+            ) * first_fraction
+            mapped[canonical_index] = WordTiming(
+                text=timing.text,
+                start_seconds=timing.start_seconds,
+                end_seconds=split,
+                confidence=timing.confidence,
+            )
+            mapped[canonical_index + 1] = WordTiming(
+                text=timing.text,
+                start_seconds=split,
+                end_seconds=timing.end_seconds,
+                confidence=timing.confidence,
+            )
+            canonical_index += 2
+            recognized_index += 1
+            continue
         direct_score = (
             _token_similarity(canonical_token, recognized_token)
             if _tokens_are_close(canonical_token, recognized_token)
@@ -490,6 +584,7 @@ def reconcile_word_timings(
     for block in matcher.get_matching_blocks():
         mapped.update(
             _map_reconciliation_gap(
+                canonical,
                 canonical_tokens,
                 recognized,
                 canonical_start=canonical_cursor,

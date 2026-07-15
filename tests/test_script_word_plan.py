@@ -5,14 +5,17 @@ import pytest
 from types import SimpleNamespace
 
 from video_generator.contracts import (
+    ContentFormat,
+    ContentMode,
     NarrationScript,
     OutlineScene,
     OutputLanguage,
+    ResearchPack,
     ScriptScene,
     StoryOutline,
 )
 from video_generator.errors import BackendError
-from video_generator.workflow import WorkflowEngine
+from video_generator.workflow import ReplacementText, WorkflowEngine
 
 
 @pytest.mark.parametrize(
@@ -68,6 +71,121 @@ def test_script_word_range_accepts_inclusive_bounds() -> None:
         minimum_words=8,
         maximum_words=12,
     )
+
+
+def test_script_word_range_tolerance_relaxes_only_the_minimum() -> None:
+    def script_with_words(count: int) -> NarrationScript:
+        return NarrationScript(
+            title="Fixture",
+            scenes=[
+                ScriptScene(
+                    scene_id="scene-001",
+                    spoken_text=" ".join(["word"] * count),
+                    pause_after_seconds=0,
+                )
+            ],
+        )
+
+    WorkflowEngine._validate_script_word_range(
+        script_with_words(7),
+        minimum_words=8,
+        maximum_words=12,
+        minimum_tolerance=1,
+    )
+
+    with pytest.raises(BackendError, match=r"has 6 words.*7-12") as under:
+        WorkflowEngine._validate_script_word_range(
+            script_with_words(6),
+            minimum_words=8,
+            maximum_words=12,
+            minimum_tolerance=1,
+        )
+    assert under.value.details["minimum_word_count"] == 7
+    assert under.value.details["nominal_minimum_word_count"] == 8
+    assert under.value.details["minimum_word_tolerance"] == 1
+
+    with pytest.raises(BackendError, match=r"has 13 words.*7-12"):
+        WorkflowEngine._validate_script_word_range(
+            script_with_words(13),
+            minimum_words=8,
+            maximum_words=12,
+            minimum_tolerance=1,
+        )
+
+
+def test_scene_local_word_fit_applies_tolerance_before_requesting_text() -> None:
+    outline = StoryOutline(
+        title="Fixture",
+        concept_summary="A compact fictional explanation.",
+        scenes=[
+            OutlineScene(
+                scene_id="scene-001",
+                narrative_purpose="Explain one bounded idea.",
+                change="The idea becomes clear.",
+                emotional_beat="Curiosity",
+                visual_opportunity="A simple visible action.",
+                provisional_seconds=5,
+            )
+        ],
+    )
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text="two words",
+                pause_after_seconds=0,
+            )
+        ],
+    )
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 30
+    engine.config = SimpleNamespace(
+        output_language=OutputLanguage.ENGLISH,
+        content_mode=ContentMode.FICTION,
+        content_format=ContentFormat.NARRATIVE,
+    )
+    requests = []
+
+    def structured_item(**kwargs):
+        requests.append(kwargs)
+        replacement = ReplacementText(
+            spoken_text="one two three four five six seven eight nine"
+        )
+        kwargs["invariant"](replacement)
+        return replacement, []
+
+    engine._structured_item = structured_item
+
+    fitted, usage = engine._fit_scene_local_script_word_range(
+        script=script,
+        outline=outline,
+        research=ResearchPack(),
+        scene_word_targets=[
+            {
+                "scene_id": "scene-001",
+                "target_word_count": 11,
+            }
+        ],
+        minimum_total=10,
+        target_total=11,
+        maximum_total=12,
+        minimum_tolerance=engine._script_aggregate_word_tolerance(),
+    )
+
+    assert usage == []
+    assert len(requests) == 1
+    assert requests[0]["input_data"]["minimum_word_count"] == 9
+    assert requests[0]["input_data"]["maximum_word_count"] == 12
+    assert requests[0]["input_data"]["aggregate_word_counts"] == {
+        "current": 2,
+        "minimum": 9,
+        "nominal_minimum": 10,
+        "minimum_tolerance": 1,
+        "target": 11,
+        "maximum": 12,
+    }
+    assert len(fitted.scenes[0].spoken_text.split()) == 9
 
 
 @pytest.mark.parametrize(

@@ -734,6 +734,18 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                     else []
                 ),
             }
+        if data.get("visual_strategy") == "single-factual-depiction-v1":
+            has_supported_claim = bool(
+                data.get("factual_grounding", {}).get("supported_claims")
+            )
+            return {
+                "depiction": (
+                    "A static literal arrangement shows only the visible subjects and relationship "
+                    "authorized by the active supported claim."
+                    if has_supported_claim
+                    else "A neutral static arrangement shows only the supplied staging subjects."
+                )
+            }
         if data.get("visual_strategy") == "single-visual-v1":
             target = data["visual_target"]
             characters = data.get("character_identities", [])

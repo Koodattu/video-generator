@@ -73,7 +73,7 @@ def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> No
     assert models["visual_plan"] is TimedVisualPlan
     assert models["image_prompt_compile"] is TimedImageRequest
     assert assets["prompt_set_version"] == MULTI_FORMAT_PROMPT_SET_VERSION
-    assert assets["workflow_policy_version"] == 26
+    assert assets["workflow_policy_version"] == 33
     claim_properties = assets["schemas"]["claim_inventory"]["$defs"]["ExtractedClaim"][
         "properties"
     ]

@@ -313,7 +313,8 @@ def test_factual_fast_mythbuster_uses_evidence_gate_and_timed_shots(
     content_requests = [
         request
         for request in visual_requests
-        if request.input_data.get("visual_strategy") == "single-visual-v1"
+        if request.input_data.get("visual_strategy")
+        == "single-factual-depiction-v1"
     ]
     assert len(foundation_requests) == 1
     assert set(foundation_requests[0].output_schema["properties"]) == {
@@ -321,6 +322,10 @@ def test_factual_fast_mythbuster_uses_evidence_gate_and_timed_shots(
         "characters",
     }
     assert len(content_requests) == len(visual_plan.shots)
+    assert all(
+        set(request.output_schema["properties"]) == {"depiction"}
+        for request in content_requests
+    )
     host_owned_visual_fields = {
         "shot_id",
         "scene_id",
@@ -337,6 +342,17 @@ def test_factual_fast_mythbuster_uses_evidence_gate_and_timed_shots(
         for request in content_requests
     )
     assert all("factual_grounding" in request.input_data for request in content_requests)
+    assert all(
+        not {
+            "visual_target",
+            "previous_visual",
+            "style_profile",
+            "character_identities",
+            "delivery",
+        }
+        & set(request.input_data)
+        for request in content_requests
+    )
     assert all(
         "neither authorizes nor prohibits" in request.input_data["staging_context"]["rule"]
         for request in content_requests

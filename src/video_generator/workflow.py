@@ -108,7 +108,7 @@ from .util import (
 
 
 INTERNAL_REVISION = "media-workflow-v9"
-MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v43"
+MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v50"
 
 HOST_LEXICAL_POLICY_PREFIX = "Host lexical support policy"
 HOST_SELF_CONTAINED_POLICY_PREFIX = "Host self-contained claim policy"
@@ -243,6 +243,10 @@ HOST_OWNED_NONFACTUAL_TRANSITIONS = frozenset(
 LEGACY_INTERNAL_REVISION = "media-workflow-v8"
 MAX_AUTHORED_SCENE_PAUSE_SECONDS = 0.75
 DELIVERY_RATE_FIT_MARGIN = 0.002
+MINIMUM_NET_NARRATION_TEMPO = 0.75
+MAXIMUM_NET_NARRATION_TEMPO = 1.35
+DURATION_REPAIR_AGGREGATE_WORD_TOLERANCE = 1
+SCRIPT_AGGREGATE_WORD_TOLERANCE = 1
 DetectorFactory.seed = 0
 
 CandidateSetLike = CandidateSet | ExplainerCandidateSet
@@ -648,6 +652,7 @@ class WorkflowEngine:
                     outline,
                     minimum_words=int(script_word_plan["minimum_total_word_count"]),
                     maximum_words=int(script_word_plan["maximum_total_word_count"]),
+                    minimum_tolerance=self._script_aggregate_word_tolerance(),
                     enforce_pause_limit=self.continuity_policy_enabled,
                     maximum_pause_seconds=self._maximum_authored_pause_seconds(),
                 )
@@ -714,6 +719,7 @@ class WorkflowEngine:
                     [scene.scene_id for scene in outline.scenes],
                     minimum_words=int(script_word_plan["minimum_total_word_count"]),
                     maximum_words=int(script_word_plan["maximum_total_word_count"]),
+                    minimum_tolerance=self._script_aggregate_word_tolerance(),
                     enforce_pause_limit=self.continuity_policy_enabled,
                     maximum_pause_seconds=self._maximum_authored_pause_seconds(),
                 )
@@ -1345,6 +1351,29 @@ class WorkflowEngine:
             ),
         )
 
+    def _record_factual_visual_degradation(
+        self,
+        visual_id: str,
+        *,
+        host_fallback: bool = False,
+    ) -> None:
+        warning = (
+            f"{visual_id} uses a prop-free host safety fallback because bounded generation and "
+            "one safety repair remained unsupported."
+            if host_fallback
+            else f"{visual_id} uses a factually safe but underillustrated visual because bounded "
+            "generation and review did not produce a more specific grounded depiction."
+        )
+        warnings = getattr(self, "_visual_plan_warnings", None)
+        if warnings is None:
+            warnings = []
+            self._visual_plan_warnings = warnings
+        if warning not in warnings:
+            warnings.append(warning)
+        store = getattr(self, "store", None)
+        if store is not None:
+            store.add_warning(warning)
+
     def _audit_and_repair_factual_visual_content(
         self,
         *,
@@ -1376,6 +1405,37 @@ class WorkflowEngine:
                     if identity.get("character_id") in visible_ids
                 ],
             }
+
+        def host_numeric_safety(
+            value: VisualBriefContent,
+        ) -> VisualBriefContent | None:
+            if getattr(self, "workflow_policy_version", 30) < 31:
+                return None
+            if self._has_supported_scalar_temperature_claim(grounding):
+                safe = self._compile_factual_visual_unlabeled_temperature(value)
+            elif self._factual_visual_repeats_supported_numeric_value(
+                value,
+                grounding,
+            ):
+                safe = (
+                    self._compile_factual_visual_threshold(value)
+                    if self._has_supported_salinity_freezing_threshold_relation(
+                        grounding
+                    )
+                    else self._neutral_factual_visual_fallback(
+                        value,
+                        retain_listed_subjects=False,
+                    )
+                )
+            else:
+                return None
+            invariant(safe)
+            self._record_factual_visual_degradation(visual_id)
+            return safe
+
+        host_safe_content = host_numeric_safety(content)
+        if host_safe_content is not None:
+            return host_safe_content, []
 
         decision, audit_usage = self._review_factual_visual_candidate(
             stage="visual-plan",
@@ -1414,6 +1474,42 @@ class WorkflowEngine:
                     "after correcting the neutral factual visual context."
                 ),
             )
+
+        if (
+            getattr(self, "workflow_policy_version", 26) >= 27
+            and self._has_supported_salinity_freezing_threshold_relation(grounding)
+        ):
+            threshold_visual = self._compile_factual_visual_threshold(content)
+            invariant(threshold_visual)
+            threshold_recheck, threshold_recheck_usage = (
+                self._review_factual_visual_candidate(
+                    stage="visual-plan",
+                    item_id=f"recheck-content-{visual_id}",
+                    candidate_kind="visual_content",
+                    candidate=candidate_payload(threshold_visual),
+                    grounding=grounding,
+                    staging_context=staging_context,
+                )
+            )
+            usage = [*audit_usage, *threshold_recheck_usage]
+            if threshold_recheck.verdict == "grounded":
+                return threshold_visual, usage
+            raise BackendError(
+                f"factual visual gate blocked {visual_id} after host threshold compilation: "
+                + threshold_recheck.rationale,
+                kind=ErrorKind.INVALID_OUTPUT,
+                action=(
+                    "Improve the bounded threshold evidence or explicitly rerun from visual-plan "
+                    "after correcting the supported comparison."
+                ),
+            )
+
+        if (
+            getattr(self, "workflow_policy_version", 28) >= 29
+            and decision.verdict == "underillustrated"
+        ):
+            self._record_factual_visual_degradation(visual_id)
+            return content, audit_usage
 
         visual_requirement = {
             "claim_depiction_required": bool(grounding.get("supported_claims")),
@@ -1504,6 +1600,11 @@ class WorkflowEngine:
                     "assembles all identity, continuity, environment, composition, and host-owned "
                     "fields; return none of them."
                 )
+            if getattr(self, "workflow_policy_version", 30) >= 31:
+                depiction_instruction += (
+                    " Never include written numerals, units, degree symbols, labels, readable "
+                    "scales, or a visible measurement readout."
+                )
 
             replacement, repair_usage = self._structured_item(
                 stage="visual-plan",
@@ -1536,6 +1637,9 @@ class WorkflowEngine:
                     "contract, Character definition, or surrounding visual item."
                 ),
             )
+        host_safe_repair = host_numeric_safety(repaired)
+        if host_safe_repair is not None:
+            return host_safe_repair, [*audit_usage, *repair_usage]
         recheck, recheck_usage = self._review_factual_visual_candidate(
             stage="visual-plan",
             item_id=f"recheck-content-{visual_id}",
@@ -1547,6 +1651,45 @@ class WorkflowEngine:
         usage = [*audit_usage, *repair_usage, *recheck_usage]
         if recheck.verdict == "grounded":
             return repaired, usage
+        if (
+            getattr(self, "workflow_policy_version", 28) >= 29
+            and recheck.verdict == "underillustrated"
+        ):
+            self._record_factual_visual_degradation(visual_id)
+            return repaired, usage
+
+        if getattr(self, "workflow_policy_version", 28) >= 29:
+            fallback = self._neutral_factual_visual_fallback(
+                repaired,
+                retain_listed_subjects=False,
+            )
+            invariant(fallback)
+            fallback_recheck, fallback_recheck_usage = (
+                self._review_factual_visual_candidate(
+                    stage="visual-plan",
+                    item_id=f"fallback-recheck-content-{visual_id}",
+                    candidate_kind="visual_content",
+                    candidate=candidate_payload(fallback),
+                    grounding=grounding,
+                    staging_context=staging_context,
+                )
+            )
+            usage.extend(fallback_recheck_usage)
+            if fallback_recheck.verdict in {"grounded", "underillustrated"}:
+                self._record_factual_visual_degradation(
+                    visual_id,
+                    host_fallback=True,
+                )
+                return fallback, usage
+            raise BackendError(
+                f"factual visual gate blocked {visual_id} after host safety fallback: "
+                + fallback_recheck.rationale,
+                kind=ErrorKind.INVALID_OUTPUT,
+                action=(
+                    "Improve the bounded neutral fallback audit or explicitly rerun from visual-plan "
+                    "after correcting the active factual context."
+                ),
+            )
 
         allow_coverage_repair = (
             getattr(self, "workflow_policy_version", 20) >= 21
@@ -1713,38 +1856,408 @@ class WorkflowEngine:
         return repaired, usage
 
     @staticmethod
-    def _neutral_factual_visual_fallback(
+    def _has_supported_salinity_freezing_threshold_relation(
+        grounding: dict[str, Any],
+    ) -> bool:
+        english_variable = r"\b(?:salinity|salt\s+concentration|salt)\b"
+        english_threshold = (
+            r"(?:the\s+)?(?:water(?:'s)?\s+)?freezing\s+point"
+            r"(?:\s+of\s+water)?"
+        )
+        english_threshold_falls = (
+            english_threshold
+            + r"\s+(?:drops?|decreases?|falls?|is\s+lower|"
+            r"becomes?\s+lower|gets?\s+lower)\b"
+        )
+        english_lower_threshold = (
+            r"(?:a\s+)?lower\s+(?:water(?:'s)?\s+)?freezing\s+point"
+        )
+        english_rising_salinity = (
+            r"(?:\b(?:higher|greater|increasing|increased|rising)\s+"
+            r"(?:salinity|salt\s+concentration)\b|"
+            r"\b(?:salinity|salt\s+concentration)\s+"
+            r"(?:increases?|rises?|"
+            r"(?:is|becomes?)\s+(?:higher|greater))\b)"
+        )
+        english_transitive_lowering = (
+            r"(?:lowers?|decreases?|depresses?)\s+" + english_threshold
+        )
+        english_negation = r"\b(?:not|never|no|without)\b|\b\w+n['’]t\b"
+        english_inverse = (
+            r"\b(?:lower|less|reduced|decreasing|decreased)\s+"
+            r"(?:salinity|salt\s+concentration)\b"
+        )
+        english_patterns = (
+            english_variable
+            + r"\s+(?:(?:directly|measurably|slightly|significantly)\s+)?"
+            + english_transitive_lowering,
+            english_rising_salinity
+            + r"\s+(?:(?:directly|measurably|slightly|significantly)\s+)?"
+            + english_transitive_lowering,
+            english_rising_salinity + r"\s*,\s*" + english_threshold_falls,
+            r"(?:as|when)\s+"
+            + english_rising_salinity
+            + r"\s*,?\s*"
+            + english_threshold_falls,
+            english_threshold_falls
+            + r"\s+(?:as|when|at|with|under)\s+"
+            + english_rising_salinity,
+            r"(?:at|with|under)\s+"
+            + english_rising_salinity
+            + r"\s*,\s*"
+            + english_threshold_falls,
+            english_rising_salinity
+            + r"\s+(?:means|produces|gives)\s+"
+            + english_lower_threshold,
+        )
+
+        finnish_variable = r"\b(?:suolaisu\w*|suolapitoisu\w*|suola\w*)\b"
+        finnish_threshold = r"(?:veden\s+)?jäätymispiste\w*"
+        finnish_threshold_falls = (
+            finnish_threshold
+            + r"\s+(?:laske\w*|alene\w*|madalt\w*|"
+            r"on\s+(?:alemp\w*|matalamp\w*))\b"
+        )
+        finnish_lower_threshold = (
+            r"(?:alemp\w*|matalamp\w*)\s+" + finnish_threshold
+        )
+        finnish_rising_salinity = (
+            r"(?:\b(?:suuremp\w*|korkeamp\w*|kasvav\w*|lisääntyv\w*)\s+"
+            r"(?:suolais\w*|suolapitoisu\w*)\b|"
+            r"\b(?:suolais\w*|suolapitoisu\w*)\s+"
+            r"(?:kasv\w*|nouse\w*|lisäänty\w*)\b)"
+        )
+        finnish_transitive_lowering = (
+            r"(?:laske\w*|alenta\w*|madalta\w*)\s+" + finnish_threshold
+        )
+        finnish_negation = r"\b(?:ei|eivät|eikä|eivätkä|ilman)\b"
+        finnish_inverse = (
+            r"\b(?:matal\w*|pienem\w*|vähäisem\w*|laskev\w*|alenev\w*)\s+"
+            r"(?:suolais\w*|suolapitoisu\w*)\b|"
+            r"\b(?:suolais\w*|suolapitoisu\w*)\s+"
+            r"(?:laske\w*|alene\w*|vähene\w*)\b"
+        )
+        finnish_patterns = (
+            finnish_variable
+            + r"\s+(?:suoraan\s+)?"
+            + finnish_transitive_lowering,
+            finnish_rising_salinity
+            + r"\s+(?:suoraan\s+)?"
+            + finnish_transitive_lowering,
+            finnish_rising_salinity + r"\s*,\s*" + finnish_threshold_falls,
+            r"(?:kun|samalla\s+kun)\s+(?:veden\s+)?"
+            + finnish_rising_salinity
+            + r"\s*,?\s*"
+            + finnish_threshold_falls,
+            finnish_threshold_falls
+            + r"\s*,?\s+(?:kun|samalla\s+kun)\s+(?:veden\s+)?"
+            + finnish_rising_salinity,
+            finnish_threshold_falls + r"\s+" + finnish_rising_salinity,
+            finnish_rising_salinity
+            + r"\s+(?:tarkoitta\w*|merkitse\w*)\s+"
+            + finnish_lower_threshold,
+        )
+
+        for claim in grounding.get("supported_claims", []):
+            claim_text = re.sub(
+                r"\s+",
+                " ",
+                unicodedata.normalize(
+                    "NFKC", str(claim.get("exact_text") or "")
+                ).casefold(),
+            )
+            english_relation = (
+                not re.search(english_negation, claim_text)
+                and not re.search(english_inverse, claim_text)
+                and any(re.search(pattern, claim_text) for pattern in english_patterns)
+            )
+            finnish_relation = (
+                not re.search(finnish_negation, claim_text)
+                and not re.search(finnish_inverse, claim_text)
+                and any(re.search(pattern, claim_text) for pattern in finnish_patterns)
+            )
+            if english_relation or finnish_relation:
+                return True
+        return False
+
+    @staticmethod
+    def _compile_factual_visual_threshold(
         content: VisualBriefContent,
     ) -> VisualBriefContent:
-        must_show = list(content.subjects) or ["a neutral static arrangement"]
+        first_sample = "lower-salinity water"
+        second_sample = "higher-salinity water"
+        lower_sample = second_sample
+        higher_sample = first_sample
+        subjects = [
+            f"an equal-volume sample of {first_sample}",
+            f"an equal-volume sample of {second_sample}",
+            "two matching unlabeled vertical threshold gauges",
+        ]
+        if content.character_ids:
+            subjects.append("the approved recurring characters as neutral observers")
         return content.model_copy(
             update={
                 "story_moment": (
-                    "A neutral static arrangement of the listed subjects with no visible "
-                    "interaction, process, change, comparison, or result."
+                    f"A static side-by-side comparison of {first_sample} and {second_sample} "
+                    f"shows a lower freezing-threshold marker for {lower_sample}."
                 ),
+                "subjects": subjects,
                 "action": (
-                    "All listed subjects remain separate and motionless in a static staged arrangement."
+                    f"Both equal-volume liquid samples remain motionless and unchanged. The "
+                    f"unlabeled gauge beside {lower_sample} has its marker lower than the matching "
+                    f"gauge beside {higher_sample}."
                 ),
+                "emotion": "Neutral factual comparison.",
+                "environment": (
+                    "A simple neutral diagram-like setting containing only the two matching "
+                    "sample containers and their matching unlabeled gauges."
+                ),
+                "composition": (
+                    f"A symmetrical split-screen places {first_sample} on the left and "
+                    f"{second_sample} on the right in identical containers with equal liquid "
+                    f"levels. Matching vertical gauges sit beside them, with only the marker beside "
+                    f"{lower_sample} positioned lower."
+                ),
+                "must_show": [
+                    "two identical containers with exactly equal liquid levels",
+                    f"a sparse uniform salt-particle pattern within {higher_sample}",
+                    f"a denser uniform salt-particle pattern within {lower_sample}",
+                    (
+                        f"two matching unlabeled threshold gauges with the marker beside "
+                        f"{lower_sample} lower than the marker beside {higher_sample}"
+                    ),
+                    "both samples in the same unchanged liquid state",
+                ],
+                "must_avoid": [
+                    "written text, captions, labels, logos, numbers, units, and watermarks",
+                    "different container sizes, sample amounts, or liquid levels",
+                    "ice, different ice amounts, phase change, freezing action, or melting action",
+                    "arrows, causal chains, temperature values, or a third sample",
+                    "salt falling, dissolving, or hovering above either sample",
+                ],
+                "continuity_from_previous": [
+                    "Only the approved recurring identities persist; all comparison elements are "
+                    "newly staged and static."
+                ],
+                "state_after_scene": [
+                    "Both equal liquid levels, both liquid states, and both gauge markers remain "
+                    "unchanged."
+                ],
+                "persistent_elements": [
+                    "two identical equal-volume sample containers",
+                    "two matching unlabeled threshold gauges",
+                ],
+            }
+        )
+
+    @classmethod
+    def _has_supported_scalar_temperature_claim(
+        cls,
+        grounding: dict[str, Any],
+    ) -> bool:
+        if cls._has_supported_salinity_freezing_threshold_relation(grounding):
+            return False
+        claim_texts = [
+            str(claim.get("exact_text") or "").strip()
+            for claim in grounding.get("supported_claims", [])
+            if str(claim.get("exact_text") or "").strip()
+        ]
+        if not claim_texts:
+            return False
+        claim_text = " ".join(claim_texts)
+        if len(cls._numeric_support_tokens(claim_text)) != 1:
+            return False
+        normalized = unicodedata.normalize("NFKC", claim_text).casefold()
+        return any(
+            term in normalized
+            for term in (
+                "temperature",
+                "freezing point",
+                "boiling point",
+                "celsius",
+                "fahrenheit",
+                "lämpötila",
+                "jäätymispiste",
+                "kiehumispiste",
+                "astetta",
+                "°c",
+                "°f",
+            )
+        )
+
+    @staticmethod
+    def _factual_visual_positive_text(content: VisualBriefContent) -> str:
+        return " ".join(
+            [
+                content.story_moment,
+                *content.subjects,
+                content.action,
+                content.emotion,
+                content.environment,
+                content.composition,
+                *content.must_show,
+                *content.identity_requirements,
+                *content.persistent_elements,
+            ]
+        )
+
+    @classmethod
+    def _factual_visual_repeats_supported_numeric_value(
+        cls,
+        content: VisualBriefContent,
+        grounding: dict[str, Any],
+    ) -> bool:
+        claim_numbers = {
+            number
+            for claim in grounding.get("supported_claims", [])
+            for number in cls._numeric_support_tokens(
+                str(claim.get("exact_text") or "")
+            )
+        }
+        return bool(
+            claim_numbers
+            & cls._numeric_support_tokens(cls._factual_visual_positive_text(content))
+        )
+
+    @staticmethod
+    def _contains_literal_measurement_value(text: str) -> bool:
+        normalized = (
+            unicodedata.normalize("NFKC", text)
+            .replace("−", "-")
+            .replace("–", "-")
+        )
+        number = r"[+-]?\d+(?:[.,]\d+)?"
+        unit = (
+            r"(?:°\s*[cf]|degrees?(?:\s+(?:celsius|fahrenheit))?|"
+            r"celsius|fahrenheit|kelvins?|astetta?|%|percent(?:age)?|"
+            r"prosent\w*|psu|ppt|ppm|km|cm|mm|kg|mg|ml|m|g|l|s|h)"
+        )
+        return bool(
+            re.search(
+                rf"{number}\s*{unit}(?![A-Za-zÀ-ÖØ-öø-ÿ])",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _compile_factual_visual_unlabeled_temperature(
+        content: VisualBriefContent,
+    ) -> VisualBriefContent:
+        subjects = [
+            "one neutral material sample in an unmarked container",
+            "one blank unlabeled thermometer shape with a single unnumbered marker",
+        ]
+        if content.character_ids:
+            subjects.append("the approved recurring characters as neutral observers")
+        return content.model_copy(
+            update={
+                "story_moment": (
+                    "A static material sample sits beside a blank unlabeled thermometer shape "
+                    "with one unnumbered marker."
+                ),
+                "subjects": subjects,
+                "action": (
+                    "The sample and blank thermometer remain motionless; the single marker is "
+                    "visible without a readable value or scale."
+                ),
+                "emotion": "Neutral factual observation.",
+                "environment": (
+                    "A sparse neutral diagram-like setting containing only the sample, the blank "
+                    "thermometer shape, and any approved neutral observers."
+                ),
+                "composition": (
+                    "A centered static still places the unmarked sample container beside one blank "
+                    "vertical thermometer shape with a single unnumbered marker."
+                ),
+                "must_show": [
+                    "one unmarked sample container",
+                    "one blank unlabeled thermometer shape",
+                    "one unnumbered marker with no readable scale",
+                    "a completely static unchanged arrangement",
+                ],
+                "must_avoid": [
+                    (
+                        "written text, captions, labels, logos, numbers, units, tick labels, "
+                        "readable scales, degree symbols, signatures, and watermarks"
+                    ),
+                    "temperature values, digital displays, equations, arrows, or annotations",
+                    "phase change, freezing, melting, comparison, process, cause, or outcome",
+                    "multiple samples, multiple thermometers, or multiple markers",
+                ],
+                "continuity_from_previous": [
+                    "Only approved recurring identities persist; the measurement props are newly "
+                    "staged and static."
+                ],
+                "state_after_scene": [
+                    "The sample, blank thermometer shape, and unnumbered marker remain unchanged."
+                ],
+                "persistent_elements": [],
+            }
+        )
+
+    @staticmethod
+    def _neutral_factual_visual_fallback(
+        content: VisualBriefContent,
+        *,
+        retain_listed_subjects: bool = True,
+    ) -> VisualBriefContent:
+        if retain_listed_subjects:
+            subjects = list(content.subjects) or ["a neutral static arrangement"]
+            story_moment = (
+                "A neutral static arrangement of the listed subjects with no visible "
+                "interaction, process, change, comparison, or result."
+            )
+            action = (
+                "All listed subjects remain separate and motionless in a static staged arrangement."
+            )
+            composition = (
+                "A clear balanced static still-life composition presenting every listed subject "
+                "separately against a simple background."
+            )
+            continuity = (
+                "The neutral staged arrangement remains unchanged from the preceding image."
+            )
+        else:
+            subjects = (
+                ["the approved recurring characters against an unmarked neutral backdrop"]
+                if content.character_ids
+                else ["an unmarked neutral backdrop with no factual props"]
+            )
+            story_moment = (
+                "A deliberately neutral static safety fallback with no factual object, interaction, "
+                "process, change, comparison, or result."
+            )
+            action = (
+                "Only the approved recurring characters, if any, remain motionless against an "
+                "unmarked backdrop; no factual props are present."
+            )
+            composition = (
+                "A simple balanced composition containing only the approved recurring characters, "
+                "if any, and an unmarked neutral background."
+            )
+            continuity = (
+                "Only approved recurring identities persist; no factual prop or process carries over."
+            )
+        return content.model_copy(
+            update={
+                "story_moment": story_moment,
+                "subjects": subjects,
+                "action": action,
                 "emotion": "Neutral observation.",
                 "environment": (
                     "A simple neutral setting with no visible action, process, change, or result."
                 ),
-                "composition": (
-                    "A clear balanced static still-life composition presenting every listed subject "
-                    "separately against a simple background."
-                ),
-                "must_show": must_show,
+                "composition": composition,
+                "must_show": subjects,
                 "must_avoid": [
                     "written text, labels, logos, numbers, and watermarks",
                     (
                         "motion, hovering, suspension, interaction, mechanism, cause, comparison, "
-                        "quantity, process, change, and outcome"
+                        "quantity, process, change, outcome, and unapproved factual props"
                     ),
                 ],
-                "continuity_from_previous": [
-                    "The neutral staged arrangement remains unchanged from the preceding image."
-                ],
+                "continuity_from_previous": [continuity],
                 "state_after_scene": [
                     "The neutral staged arrangement remains unchanged."
                 ],
@@ -1758,15 +2271,95 @@ class WorkflowEngine:
         replacement: FactualVisualDepiction,
     ) -> VisualBriefContent:
         depiction = replacement.depiction.strip()
+        must_avoid = list(
+            dict.fromkeys(
+                [
+                    (
+                        "written text, captions, labels, logos, numbers, units, readable scales, "
+                        "signatures, and watermarks"
+                    ),
+                    (
+                        "unsupported factual mechanisms, causes, comparisons, quantities, "
+                        "changes, and outcomes"
+                    ),
+                    *content.must_avoid,
+                ]
+            )
+        )[:30]
         return content.model_copy(
             update={
                 "story_moment": depiction,
                 "action": depiction,
                 "must_show": [depiction],
-                "must_avoid": [
-                    "written text, labels, logos, watermarks, and unsupported factual mechanisms"
-                ],
+                "must_avoid": must_avoid,
             }
+        )
+
+    @staticmethod
+    def _compile_factual_visual_content_from_depiction(
+        depiction: FactualVisualDepiction,
+        *,
+        style_profile: dict[str, Any],
+        character_identities: Sequence[dict[str, Any]],
+        has_previous: bool,
+    ) -> VisualBriefContent:
+        depiction_text = depiction.depiction.strip()
+        character_ids = [
+            str(character["character_id"])
+            for character in character_identities
+            if character.get("character_id")
+        ][:20]
+        identity_requirements = []
+        for character in character_identities[:20]:
+            name = str(character.get("name") or character.get("character_id") or "Character")
+            traits = [
+                *character.get("signature_traits", []),
+                str(character.get("body_form") or ""),
+                *character.get("identity_constraints", []),
+            ]
+            identity_requirements.append(
+                f"Preserve {name}: "
+                + "; ".join(str(value).strip() for value in traits if str(value).strip())
+            )
+        mandatory_avoids = [
+            (
+                "written text, captions, labels, logos, numbers, units, readable scales, "
+                "signatures, and watermarks"
+            ),
+            (
+                "unsupported factual mechanisms, causes, comparisons, quantities, changes, "
+                "and outcomes"
+            ),
+        ]
+        must_avoid = list(
+            dict.fromkeys([*mandatory_avoids, *style_profile.get("must_avoid", [])])
+        )[:30]
+        subjects = ["the literal visible subjects named in the approved depiction"]
+        if character_ids:
+            subjects.append("the approved recurring characters as neutral observers")
+        return VisualBriefContent(
+            story_moment=depiction_text,
+            subjects=subjects,
+            action=depiction_text,
+            emotion="Neutral focused observation.",
+            environment=str(style_profile.get("background") or "a sparse neutral setting"),
+            composition=(
+                "One static high-contrast cognitive anchor centered in a clear 16:9 still frame."
+            ),
+            must_show=[depiction_text],
+            must_avoid=must_avoid,
+            character_ids=character_ids,
+            continuity_from_previous=(
+                [
+                    "Only approved recurring character identities persist; factual props are "
+                    "newly staged for this image."
+                ]
+                if has_previous
+                else []
+            ),
+            state_after_scene=["The complete visible arrangement remains static and unchanged."],
+            identity_requirements=identity_requirements,
+            persistent_elements=[],
         )
 
     def _compile_factual_image_prompt_content(
@@ -1838,6 +2431,12 @@ class WorkflowEngine:
         self._require(
             len(prompt) <= 12000 and len(negative_prompt) <= 12000,
             "Host factual image prompt exceeds the Image Request text limit",
+        )
+        self._require(
+            not self._contains_literal_measurement_value(
+                self._factual_visual_positive_text(visual_brief)
+            ),
+            "Host factual image prompt contains a literal measurement value",
         )
         content = ImagePromptContent(prompt=prompt, negative_prompt=negative_prompt)
         self._validate_image_request_language(content)
@@ -1994,6 +2593,13 @@ class WorkflowEngine:
         delivery = getattr(self.config, "narration_delivery_spec", None)
         return delivery.model_dump(mode="json") if delivery is not None else {}
 
+    def _script_aggregate_word_tolerance(self) -> int:
+        return (
+            SCRIPT_AGGREGATE_WORD_TOLERANCE
+            if getattr(self, "workflow_policy_version", 29) >= 30
+            else 0
+        )
+
     def _script_word_plan(self, outline: OutlineLike) -> dict[str, Any]:
         words_per_second = self._target_words_per_second()
         script_backend_id = getattr(self.config, "task_bindings", {}).get("script_draft", "")
@@ -2123,6 +2729,7 @@ class WorkflowEngine:
                 if advisory_scene_words
                 else "strict-per-scene-v1"
             ),
+            "aggregate_minimum_word_tolerance": self._script_aggregate_word_tolerance(),
             "draft": draft_input,
         }
         metadata = self._stage_metadata(
@@ -2133,7 +2740,9 @@ class WorkflowEngine:
         metadata["config_hash"] = hash_value(
             {
                 "strategy": (
-                    "single-scene-v2-host-aggregate-fit"
+                    "single-scene-v3-host-aggregate-minimum-tolerance"
+                    if advisory_scene_words and self.workflow_policy_version >= 30
+                    else "single-scene-v2-host-aggregate-fit"
                     if advisory_scene_words
                     else "single-scene-v1"
                 ),
@@ -2316,6 +2925,7 @@ class WorkflowEngine:
                 minimum_total=int(draft_input["minimum_total_word_count"]),
                 target_total=int(draft_input["target_total_word_count"]),
                 maximum_total=int(draft_input["maximum_total_word_count"]),
+                minimum_tolerance=self._script_aggregate_word_tolerance(),
             )
             usage.extend(fit_usage)
         invariant(script)
@@ -2336,6 +2946,7 @@ class WorkflowEngine:
         minimum_total: int,
         target_total: int,
         maximum_total: int,
+        minimum_tolerance: int = 0,
         stage: str = "script-draft",
         task_id: str = "script_draft",
         strategy_field: str = "draft_strategy",
@@ -2347,8 +2958,9 @@ class WorkflowEngine:
 
         working_scenes = [scene.model_copy(deep=True) for scene in script.scenes]
         protected_by_scene = protected_exact_texts_by_scene or {}
+        allowed_minimum = max(1, minimum_total - minimum_tolerance)
         total = total_words(working_scenes)
-        if minimum_total <= total <= maximum_total:
+        if allowed_minimum <= total <= maximum_total:
             return script, []
 
         targets = {str(item["scene_id"]): item for item in scene_word_targets}
@@ -2363,8 +2975,8 @@ class WorkflowEngine:
         )
         usage: list[UsageRecord] = []
         fitted_scene_ids: set[str] = set()
-        while not minimum_total <= total <= maximum_total:
-            direction = "lengthen" if total < minimum_total else "shorten"
+        while not allowed_minimum <= total <= maximum_total:
+            direction = "lengthen" if total < allowed_minimum else "shorten"
 
             def is_editable(scene: Any) -> bool:
                 if scene.scene_id in fitted_scene_ids:
@@ -2421,7 +3033,7 @@ class WorkflowEngine:
                 sum(len(exact_text.split()) for exact_text in protected_exact_texts),
             )
             if direction == "lengthen":
-                minimum_words = max(actual_words + 1, minimum_total - unchanged_total)
+                minimum_words = max(actual_words + 1, allowed_minimum - unchanged_total)
                 maximum_words = max(minimum_words, maximum_total - unchanged_total)
             else:
                 feasible_maximum = maximum_total - unchanged_total
@@ -2430,7 +3042,7 @@ class WorkflowEngine:
                 else:
                     minimum_words = max(
                         protected_word_floor,
-                        minimum_total - unchanged_total,
+                        allowed_minimum - unchanged_total,
                     )
                     maximum_words = min(actual_words - 1, feasible_maximum)
                     self._require(
@@ -2479,7 +3091,9 @@ class WorkflowEngine:
                 "maximum_word_count": maximum_words,
                 "aggregate_word_counts": {
                     "current": total,
-                    "minimum": minimum_total,
+                    "minimum": allowed_minimum,
+                    "nominal_minimum": minimum_total,
+                    "minimum_tolerance": minimum_tolerance,
                     "target": target_total,
                     "maximum": maximum_total,
                 },
@@ -2569,6 +3183,7 @@ class WorkflowEngine:
         *,
         minimum_words: int,
         maximum_words: int,
+        minimum_tolerance: int = 0,
         enforce_pause_limit: bool = True,
         maximum_pause_seconds: float = MAX_AUTHORED_SCENE_PAUSE_SECONDS,
     ) -> None:
@@ -2581,6 +3196,7 @@ class WorkflowEngine:
             draft,
             minimum_words=minimum_words,
             maximum_words=maximum_words,
+            minimum_tolerance=minimum_tolerance,
         )
         if enforce_pause_limit:
             cls._validate_authored_pauses(draft, maximum_pause_seconds=maximum_pause_seconds)
@@ -2612,24 +3228,34 @@ class WorkflowEngine:
         *,
         minimum_words: int,
         maximum_words: int,
+        minimum_tolerance: int = 0,
     ) -> None:
+        allowed_minimum = max(1, minimum_words - minimum_tolerance)
         actual = sum(len(scene.spoken_text.split()) for scene in script.scenes)
-        if not minimum_words <= actual <= maximum_words:
-            target_words = minimum_words if actual < minimum_words else maximum_words
+        if not allowed_minimum <= actual <= maximum_words:
+            target_words = allowed_minimum if actual < allowed_minimum else maximum_words
+            details: dict[str, Any] = {
+                "actual_word_count": actual,
+                "minimum_word_count": allowed_minimum,
+                "maximum_word_count": maximum_words,
+                "target_word_count": target_words,
+                "word_delta": target_words - actual,
+                "count_method": "whitespace-separated words across every spoken_text field",
+            }
+            if minimum_tolerance:
+                details.update(
+                    {
+                        "nominal_minimum_word_count": minimum_words,
+                        "minimum_word_tolerance": minimum_tolerance,
+                    }
+                )
             raise BackendError(
                 (
                     f"Narration Script has {actual} words; required inclusive range is "
-                    f"{minimum_words}-{maximum_words}"
+                    f"{allowed_minimum}-{maximum_words}"
                 ),
                 kind=ErrorKind.INVALID_OUTPUT,
-                details={
-                    "actual_word_count": actual,
-                    "minimum_word_count": minimum_words,
-                    "maximum_word_count": maximum_words,
-                    "target_word_count": target_words,
-                    "word_delta": target_words - actual,
-                    "count_method": "whitespace-separated words across every spoken_text field",
-                },
+                details=details,
             )
 
     def _validate_outline(
@@ -2831,8 +3457,17 @@ class WorkflowEngine:
         output_model: type[VisualPlanLike],
         invariant: Callable[[Any], None],
     ) -> VisualPlanLike:
+        compact_factual_author = (
+            self.workflow_policy_version >= 31
+            and visual_plan_input.get("factual_grounding") is not None
+        )
+        visual_strategy = (
+            "foundation-and-factual-depictions-v2"
+            if compact_factual_author
+            else "foundation-and-items-v1"
+        )
         aggregate_input = {
-            "visual_strategy": "foundation-and-items-v1",
+            "visual_strategy": visual_strategy,
             "visual_plan": visual_plan_input,
         }
         metadata = self._stage_metadata(
@@ -2842,7 +3477,7 @@ class WorkflowEngine:
         )
         metadata["config_hash"] = hash_value(
             {
-                "strategy": "foundation-and-items-v1",
+                "strategy": visual_strategy,
                 "backend_id": metadata["backend_id"],
                 "backend_revision": metadata["backend_revision"],
                 "language": self.prompts.output_language(
@@ -2852,7 +3487,13 @@ class WorkflowEngine:
                 "timed_visuals": timed_visuals,
                 "factual_visual_gate": (
                     (
-                        "single-factual-visual-v6-host-neutral-fallback"
+                        "single-factual-visual-v9-host-numeric-anchor-compact-author"
+                        if self.workflow_policy_version >= 31
+                        else "single-factual-visual-v8-host-safety-fallback"
+                        if self.workflow_policy_version >= 29
+                        else "single-factual-visual-v7-host-salinity-threshold-compiler"
+                        if self.workflow_policy_version >= 27
+                        else "single-factual-visual-v6-host-neutral-fallback"
                         if self.workflow_policy_version >= 26
                         else "single-factual-visual-v5-compact-bounded-refinement"
                         if self.workflow_policy_version >= 25
@@ -2891,7 +3532,11 @@ class WorkflowEngine:
                     VisualFoundation.model_json_schema(mode="validation")
                 ),
                 "visual_content": restricted_json_schema(
-                    VisualBriefContent.model_json_schema(mode="validation")
+                    (
+                        FactualVisualDepiction
+                        if compact_factual_author
+                        else VisualBriefContent
+                    ).model_json_schema(mode="validation")
                 ),
                 "factual_visual_decision": (
                     restricted_json_schema(
@@ -2916,10 +3561,13 @@ class WorkflowEngine:
         )
         reusable = self.store.reusable_record("visual-plan", **metadata)
         if reusable:
+            for warning in reusable.warnings:
+                self.store.add_warning(warning)
             artifact = self.store.load_artifact(reusable, output_model)
             invariant(artifact)
             return artifact
 
+        self._visual_plan_warnings = []
         attempt = self.store.next_attempt("visual-plan")
         self.store.begin_stage("visual-plan", attempt=attempt, **metadata)
         foundation_input = {
@@ -3006,6 +3654,7 @@ class WorkflowEngine:
         for index, target in enumerate(targets):
             scene_id = str(target["scene_id"])
             visual_id = str(target.get("shot_id") or scene_id)
+            previous_visual = visual_items[-1] if visual_items else None
             next_target = targets[index + 1] if index + 1 < len(targets) else None
             factual_grounding = (
                 self._factual_visual_grounding_for_target(
@@ -3037,8 +3686,25 @@ class WorkflowEngine:
                     "authorizes a mechanism, cause, comparison, quantity, change, or result."
                 ),
             }
-            if factual_visual_gate:
-                previous_visual = visual_items[-1] if visual_items else None
+            if compact_factual_author:
+                item_input = {
+                    "visual_strategy": "single-factual-depiction-v1",
+                    "narration_excerpt": str(target["narration_excerpt"]),
+                    "staging_context": staging_context,
+                    "visual_requirement": {
+                        "claim_depiction_required": claim_depiction_required,
+                        "active_supported_claim_count": len(
+                            factual_grounding.get("supported_claims", [])
+                        ),
+                    },
+                    "rule": (
+                        "Describe one static literal depiction for only this narration excerpt. "
+                        "Active supported Claims and allowed Evidence are the only authority for "
+                        "factual relationships. With no active Claim, use only neutral staging "
+                        "subjects without a mechanism, comparison, change, or result."
+                    ),
+                }
+            elif factual_visual_gate:
                 item_input = {
                     "visual_strategy": "single-visual-v1",
                     "visual_target": target,
@@ -3154,20 +3820,57 @@ class WorkflowEngine:
                             f"{current_visual_id} requires incoming continuity state",
                         )
 
-            content, usage = self._structured_item(
-                stage="visual-plan",
-                item_id=f"content-{visual_id}",
-                task_id="visual_plan",
-                input_data=item_input,
-                output_model=VisualBriefContent,
-                invariant=validate_visual_content,
-                max_output_tokens=1800,
-                instruction_suffix=(
-                    "Return only the visual content fields requested by the schema for this one "
-                    "image. Do not return a Shot ID, Scene ID, narration excerpt, timestamp, "
-                    "duration, Style Profile, Character definition, or surrounding visual item."
-                ),
-            )
+            if compact_factual_author:
+                def validate_factual_depiction(
+                    depiction: FactualVisualDepiction,
+                ) -> None:
+                    validate_visual_content(
+                        self._compile_factual_visual_content_from_depiction(
+                            depiction,
+                            style_profile=style_data,
+                            character_identities=characters,
+                            has_previous=previous_visual is not None,
+                        )
+                    )
+
+                depiction, usage = self._structured_item(
+                    stage="visual-plan",
+                    item_id=f"content-{visual_id}",
+                    task_id="visual_plan",
+                    input_data=item_input,
+                    output_model=FactualVisualDepiction,
+                    invariant=validate_factual_depiction,
+                    max_output_tokens=600,
+                    instruction_suffix=(
+                        "Return only one concise depiction string for this image. Name its visible "
+                        "subjects and static spatial relationship, using only active supported "
+                        "Claims and allowed Evidence. Do not return IDs, timing, narration, style, "
+                        "continuity, constraints, lists, settings, written numerals, units, labels, "
+                        "readable scales, or a measurement readout. Python assembles all other fields."
+                    ),
+                )
+                content = self._compile_factual_visual_content_from_depiction(
+                    depiction,
+                    style_profile=style_data,
+                    character_identities=characters,
+                    has_previous=previous_visual is not None,
+                )
+                validate_visual_content(content)
+            else:
+                content, usage = self._structured_item(
+                    stage="visual-plan",
+                    item_id=f"content-{visual_id}",
+                    task_id="visual_plan",
+                    input_data=item_input,
+                    output_model=VisualBriefContent,
+                    invariant=validate_visual_content,
+                    max_output_tokens=1800,
+                    instruction_suffix=(
+                        "Return only the visual content fields requested by the schema for this one "
+                        "image. Do not return a Shot ID, Scene ID, narration excerpt, timestamp, "
+                        "duration, Style Profile, Character definition, or surrounding visual item."
+                    ),
+                )
             item_usage.extend(usage)
             if factual_visual_gate:
                 content, gate_usage = self._audit_and_repair_factual_visual_content(
@@ -3207,6 +3910,7 @@ class WorkflowEngine:
             "visual-plan",
             plan,
             usage=item_usage,
+            warnings=self._visual_plan_warnings,
         )
         return output_model.model_validate(promoted)
 
@@ -3351,6 +4055,7 @@ class WorkflowEngine:
         *,
         minimum_words: int | None = None,
         maximum_words: int | None = None,
+        minimum_tolerance: int = 0,
         enforce_pause_limit: bool = True,
         maximum_pause_seconds: float = MAX_AUTHORED_SCENE_PAUSE_SECONDS,
     ) -> None:
@@ -3395,6 +4100,7 @@ class WorkflowEngine:
                 revision.script,
                 minimum_words=minimum_words,
                 maximum_words=maximum_words,
+                minimum_tolerance=minimum_tolerance,
             )
         if enforce_pause_limit:
             WorkflowEngine._validate_authored_pauses(
@@ -4870,6 +5576,7 @@ class WorkflowEngine:
         aggregate_input = {
             "revision": revision_input,
             "revision_strategy": "single-scene-replacement-v1",
+            "aggregate_minimum_word_tolerance": self._script_aggregate_word_tolerance(),
         }
         metadata = self._stage_metadata(
             stage="script-revision",
@@ -4883,7 +5590,11 @@ class WorkflowEngine:
                 task_ids.append("claim_inventory")
         metadata["config_hash"] = hash_value(
             {
-                "strategy": "single-scene-semantic-replacement-v3-protected-host-fit",
+                "strategy": (
+                    "single-scene-semantic-replacement-v4-protected-host-fit-minimum-tolerance"
+                    if self.workflow_policy_version >= 30
+                    else "single-scene-semantic-replacement-v3-protected-host-fit"
+                ),
                 "finding_resolution_strategy": "single-finding-resolution-v1",
                 "factual_repair_strategy": (
                     "host-lexical-canonical-sentence-repair-v1"
@@ -5140,6 +5851,7 @@ class WorkflowEngine:
                 minimum_total=minimum_total,
                 target_total=target_total,
                 maximum_total=maximum_total,
+                minimum_tolerance=self._script_aggregate_word_tolerance(),
                 stage="script-revision",
                 task_id="script_revision",
                 strategy_field="revision_strategy",
@@ -5258,10 +5970,14 @@ class WorkflowEngine:
                     outline=outline,
                 )
                 if self.workflow_policy_version >= 11:
+                    allowed_minimum_total = max(
+                        1,
+                        minimum_total - self._script_aggregate_word_tolerance(),
+                    )
                     repaired_script = self._add_neutral_factual_transitions_to_word_floor(
                         script=repaired_script,
                         preferred_scene_ids=failed_scene_ids,
-                        minimum_total=minimum_total,
+                        minimum_total=allowed_minimum_total,
                         maximum_total=maximum_total,
                         canonical_evidence_by_scene=(
                             self._canonical_evidence_statements_by_scene(
@@ -5283,7 +5999,7 @@ class WorkflowEngine:
                             for scene in repaired_script.scenes
                         )
                         self._require(
-                            minimum_total <= repaired_word_count <= maximum_total,
+                            allowed_minimum_total <= repaired_word_count <= maximum_total,
                             (
                                 "Host factual repair could not meet the aggregate word range "
                                 "using only canonical Evidence statements and neutral transitions"
@@ -5746,6 +6462,8 @@ class WorkflowEngine:
             "backend": self.config.task_bindings["narration_synthesis"],
             "delivery": self._delivery_payload(),
         }
+        if self.workflow_policy_version >= 32:
+            input_data["speech_tempo_policy"] = "post-synthesis-net-v1"
         if factual_revision is not None:
             input_data["factual_audit"] = {
                 "claim_inventory": factual_revision.claim_inventory.model_dump(mode="json"),
@@ -5759,8 +6477,18 @@ class WorkflowEngine:
             return self.store.load_artifact(reusable, NarrationBundle)
         aggregate_workspace = self.store.workspace("narration")
         self.store.begin_stage("narration", attempt=aggregate_workspace.attempt, **metadata)
-        items, usage = self._synthesize_script(script, repair=False)
-        bundle = self._assemble_narration(script, items, duration_repaired=False)
+        source_items, usage = self._synthesize_script(script, repair=False)
+        items, preferred_tempo = self._apply_preferred_narration_tempo(
+            source_items,
+            output_root=aggregate_workspace.work_dir / "preferred-tempo-initial",
+        )
+        active_source_items = source_items
+        bundle = self._assemble_narration(
+            script,
+            items,
+            duration_repaired=False,
+            tempo_adjustment=preferred_tempo,
+        )
         if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
             pause_fitted_script = self._fit_pauses_to_budget(
                 script,
@@ -5773,6 +6501,7 @@ class WorkflowEngine:
                     pause_fitted_script,
                     items,
                     duration_repaired=not self.continuity_policy_enabled,
+                    tempo_adjustment=preferred_tempo,
                 )
                 if duration_is_accepted(
                     pause_fitted_bundle.timeline,
@@ -5794,7 +6523,7 @@ class WorkflowEngine:
                     script,
                     tempo_items,
                     duration_repaired=True,
-                    tempo_adjustment=tempo,
+                    tempo_adjustment=preferred_tempo * tempo,
                 )
                 tempo_pause_script = self._fit_pauses_to_budget(
                     script,
@@ -5807,13 +6536,27 @@ class WorkflowEngine:
                         tempo_pause_script,
                         tempo_items,
                         duration_repaired=True,
-                        tempo_adjustment=tempo,
+                        tempo_adjustment=preferred_tempo * tempo,
                     )
                 if duration_is_accepted(
                     tempo_bundle.timeline,
                     self.config.duration_seconds,
                 ):
                     bundle = tempo_bundle
+        if (
+            self.workflow_policy_version >= 33
+            and not duration_is_accepted(bundle.timeline, self.config.duration_seconds)
+        ):
+            net_tempo_bundle = self._fit_narration_net_tempo(
+                script,
+                source_items,
+                output_root=(
+                    aggregate_workspace.work_dir / "net-tempo-before-text-repair"
+                ),
+                duration_repaired=False,
+            )
+            if net_tempo_bundle is not None:
+                bundle = net_tempo_bundle
         if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
             target = self.config.duration_seconds * 0.95
             selected = [scene.scene_id for scene in script.scenes]
@@ -5897,12 +6640,25 @@ class WorkflowEngine:
                     )
                     usage.extend(repair_usage)
                     usage.extend(repaired_factual_usage)
-            repair_items, tts_repair_usage = self._synthesize_script(
-                repaired, repair=True, selected_scene_ids=set(selected), existing_items=items
+            repair_source_items, tts_repair_usage = self._synthesize_script(
+                repaired,
+                repair=True,
+                selected_scene_ids=set(selected),
+                existing_items=source_items,
             )
+            repair_items, repair_preferred_tempo = self._apply_preferred_narration_tempo(
+                repair_source_items,
+                output_root=aggregate_workspace.work_dir / "preferred-tempo-repair",
+            )
+            active_source_items = repair_source_items
             usage.extend(llm_repair_usage)
             usage.extend(tts_repair_usage)
-            bundle = self._assemble_narration(repaired, repair_items, duration_repaired=True)
+            bundle = self._assemble_narration(
+                repaired,
+                repair_items,
+                duration_repaired=True,
+                tempo_adjustment=repair_preferred_tempo,
+            )
             if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
                 pause_fitted_repaired = self._fit_pauses_to_budget(
                     repaired,
@@ -5915,6 +6671,7 @@ class WorkflowEngine:
                         pause_fitted_repaired,
                         repair_items,
                         duration_repaired=True,
+                        tempo_adjustment=repair_preferred_tempo,
                     )
                     if duration_is_accepted(
                         pause_fitted_bundle.timeline,
@@ -5922,39 +6679,49 @@ class WorkflowEngine:
                     ):
                         bundle = pause_fitted_bundle
             if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
-                tempo_items, tempo = self._tempo_fit_narration_items(
-                    repair_items,
-                    pause_seconds=sum(
-                        scene.pause_after_seconds for scene in repaired.scenes
-                    ),
-                    budget_seconds=self.config.duration_seconds,
-                    output_root=aggregate_workspace.work_dir / "tempo-adjusted",
-                )
-                if tempo_items is not None and tempo is not None:
-                    tempo_bundle = self._assemble_narration(
+                if self.workflow_policy_version >= 32:
+                    net_tempo_bundle = self._fit_narration_net_tempo(
                         repaired,
-                        tempo_items,
+                        repair_source_items,
+                        output_root=aggregate_workspace.work_dir / "net-tempo-adjusted",
                         duration_repaired=True,
-                        tempo_adjustment=tempo,
                     )
-                    tempo_pause_script = self._fit_pauses_to_budget(
-                        repaired,
-                        tempo_bundle.timeline,
-                        self.config.duration_seconds,
-                        allow_expansion=not self.continuity_policy_enabled,
+                    if net_tempo_bundle is not None:
+                        bundle = net_tempo_bundle
+                else:
+                    tempo_items, tempo = self._tempo_fit_narration_items(
+                        repair_items,
+                        pause_seconds=sum(
+                            scene.pause_after_seconds for scene in repaired.scenes
+                        ),
+                        budget_seconds=self.config.duration_seconds,
+                        output_root=aggregate_workspace.work_dir / "tempo-adjusted",
                     )
-                    if tempo_pause_script is not None:
+                    if tempo_items is not None and tempo is not None:
                         tempo_bundle = self._assemble_narration(
-                            tempo_pause_script,
+                            repaired,
                             tempo_items,
                             duration_repaired=True,
                             tempo_adjustment=tempo,
                         )
-                    if duration_is_accepted(
-                        tempo_bundle.timeline,
-                        self.config.duration_seconds,
-                    ):
-                        bundle = tempo_bundle
+                        tempo_pause_script = self._fit_pauses_to_budget(
+                            repaired,
+                            tempo_bundle.timeline,
+                            self.config.duration_seconds,
+                            allow_expansion=not self.continuity_policy_enabled,
+                        )
+                        if tempo_pause_script is not None:
+                            tempo_bundle = self._assemble_narration(
+                                tempo_pause_script,
+                                tempo_items,
+                                duration_repaired=True,
+                                tempo_adjustment=tempo,
+                            )
+                        if duration_is_accepted(
+                            tempo_bundle.timeline,
+                            self.config.duration_seconds,
+                        ):
+                            bundle = tempo_bundle
             if not duration_is_accepted(bundle.timeline, self.config.duration_seconds):
                 raise MediaError(
                     (
@@ -5965,7 +6732,21 @@ class WorkflowEngine:
                     kind=ErrorKind.INVALID_OUTPUT,
                     action="Inspect the repaired script and explicitly rerun from narration with adjusted duration or voice settings.",
                 )
-        if self.workflow_policy_version >= 18:
+        if (
+            self.workflow_policy_version >= 32
+            and not self._narration_delivery_rate_is_accepted(bundle)
+        ):
+            net_tempo_bundle = self._fit_narration_net_tempo(
+                bundle.script,
+                active_source_items,
+                output_root=(
+                    aggregate_workspace.work_dir / "net-delivery-tempo-adjusted"
+                ),
+                duration_repaired=bundle.duration_repaired,
+            )
+            if net_tempo_bundle is not None:
+                bundle = net_tempo_bundle
+        if 18 <= self.workflow_policy_version < 32:
             delivery_fitted_bundle = self._fit_narration_delivery_tempo(
                 bundle,
                 output_root=(
@@ -6247,6 +7028,183 @@ class WorkflowEngine:
             output_root=output_root,
         ), tempo
 
+    def _apply_preferred_narration_tempo(
+        self,
+        items: Sequence[NarrationItem],
+        *,
+        output_root: Path,
+    ) -> tuple[list[NarrationItem], float]:
+        if self.workflow_policy_version < 32:
+            return list(items), 1.0
+        delivery = self.config.narration_delivery_spec
+        tempo = float(delivery.tempo_multiplier) if delivery is not None else 1.0
+        if abs(tempo - 1.0) <= 0.0005:
+            return list(items), 1.0
+        return (
+            self._adjust_narration_items_tempo(
+                items,
+                tempo=tempo,
+                output_root=output_root,
+            ),
+            tempo,
+        )
+
+    @staticmethod
+    def _narration_net_tempo_rate(
+        *,
+        speech_seconds: float,
+        pause_seconds: float,
+        word_count: int,
+        budget_seconds: float,
+        fps: int,
+        preferred_tempo: float,
+        minimum_words_per_second: float | None,
+        maximum_words_per_second: float | None,
+        minimum_tempo: float = MINIMUM_NET_NARRATION_TEMPO,
+        maximum_tempo: float = MAXIMUM_NET_NARRATION_TEMPO,
+    ) -> float | None:
+        values = (
+            speech_seconds,
+            pause_seconds,
+            budget_seconds,
+            preferred_tempo,
+            minimum_tempo,
+            maximum_tempo,
+        )
+        if not all(math.isfinite(value) for value in values):
+            return None
+        if (
+            speech_seconds <= 0
+            or pause_seconds < 0
+            or budget_seconds <= 0
+            or fps <= 0
+            or minimum_tempo <= 0
+            or maximum_tempo < minimum_tempo
+        ):
+            return None
+
+        duration_floor = budget_seconds * 0.85
+        duration_limit = delivery_ceiling(budget_seconds, fps)
+        duration_margin = min(
+            1 / fps,
+            max(0.0, (duration_limit - duration_floor) / 4),
+        )
+        duration_floor += duration_margin
+        duration_limit -= duration_margin
+        shortest_speech_window = duration_floor - pause_seconds
+        longest_speech_window = duration_limit - pause_seconds
+        if shortest_speech_window <= 0 or longest_speech_window <= 0:
+            return None
+
+        lower = max(minimum_tempo, speech_seconds / longest_speech_window)
+        upper = min(maximum_tempo, speech_seconds / shortest_speech_window)
+        if minimum_words_per_second is not None or maximum_words_per_second is not None:
+            if (
+                minimum_words_per_second is None
+                or maximum_words_per_second is None
+                or word_count <= 0
+                or not math.isfinite(minimum_words_per_second)
+                or not math.isfinite(maximum_words_per_second)
+                or minimum_words_per_second <= 0
+                or maximum_words_per_second < minimum_words_per_second
+            ):
+                return None
+            lower = max(
+                lower,
+                minimum_words_per_second
+                * (1 + DELIVERY_RATE_FIT_MARGIN)
+                * speech_seconds
+                / word_count,
+            )
+            upper = min(
+                upper,
+                maximum_words_per_second
+                * (1 - DELIVERY_RATE_FIT_MARGIN)
+                * speech_seconds
+                / word_count,
+            )
+        if lower > upper + 1e-9:
+            return None
+        return min(max(preferred_tempo, lower), upper)
+
+    def _narration_delivery_rate_is_accepted(self, bundle: NarrationBundle) -> bool:
+        delivery = self.config.narration_delivery_spec
+        if delivery is None:
+            return True
+        speech_seconds = sum(
+            scene.speech_end_seconds - scene.start_seconds
+            for scene in bundle.timeline.scenes
+        )
+        if speech_seconds <= 0:
+            return False
+        word_count = sum(
+            len(scene.spoken_text.split()) for scene in bundle.script.scenes
+        )
+        achieved = word_count / speech_seconds
+        return (
+            delivery.minimum_words_per_second
+            <= achieved
+            <= delivery.maximum_words_per_second
+        )
+
+    def _fit_narration_net_tempo(
+        self,
+        script: NarrationScript,
+        source_items: Sequence[NarrationItem],
+        *,
+        output_root: Path,
+        duration_repaired: bool,
+    ) -> NarrationBundle | None:
+        delivery = self.config.narration_delivery_spec
+        speech_seconds = sum(
+            item.normalized_duration_seconds for item in source_items
+        )
+        tempo = self._narration_net_tempo_rate(
+            speech_seconds=speech_seconds,
+            pause_seconds=sum(
+                scene.pause_after_seconds for scene in script.scenes
+            ),
+            word_count=sum(
+                len(scene.spoken_text.split()) for scene in script.scenes
+            ),
+            budget_seconds=self.config.duration_seconds,
+            fps=self.config.fps,
+            preferred_tempo=(
+                float(delivery.tempo_multiplier) if delivery is not None else 1.0
+            ),
+            minimum_words_per_second=(
+                delivery.minimum_words_per_second if delivery is not None else None
+            ),
+            maximum_words_per_second=(
+                delivery.maximum_words_per_second if delivery is not None else None
+            ),
+        )
+        if tempo is None:
+            return None
+        adjusted_items = (
+            list(source_items)
+            if abs(tempo - 1.0) <= 0.0005
+            else self._adjust_narration_items_tempo(
+                source_items,
+                tempo=tempo,
+                output_root=output_root,
+            )
+        )
+        candidate = self._assemble_narration(
+            script,
+            adjusted_items,
+            duration_repaired=duration_repaired,
+            tempo_adjustment=tempo,
+        )
+        if not duration_is_accepted(
+            candidate.timeline,
+            self.config.duration_seconds,
+        ):
+            return None
+        if not self._narration_delivery_rate_is_accepted(candidate):
+            return None
+        return candidate
+
     def _adjust_narration_items_tempo(
         self,
         items: Sequence[NarrationItem],
@@ -6303,6 +7261,7 @@ class WorkflowEngine:
         script: NarrationScript,
         scene_repair_targets: list[dict[str, int | str]],
         selected_scene_ids: set[str],
+        minimum_tolerance: int = 0,
     ) -> tuple[int, int, int]:
         minimum_total = sum(
             int(item["minimum_word_count"]) for item in scene_repair_targets
@@ -6337,8 +7296,12 @@ class WorkflowEngine:
             if scene.scene_id not in selected_scene_ids
         )
         selected_word_ceiling = global_word_ceiling - unselected_words
+        feasible_minimum = max(
+            1,
+            minimum_total - minimum_tolerance,
+        )
         self._require(
-            selected_word_ceiling >= minimum_total,
+            selected_word_ceiling >= feasible_minimum,
             (
                 f"Duration Repair aggregate minimum {minimum_total} exceeds the "
                 f"delivery-feasible selected word ceiling {selected_word_ceiling}"
@@ -6480,7 +7443,15 @@ class WorkflowEngine:
                 self.config, "content_format", ContentFormat.NARRATIVE
             ).value,
             "repair_strategy": (
-                "per-scene-text-v6-host-delivery-fit"
+                "per-scene-text-v8-host-factual-transition-dedup"
+                if scene_local_repair
+                and factual_research is not None
+                and self.workflow_policy_version >= 31
+                else "per-scene-text-v7-host-factual-minimum-tolerance"
+                if scene_local_repair
+                and factual_research is not None
+                and self.workflow_policy_version >= 28
+                else "per-scene-text-v6-host-delivery-fit"
                 if scene_local_repair
                 and self.workflow_policy_version >= 24
                 else "per-scene-text-v5-host-factual-fit"
@@ -6610,7 +7581,15 @@ class WorkflowEngine:
         usage: list[UsageRecord] = []
         response_index: dict[str, Any] = {
             "repair_strategy": (
-                "per-scene-text-v6-host-delivery-fit"
+                "per-scene-text-v8-host-factual-transition-dedup"
+                if advisory_scene_words
+                and factual_research is not None
+                and getattr(self, "workflow_policy_version", 30) >= 31
+                else "per-scene-text-v7-host-factual-minimum-tolerance"
+                if advisory_scene_words
+                and factual_research is not None
+                and getattr(self, "workflow_policy_version", 27) >= 28
+                else "per-scene-text-v6-host-delivery-fit"
                 if advisory_scene_words
                 and getattr(self, "workflow_policy_version", 23) >= 24
                 else "per-scene-text-v4-host-aggregate-fit"
@@ -6807,12 +7786,22 @@ class WorkflowEngine:
         outline: OutlineLike | None,
         protected_exact_texts_by_scene: dict[str, Sequence[str]] | None,
     ) -> NarrationScript:
+        minimum_tolerance = (
+            DURATION_REPAIR_AGGREGATE_WORD_TOLERANCE
+            if getattr(self, "workflow_policy_version", 27) >= 28
+            else 0
+        )
         minimum_total, target_total, maximum_total = (
             self._duration_repair_aggregate_word_range(
                 script=script,
                 scene_repair_targets=scene_repair_targets,
                 selected_scene_ids=selected_scene_ids,
+                minimum_tolerance=minimum_tolerance,
             )
+        )
+        allowed_minimum = max(
+            1,
+            minimum_total - minimum_tolerance,
         )
         working_scenes = [scene.model_copy(deep=True) for scene in script.scenes]
         protected_by_scene = protected_exact_texts_by_scene or {}
@@ -6830,10 +7819,10 @@ class WorkflowEngine:
             )
 
         total = selected_total()
-        if minimum_total <= total <= maximum_total:
+        if allowed_minimum <= total <= maximum_total:
             return script
 
-        if total < minimum_total:
+        if total < allowed_minimum:
             sentence_texts = [
                 claim.exact_text
                 for scene in working_scenes
@@ -6902,7 +7891,7 @@ class WorkflowEngine:
                 candidate_pairs.append((scene_id, evidence))
                 scheduled_evidence_ids.add(evidence.evidence_id)
 
-            while total < minimum_total:
+            while total < allowed_minimum:
                 feasible = []
                 for index, (scene_id, evidence) in enumerate(candidate_pairs):
                     scene = next(
@@ -6930,7 +7919,7 @@ class WorkflowEngine:
                 candidate_pairs.pop(index)
                 total = next_total
 
-            transition_candidates: list[tuple[Any, str]] = []
+            transition_candidates: list[tuple[Any, str, str]] = []
             for scene in selected_scenes:
                 outline_scene = outline_by_id.get(scene.scene_id)
                 role_transition = self._factual_role_transition(outline_scene)
@@ -6938,23 +7927,97 @@ class WorkflowEngine:
                     working_scenes.index(scene),
                     len(working_scenes),
                 )
+                if (
+                    getattr(self, "workflow_policy_version", 30) >= 31
+                    and any(
+                        transition in scene.spoken_text
+                        for transition in HOST_OWNED_NONFACTUAL_TRANSITIONS
+                    )
+                ):
+                    continue
                 for transition in (role_transition, neutral_transition):
                     if transition and transition not in scene.spoken_text:
-                        transition_candidates.append((scene, transition))
-            while total < minimum_total:
-                feasible = []
-                for index, (scene, transition) in enumerate(transition_candidates):
-                    next_total = total + len(transition.split())
-                    if next_total <= maximum_total:
-                        feasible.append(
-                            (abs(target_total - next_total), index, scene, transition, next_total)
+                        arc_role = str(getattr(outline_scene, "arc_role", ""))
+                        placement = (
+                            "prefix"
+                            if getattr(self, "workflow_policy_version", 30) >= 31
+                            and arc_role != "landing"
+                            else "suffix"
                         )
-                if not feasible:
-                    break
-                _, index, scene, transition, next_total = min(feasible)
-                scene.spoken_text = f"{scene.spoken_text.rstrip()} {transition}".strip()
-                transition_candidates.pop(index)
-                total = next_total
+                        transition_candidates.append((scene, transition, placement))
+            if getattr(self, "workflow_policy_version", 30) >= 31:
+                candidates_by_scene: dict[
+                    str,
+                    list[tuple[Any, str, str]],
+                ] = {}
+                for candidate in transition_candidates:
+                    candidates_by_scene.setdefault(
+                        candidate[0].scene_id,
+                        [],
+                    ).append(candidate)
+                states: dict[int, list[tuple[Any, str, str]]] = {0: []}
+                for scene_candidates in candidates_by_scene.values():
+                    next_states = dict(states)
+                    for added_words, selected in states.items():
+                        for candidate in scene_candidates:
+                            candidate_words = len(candidate[1].split())
+                            next_added_words = added_words + candidate_words
+                            if total + next_added_words > maximum_total:
+                                continue
+                            next_states.setdefault(
+                                next_added_words,
+                                [*selected, candidate],
+                            )
+                    states = next_states
+                feasible_combinations = [
+                    (added_words, selected)
+                    for added_words, selected in states.items()
+                    if total + added_words >= allowed_minimum
+                ]
+                if feasible_combinations:
+                    added_words, selected_transitions = min(
+                        feasible_combinations,
+                        key=lambda item: (
+                            abs(target_total - (total + item[0])),
+                            len(item[1]),
+                            item[0],
+                        ),
+                    )
+                    for scene, transition, placement in selected_transitions:
+                        scene.spoken_text = (
+                            f"{transition} {scene.spoken_text.lstrip()}".strip()
+                            if placement == "prefix"
+                            else f"{scene.spoken_text.rstrip()} {transition}".strip()
+                        )
+                    total += added_words
+            else:
+                while total < allowed_minimum:
+                    feasible = []
+                    for index, (scene, transition, placement) in enumerate(
+                        transition_candidates
+                    ):
+                        next_total = total + len(transition.split())
+                        if next_total <= maximum_total:
+                            feasible.append(
+                                (
+                                    abs(target_total - next_total),
+                                    index,
+                                    scene,
+                                    transition,
+                                    placement,
+                                    next_total,
+                                )
+                            )
+                    if not feasible:
+                        break
+                    _, index, scene, transition, placement, next_total = min(feasible)
+                    scene.spoken_text = (
+                        f"{transition} {scene.spoken_text.lstrip()}".strip()
+                        if placement == "prefix"
+                        else f"{scene.spoken_text.rstrip()} {transition}".strip()
+                    )
+                    transition_candidates.pop(index)
+                    total = next_total
 
         while total > maximum_total:
             candidates: list[tuple[int, int, int, Any, str]] = []
@@ -6983,7 +8046,7 @@ class WorkflowEngine:
                         - len(scene.spoken_text.split())
                         + len(replacement.split())
                     )
-                    if next_total < minimum_total or next_total >= total:
+                    if next_total < allowed_minimum or next_total >= total:
                         continue
                     candidates.append(
                         (
@@ -7012,7 +8075,7 @@ class WorkflowEngine:
             selected_scene.spoken_text = replacement
 
         self._require(
-            minimum_total <= total <= maximum_total,
+            allowed_minimum <= total <= maximum_total,
             (
                 "Host factual Duration Repair fitting could not meet the aggregate word range "
                 "using only admitted Evidence statements and host-owned transitions"
@@ -7520,6 +8583,21 @@ class WorkflowEngine:
     ) -> tuple[list[NarrationItem], list[UsageRecord]]:
         selected_scene_ids = selected_scene_ids or {scene.scene_id for scene in script.scenes}
         existing = {item.speech.scene_id: item for item in existing_items or []}
+        if self.workflow_policy_version >= 33 and existing:
+            selected_indexes = {
+                index
+                for index, scene in enumerate(script.scenes)
+                if scene.scene_id in selected_scene_ids
+            }
+            context_indexes = {
+                adjacent_index
+                for index in selected_indexes
+                for adjacent_index in (index - 1, index, index + 1)
+                if 0 <= adjacent_index < len(script.scenes)
+            }
+            selected_scene_ids = selected_scene_ids | {
+                script.scenes[index].scene_id for index in context_indexes
+            }
         output = []
         usage = []
         backend_id = self.config.task_bindings["narration_synthesis"]
@@ -7529,11 +8607,25 @@ class WorkflowEngine:
                 output.append(existing[scene.scene_id])
                 continue
             item_id = f"{scene.scene_id}-repair" if repair else scene.scene_id
+            preceding_text = script.scenes[index - 1].spoken_text[-500:] if index else ""
+            following_text = (
+                script.scenes[index + 1].spoken_text[:500]
+                if index + 1 < len(script.scenes)
+                else ""
+            )
+            speech_tempo_policy = (
+                "post-synthesis-net-v1"
+                if self.workflow_policy_version >= 32
+                else "inline-preferred-v1"
+            )
             item_input = {
                 "scene": scene.model_dump(mode="json"),
                 "voice": self.config.voice.model_dump(mode="json"),
                 "language": self.config.output_language.value,
                 "delivery": self._delivery_payload(),
+                "preceding_text": preceding_text,
+                "following_text": following_text,
+                "speech_tempo_policy": speech_tempo_policy,
             }
             input_hash = hash_run_input(item_input)
             config_hash = hash_value(
@@ -7541,6 +8633,7 @@ class WorkflowEngine:
                     "backend": backend_id,
                     "voice": self.config.voice.name,
                     "delivery": self._delivery_payload(),
+                    "speech_tempo_policy": speech_tempo_policy,
                 }
             )
             reusable = self.store.reusable_item(
@@ -7567,8 +8660,8 @@ class WorkflowEngine:
                 voice=self.config.voice,
                 delivery=self.config.narration_delivery_spec,
                 output_path=relative_path(raw_path, self.project_root),
-                preceding_text=script.scenes[index - 1].spoken_text[-500:] if index else "",
-                following_text=script.scenes[index + 1].spoken_text[:500] if index + 1 < len(script.scenes) else "",
+                preceding_text=preceding_text,
+                following_text=following_text,
             )
             result = self.executor.speech(request)
             if result.asset.scene_id != scene.scene_id:
@@ -7576,7 +8669,7 @@ class WorkflowEngine:
             probe = normalize_audio(self.tools, self.project_root / result.asset.audio.path, normalized_path)
             delivery = self.config.narration_delivery_spec
             if (
-                self.workflow_policy_version >= 3
+                3 <= self.workflow_policy_version < 32
                 and delivery is not None
                 and abs(float(delivery.tempo_multiplier) - 1.0) > 0.0005
             ):

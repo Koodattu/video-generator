@@ -148,6 +148,96 @@ def test_reconciliation_recovers_split_compound_after_noisy_number_pronunciation
     assert compound.end_seconds == 10
 
 
+def test_reconciliation_maps_one_spoken_measurement_to_number_and_unit() -> None:
+    canonical = (
+        "Entä jos ilmeisin selitys onkin väärä? Makea vesi jäätyy "
+        "normaalipaineessa 0 °C:n lämpötilassa."
+    )
+    recognized = _timings(
+        [
+            "Entä",
+            "jos",
+            "ilmeisin",
+            "selitys",
+            "onkin",
+            "väärä?",
+            "Makea",
+            "vesi",
+            "jäätyy",
+            "normaalipaineessa",
+            "nolladekrisellisyystä",
+            "lämpötilassa.",
+        ]
+    )
+
+    words, coverage = reconcile_word_timings(
+        canonical,
+        recognized,
+        scene_duration=6,
+    )
+
+    assert coverage == 1
+    assert [word.text for word in words] == canonical.split()
+    assert words[10].start_seconds == 5
+    assert words[11].end_seconds == 5.5
+
+
+def test_reconciliation_gives_standalone_percent_unit_positive_duration() -> None:
+    canonical = "alpha bravo charlie delta echo 5 % foxtrot golf hotel india"
+    recognized = _timings(
+        [
+            "alpha",
+            "bravo",
+            "charlie",
+            "delta",
+            "echo",
+            "fivepercent",
+            "foxtrot",
+            "golf",
+            "hotel",
+            "india",
+        ]
+    )
+
+    words, coverage = reconcile_word_timings(
+        canonical,
+        recognized,
+        scene_duration=5,
+    )
+
+    assert coverage == 1
+    assert words[5].end_seconds > words[5].start_seconds
+    assert words[6].end_seconds > words[6].start_seconds
+
+
+@pytest.mark.parametrize("unrelated_word", ["banana", "telegram"])
+def test_reconciliation_rejects_unrelated_word_in_measurement_span(
+    unrelated_word: str,
+) -> None:
+    canonical = "alpha bravo charlie delta echo 5 % foxtrot golf hotel india"
+    recognized = _timings(
+        [
+            "alpha",
+            "bravo",
+            "charlie",
+            "delta",
+            "echo",
+            unrelated_word,
+            "foxtrot",
+            "golf",
+            "hotel",
+            "india",
+        ]
+    )
+
+    with pytest.raises(MediaError, match="caption alignment coverage"):
+        reconcile_word_timings(
+            canonical,
+            recognized,
+            scene_duration=5,
+        )
+
+
 def test_reconciliation_still_rejects_unrelated_transcript() -> None:
     canonical = "alpha bravo charlie delta echo foxtrot golf hotel india juliet"
     recognized = _timings(["winter", "forest", "lantern", "quiet", "river"])
