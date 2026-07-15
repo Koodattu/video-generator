@@ -39,6 +39,7 @@ include = [
   "/LICENSE",
   "/config.example.toml",
   "/local-llm.example.toml",
+  "/local-llm.eurollm.example.toml",
   "/brief.example.toml",
   "/.env.example",
 ]

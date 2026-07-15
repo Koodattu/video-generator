@@ -1,0 +1,58 @@
+schema_version = 1
+profile_id = "eurollm-22b-instruct-2512-q4-16k"
+
+model_id = "utter-project/EuroLLM-22B-Instruct-2512"
+model_repo = "bartowski/utter-project_EuroLLM-22B-Instruct-2512-GGUF"
+model_revision = "1dbd312ffa10e83e5faa855e3727cbf4abc45f08"
+model_path = ".cache/models/llm/eurollm-22b-instruct-2512-q4/utter-project_EuroLLM-22B-Instruct-2512-Q4_K_M.gguf"
+model_sha256 = "2a222374c4adacd55b55795e2f9dca42a2f100d5a2d5858442f928c4c8bdf5e7"
+license_name = "Apache-2.0"
+
+llama_cpp_revision = "3e706dd55f56f59126c053c3db9cfc219a0a7074"
+llama_server_path = "downloads/llama.cpp/llama-server.exe"
+llama_server_sha256 = "7ef275670ec7e8954fd7135591be13968b641f57e42158ff073f9bd53c0a1074"
+
+context_size = 16384
+batch_size = 256
+micro_batch_size = 256
+gpu_layers = 999
+flash_attention = true
+speculation = "none"
+speculative_tokens = 2
+structured_output_mode = "template_completion"
+
+[llama_runtime_files]
+"llama-server.exe" = "7ef275670ec7e8954fd7135591be13968b641f57e42158ff073f9bd53c0a1074"
+"cublas64_12.dll" = "e40202fe4223c1cd2d2dce7beec59e1ed61c7801bd827309183be9b50e358f4c"
+"cublasLt64_12.dll" = "2a896460bef60ed57ef32b0875812f355a6984e671d638bb632f5e8c1d7a831f"
+"cudart64_12.dll" = "d28e42265da7462162a54da6b7a99ea4fa2caf8139d862bb500db875d0b32dfc"
+"ggml-base.dll" = "37dcf59c59d3c3adbb14b93e80dbd684edd52378681fd7ce52013c6c39244808"
+"ggml-cpu-alderlake.dll" = "ad2aaaef3e3d1a401e80d120af7092d5e349e18604440ca508532aa737cc5fa2"
+"ggml-cpu-cannonlake.dll" = "52a8371b104bd68b24f1fbcb2cd2edf4e794e90adee2461dfee408510c0fdc47"
+"ggml-cpu-cascadelake.dll" = "31319c18f7f017ae7e70adf498e05fc889d8efe7f0308676b55054b32f17fda4"
+"ggml-cpu-cooperlake.dll" = "5efdaa95697bfaaa71c920a52597a0dbdba0067692744d4ff27187d9e3d6cafa"
+"ggml-cpu-haswell.dll" = "0ce7ef9980b18ba720265a2e75f12d7b73b949a779de7a39194104d28d6e9259"
+"ggml-cpu-icelake.dll" = "1c61606fd6697530b5f732a8dfac78f20d240b6e7085da46266eedb087055588"
+"ggml-cpu-ivybridge.dll" = "7ddcc145b149db4685bc8f651bd706c48ddf50e70206bda08593118461c5fffc"
+"ggml-cpu-piledriver.dll" = "c4fe864bc31cf9e989ccf9767af519529df68e4e1aefa9a08d9c585638448eca"
+"ggml-cpu-sandybridge.dll" = "b000e2843e9ad82df76407e47d58e863470d57fe3a34cda360a782c38d6ee567"
+"ggml-cpu-sapphirerapids.dll" = "4194cd99022851d54246de5d763105caee3160dfc05e2ab5a8a4bdc1a6eacc32"
+"ggml-cpu-skylakex.dll" = "f0487b276655981db17b92327145cc2048f6f2618526f66265967129224f38bb"
+"ggml-cpu-sse42.dll" = "e1a7bf503803eb24d195894cfc3d67ce78ee22f7fec7e2d312ab6f4f8d655488"
+"ggml-cpu-x64.dll" = "8498afe6f6e70051e272174bf991f02c81dfdd9a547189c9b22a8f681acf96ce"
+"ggml-cpu-zen4.dll" = "3a690f7955c79511fcc03d1f574c0116587ce4f2cb989ca5a65874a8bacb29dd"
+"ggml-cuda.dll" = "15e95a1d84c08b02675199292cf4c72a24c63de2321f91235b616bd61e00b7bf"
+"ggml-rpc.dll" = "5a7c7836384cc16722bf50a18559af4475120c14750ad2d5aafb21c2a568a5da"
+"ggml.dll" = "3190f6170691dcc28918923c1aa5a7452d87760b866ca0894d03778629e60d2b"
+"libomp140.x86_64.dll" = "4a20c1e5c115c29771a12324513eb109badac72180f79481527ad79d996ffb33"
+"llama-batched-bench-impl.dll" = "46895828f184e1dd36b38c2227af0cb3a6e609279f7fed7c5b9b5c078fe943a6"
+"llama-bench-impl.dll" = "b2f02ac042bf739f3749794dc387138fe970d89982b4372b2a313de62f89e7c3"
+"llama-cli-impl.dll" = "f008105510ee97928206ce358cbcd08e754cda143ca0edb45506f6f9c469a49b"
+"llama-common.dll" = "3f17ec03056c97fdf3745eea625d2bf8ca9b4b0e78643b909d7dce2ba71870a8"
+"llama-completion-impl.dll" = "edb33b29f1746c4e2f693f419dc622f1331dd50d46cc3a93c7deeb127c8b45d1"
+"llama-fit-params-impl.dll" = "ac89dedcf1c112608a663acc66673dc4e6450f589ef1e14b2dbb3f6ff854f4c1"
+"llama-perplexity-impl.dll" = "fb3d11b60cf2c1913627c76e3be9acd2382f1e95298a1ea5c90cab7cff9777c8"
+"llama-quantize-impl.dll" = "c9f57615a3a3e694b58dd65563c0ee8f22cf2b5ef0f4ca82e3a4b9dfc3dfc26d"
+"llama-server-impl.dll" = "a14137e35eff4d8a7494852a4fefa13c4d9a0421b2871a60cf4392c593b22e65"
+"llama.dll" = "78e144c58b973bcf1395cb2603bf702be054b6053788c5aa60201b54758eb40a"
+"mtmd.dll" = "798ee484dbef4aaade035bcd9ed0e815513323ad58aedd839482e444a36414c3"

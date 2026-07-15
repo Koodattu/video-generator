@@ -1,0 +1,13 @@
+torch==2.9.1
+torchaudio==2.9.1
+# The CUDA 12.8 PyTorch index has no Windows TorchCodec wheel. Pin the official
+# CPython 3.12 win_amd64 wheel from PyPI directly instead of enabling cross-index lookup.
+torchcodec @ https://files.pythonhosted.org/packages/db/8b/3d29464ebb6a85629af21f93b3f2e54223987d5d5bf1f5d0e57ee2e69b2a/torchcodec-0.8.1-cp312-cp312-win_amd64.whl#sha256=d9b93e08e59f842861de1e0ce7b5a4e2ad2a069ec65041dfed6978f0e6cda30c
+transformers==5.0.0
+accelerate>=1.10.1,<2
+safetensors==0.6.2
+huggingface-hub>=0.36,<2
+numpy==2.1.0
+librosa==0.11.0
+tiktoken==0.12.0
+orjson==3.11.4

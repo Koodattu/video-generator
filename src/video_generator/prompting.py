@@ -17,7 +17,7 @@ from .task_models import task_output_models
 
 
 PROMPT_SET_VERSION = "2026-07-12.v14"
-MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-15.v50"
+MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-15.v52"
 
 
 SHARED_RULES = """
@@ -494,6 +494,11 @@ pivot to the supported explanation without implying an uncited belief is false. 
 to surprising evidence, and return to the anchor in the landing. Direct address is useful when it
 genuinely places the viewer in the idea, not as repetitive engagement bait. End the final Scene with
 pause_after_seconds equal to zero.
+
+For fiction explainers, never introduce an invented mechanism with actuality pivots such as "actually",
+"in reality", "todellisuudessa", or "oikeasti". When the Creative Brief asks for clearly fictional
+framing, explicitly establish imagination with natural wording such as "imagine", "what if", or
+"kuvittele" before describing the invented mechanism.
 """,
     "review_story": """
 Review the draft's editorial structure only: hook relevance, question clarity, logical progression,
@@ -819,7 +824,7 @@ def build_frozen_assets(config: ResolvedRunConfig | None = None) -> dict[str, An
     }
     assets: dict[str, Any] = {
         "prompt_set_version": prompt_set_version,
-        "workflow_policy_version": 2 if legacy_pack else 33,
+        "workflow_policy_version": 2 if legacy_pack else 35,
         "prompts": prompts,
         "image_targets": TARGET_IMAGE_GUIDANCE,
         "schemas": schemas,

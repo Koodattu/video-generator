@@ -159,21 +159,28 @@ Download one candidate first instead of the entire candidate matrix. Pin the ful
 do not use `main`:
 
 ```powershell
-# Inspect the two curated 24 GB benchmark candidates without downloading anything.
+# Inspect the curated 24 GB benchmark candidates without downloading anything.
 video-generator models list
 video-generator models download qwen3.6-27b-q4-mtp --dry-run
 video-generator models download gemma-4-26b-a4b-q4-mtp --dry-run
+video-generator models download eurollm-22b-instruct-2512-q4 --dry-run
 
 # Download one exact, commit-pinned candidate into .cache/models/llm and verify its SHA-256.
 video-generator models download gemma-4-26b-a4b-q4-mtp
 ```
 
 The curated Qwen artifact has embedded MTP. The curated Gemma artifact includes its separate Q4 MTP
-drafter. Both quantizations come from the Unsloth repositories linked in the model matrix, are public,
-and require no Hugging Face login. The command downloads only the listed GGUF file(s), never the whole
-repository, and records the source revision plus independent hashes in `asset-manifest.json`. These are
-benchmark candidates rather than automatic defaults; begin with MTP disabled and promote a variant only
-after it passes the English/Finnish fixtures. The stock llama.cpp runtime remains a separate pinned input.
+drafter. EuroLLM is a third-party Bartowski Q4_K_M of the official Apache-2.0 model, has no MTP artifact,
+and starts at 16K context. The command downloads only the named GGUF file(s), records the exact source
+revision and independent hashes in `asset-manifest.json`, and never selects a candidate automatically.
+Promote a variant only after the same English/Finnish schema and script fixtures pass. The stock
+llama.cpp runtime remains a separate pinned input.
+
+The optional [EuroLLM profile](local-llm.eurollm.example.toml) passed direct English and Finnish
+strict one-field schema smokes through llama.cpp `/completion` at about 53 generated tokens/second.
+On this machine it was not clearly better at Finnish than the current Gemma profile, which produced
+about 91 tokens/second in the matched smoke. That is component evidence only, not a full-workflow
+promotion result.
 
 For an arbitrary candidate not in the curated list, use the manual path below:
 
@@ -198,7 +205,7 @@ When `model_path` points anywhere under `.cache\models\llm\`, Setup verifies and
 place rather than creating another multi-gigabyte copy. MTP-off/on profiles may therefore share the
 same target artifact while retaining different `profile_id` and launch metadata.
 
-Start with `context_size = 32768`, `speculation = "none"`, and one server slot. Treat the same model
+Start Qwen/Gemma at `context_size = 32768`; start EuroLLM at 16K. Use `speculation = "none"` and one server slot. Treat the same model
 with `speculation = "draft-mtp"` as a separate benchmark profile. Embedded MTP needs no drafter path;
 models that ship a separate MTP assistant require every `draft_model_*` field. Larger context tiers
 are separate launches and must prove they fit; the program does not silently allocate 256K.
@@ -224,8 +231,9 @@ them inside the distribution or pass the name of another prepared distribution w
 
 With music disabled and draft quality, this prepares the selected LLM, VoxCPM, faster-whisper Turbo,
 FLUX, and optionally Brave. Set `offline = true` if you want no web search and no Brave key. Each
-Backend receives an isolated, locked venv. Setup asks `uv` to select a CUDA-compatible PyTorch wheel
-only for Torch workers; faster-whisper pins CTranslate2 separately. Live Preflight then loads each
+Backend receives an isolated, hash-locked runtime. Native uv runners install from reviewed Windows
+lockfiles committed with artifact hashes; X-Voice combines a pinned Conda lock for Pynini/OpenFST with
+a hash-locked uv package set. Live Preflight then loads each
 worker sequentially. For llama.cpp it additionally requires the child server PID to exit and records
 before/load/after aggregate VRAM observations; aggregate drift is advisory on Windows because
 unrelated WDDM applications can change it.
@@ -261,6 +269,49 @@ Use `--no-download` to verify existing assets/environments. A missing runner, ex
 WSL distribution, key, voice file, FFmpeg capability, disk allowance, or Cost Ceiling makes Preflight
 fail with an explicit action. It never substitutes another model.
 
+### Native Windows model challengers
+
+The default local profile remains VoxCPM2 plus FLUX. Challengers are separate pinned runners and are
+installed one at a time:
+
+| Backend | Role | Initial policy |
+|---|---|---|
+| `local:omnivoice` | EN/FI voice cloning | Primary TTS challenger; 24 kHz mono, host-side timing/tempo remains authoritative |
+| `local:moss-tts-v1.5` | EN/FI voice cloning | Conditional fit challenger; pinned local codec, SDPA, 48 kHz stereo |
+| `local:x-voice` | EN/FI voice cloning | Experimental Stage 1 challenger; 24 kHz mono, exact transcript and language-matched reference required, CC-BY-NC weights |
+| `local:z-image-turbo` | Text-to-image | First image challenger; 9 steps, guidance zero, exclusions compiled into the positive prompt |
+| `local:ideogram-4-nf4` | Text-to-image | Gated noncommercial challenger; local Python builds its strict JSON caption, never a hosted magic prompt |
+| `local:qwen-image-2512-nf4` | Text-to-image | NF4 transformer/text encoder with CPU offload; native negative prompt and true-CFG |
+
+```powershell
+video-generator setup --backend local:omnivoice
+video-generator setup --backend local:x-voice
+video-generator setup --backend local:z-image-turbo
+
+# Larger conditional challengers; prepare and live-probe separately.
+video-generator setup --backend local:moss-tts-v1.5
+video-generator setup --backend local:ideogram-4-nf4
+video-generator setup --backend local:qwen-image-2512-nf4
+```
+
+Ideogram Setup succeeds only after you personally accept its Hugging Face license gate and configure
+`HF_TOKEN`; Setup cannot accept terms for you. Every image challenger starts at exact 1024×576 and
+rejects reference images because these adapters are text-to-image only. The Dashboard lists prepared
+and unprepared descriptors, but it does not install model assets.
+
+X-Voice Setup is native Windows, but it is intentionally experimental and noncommercial. It uses a
+pinned micromamba/Conda layer for Pynini/OpenFST, a pinned eSpeak NG runtime, and hash-locked Python
+packages. Supply the exact UTF-8 transcript and the language actually spoken in the authorized
+reference clip. Short English and Finnish synthesis/cleanup smokes passed; one Finnish loanword was
+mispronounced, so the model is not promoted.
+
+Measured component smokes on the RTX 4090 used by this project reached about 6.1 GB peak for
+OmniVoice, 12.9 GB for MOSS-TTS, 2.0 GB for X-Voice, 22.6 GB for Z-Image Turbo, and 17.5 GB for
+Qwen-Image. Z-Image produced the stronger minimalist doodle fixture; Qwen-Image was valid but more
+painterly/noisy. Ideogram loaded successfully but returned its gray safety placeholder, which the
+adapter rejected. Higgs TTS 3 and HiDream-O1 Dev were not run or integrated because no complete,
+supported native-Windows route was found; this is not a failed quality benchmark.
+
 ## Mix Backends per task
 
 Curated profiles are `local`, `cloud-openai`, `cloud-gemini`, `cloud-openai-gemini`, and
@@ -270,8 +321,8 @@ Curated profiles are `local`, `cloud-openai`, `cloud-gemini`, `cloud-openai-gemi
 [task_overrides]
 script_draft = "openai:gpt-5.6-terra"
 image_prompt_compile = "local:llama-server"
-image_generate = "gemini:gemini-3.1-flash-image"
-narration_synthesis = "elevenlabs:eleven_multilingual_v2"
+image_generate = "local:z-image-turbo"
+narration_synthesis = "local:omnivoice"
 ```
 
 Every override is validated against its protocol, language, usage purpose, Offline setting, and
@@ -305,7 +356,8 @@ before delivery.
 Narration presets resolve to explicit word-rate, pause, and pitch-preserving tempo targets. Fast delivery
 uses tighter pauses and a denser script; slow delivery uses fewer words and more room for emphasis. The
 final measured rate is validated, and short narration is repaired with useful spoken content instead of
-padding the timeline with silence.
+padding the timeline with silence. Backend-added leading/trailing silence is trimmed programmatically
+while internal speech pauses and authored inter-Scene pauses remain intact.
 
 The current single-plan cadence limit is 72 generated Shots. Longer videos can use `scene_locked`, a
 larger `shot_target_seconds`, or multiple Runs; configuration rejects an oversized cadenced plan before

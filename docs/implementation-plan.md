@@ -1,6 +1,7 @@
 # Implementation plan
 
-The code milestones below are implemented. Their live acceptance criteria remain deliberately open until the pinned cloud/local Backends are prepared and the explicit smoke and quality suites are run.
+The code milestones below are implemented. Several native-Windows component smokes now pass, but the
+full bilingual profile and 60–90-second quality acceptance criteria remain deliberately open.
 
 ## Delivery strategy
 
@@ -134,7 +135,7 @@ Deliver:
 - local cache under `./.cache/models`;
 - native-Windows and WSL2 process launchers plus one workspace path-mapping utility;
 - runner start/health/stop lifecycle, structured logs, timeout/cancellation, and crash cleanup;
-- declared VRAM reservations plus live sequential load/process-exit probes; llama-server additionally records before/load/peak/post-exit GPU observations and GPU-PID cleanup;
+- declared VRAM reservations plus live sequential load/process-exit probes; every CUDA runner requires fresh observable GPU-PID cleanup evidence, and llama-server additionally records before/load/peak/post-exit GPU observations;
 - exact Setup actions and read-only Preflight probes;
 - no-download enforcement during Generate.
 
@@ -152,12 +153,18 @@ The current machine has WSL2 enabled but no distribution. Setup should report th
 
 Integrate one model at a time against existing conformance tests:
 
-1. a manifest-selected GGUF through pinned stock Windows `llama-server.exe`, beginning with one Qwen and one Gemma candidate and separate MTP-off/on variants;
+1. a manifest-selected GGUF through pinned stock Windows `llama-server.exe`, beginning with pinned Qwen, Gemma, and EuroLLM candidates and separate MTP variants only where supported;
 2. VoxCPM2 with native compatibility mode;
 3. faster-whisper large-v3-turbo on native Windows plus exact-script timing reconciliation, retaining Parakeet v3 as an explicit WSL2 comparison Backend;
 4. FLUX.2 klein 4B with a native Windows benchmark;
 5. Qwen vision path for Visual Review, separately memory-tested;
 6. ACE-Step XL Turbo and standard Turbo comparison.
+7. native-Windows TTS challengers OmniVoice, MOSS-TTS v1.5, and X-Voice Stage 1;
+8. native-Windows image challengers Z-Image Turbo, Ideogram 4 NF4, and Qwen-Image-2512 NF4.
+
+Short English/Finnish component smokes passed for OmniVoice, MOSS-TTS, and X-Voice. Z-Image and
+Qwen-Image produced valid 1024×576 images; Ideogram loaded but its safety placeholder was rejected.
+These results do not replace the end-to-end and human quality gates below.
 
 For each Backend:
 
@@ -261,10 +268,10 @@ Live tests are clearly marked and budget-capped. Unit tests never require creden
 
 | Risk | Test early | Planned response |
 | --- | --- | --- |
-| Local GGUF provenance or 24 GB fit | full commit/hash review and 32K stock llama-server smoke | evaluate one Qwen and one Gemma candidate first; no untracked download or automatic 256K |
+| Local GGUF provenance or 24 GB fit | full commit/hash review and stock llama-server smoke | evaluate pinned Qwen/Gemma at 32K and EuroLLM at 16K first; no untracked download or automatic oversized context |
 | Finnish creative quality | matched EN/FI story fixtures | language-specific prompt guidance first; separate model only with evidence |
 | Scene TTS prosody discontinuity | listen to adjacent emotional Scenes | pass text context, preserve voice settings, adjust Scene boundaries; do not merge architecture prematurely |
-| Finnish cloned-voice quality | VoxCPM and Eleven A/B with authorized recordings | language-matched references; model split only if needed |
+| Finnish cloned-voice quality | VoxCPM, OmniVoice, MOSS-TTS, X-Voice, and Eleven A/B with authorized recordings | language-matched references; X-Voice requires an exact transcript and actual reference language; model split only if needed |
 | Local caption mismatch | exact-script reconciliation fixture | coverage threshold and visible failure; never substitute ASR text |
 | Native Windows CUDA incompatibility | per-Backend contract smoke | WSL2 runner for that Backend only |
 | VRAM not released | post-process `nvidia-smi` checks | kill process tree, fail lifecycle test, avoid in-process CUDA imports |

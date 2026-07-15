@@ -30,6 +30,9 @@ from .errors import ErrorKind, MediaError
 from .util import atomic_write_text, relative_path, replace_path, sha256_file
 
 
+NARRATION_EDGE_TRIM_REVISION = "edge-silence-v1"
+
+
 @dataclass(frozen=True)
 class AudioProbe:
     duration_seconds: float
@@ -140,8 +143,22 @@ def delivery_duration(timeline_duration: float, fps: int) -> float:
     return math.ceil(timeline_duration * fps - 1e-9) / fps
 
 
-def normalize_audio(tools: MediaTools, source: Path, destination: Path) -> AudioProbe:
+def normalize_audio(
+    tools: MediaTools,
+    source: Path,
+    destination: Path,
+    *,
+    trim_edge_silence: bool = False,
+) -> AudioProbe:
     destination.parent.mkdir(parents=True, exist_ok=True)
+    filters = []
+    if trim_edge_silence:
+        edge_trim = (
+            "silenceremove=start_periods=1:start_duration=0.02:"
+            "start_threshold=-50dB:start_silence=0.05"
+        )
+        filters.extend((edge_trim, "areverse", edge_trim, "areverse"))
+    filters.extend(("highpass=f=55", "loudnorm=I=-18:LRA=7:TP=-1.5"))
     tools.run(
         [
             tools.ffmpeg,
@@ -152,7 +169,7 @@ def normalize_audio(tools: MediaTools, source: Path, destination: Path) -> Audio
             str(source),
             "-vn",
             "-af",
-            "highpass=f=55,loudnorm=I=-18:LRA=7:TP=-1.5",
+            ",".join(filters),
             "-ar",
             "48000",
             "-ac",

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .contracts import (
     AlignmentRequest,
     BackendDescriptor,
+    BriefConstraintAssessment,
     CaptionTrack,
     CandidateSet,
     ClaimInventory,
@@ -49,6 +50,7 @@ from .contracts import (
     ResearchSynthesis,
     ResearchSource,
     ReviewReport,
+    ReviewFinding,
     RevisionDisposition,
     RevisedScript,
     SearchRequest,
@@ -75,6 +77,7 @@ from .media import (
     AudioProbe,
     CAPTION_RECONCILIATION_REVISION,
     MediaTools,
+    NARRATION_EDGE_TRIM_REVISION,
     adjust_audio_tempo,
     build_timeline,
     caption_track_from_timeline,
@@ -108,7 +111,7 @@ from .util import (
 
 
 INTERNAL_REVISION = "media-workflow-v9"
-MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v50"
+MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v53"
 
 HOST_LEXICAL_POLICY_PREFIX = "Host lexical support policy"
 HOST_SELF_CONTAINED_POLICY_PREFIX = "Host self-contained claim policy"
@@ -1092,6 +1095,13 @@ class WorkflowEngine:
         }
         if self.config.content_mode is ContentMode.FACTUAL:
             input_data["research_pack"] = self._authoring_research_payload(research)
+        if self.workflow_policy_version >= 34 and task_id == "review_constraints":
+            return self._split_constraint_review_stage(
+                stage=stage,
+                task_id=task_id,
+                input_data=input_data,
+                script=script,
+            )
         report = self._structured_stage(
             stage,
             task_id,
@@ -1105,6 +1115,268 @@ class WorkflowEngine:
             ),
         )
         return report
+
+    def _split_constraint_review_stage(
+        self,
+        *,
+        stage: str,
+        task_id: str,
+        input_data: dict[str, Any],
+        script: NarrationScript,
+    ) -> ReviewReport:
+        strategy = "general-and-single-brief-constraints-v1"
+        aggregate_input = {
+            "review_strategy": strategy,
+            **input_data,
+        }
+        metadata = self._stage_metadata(
+            stage=stage,
+            task_id=task_id,
+            input_data=aggregate_input,
+        )
+        metadata["schema_hash"] = hash_value(
+            {
+                "general": restricted_json_schema(
+                    ReviewReport.model_json_schema(mode="validation")
+                ),
+                "brief_constraint": restricted_json_schema(
+                    BriefConstraintAssessment.model_json_schema(mode="validation")
+                ),
+                "aggregate": restricted_json_schema(
+                    ReviewReport.model_json_schema(mode="validation")
+                ),
+            }
+        )
+        reusable = self.store.reusable_record(stage, **metadata)
+        if reusable:
+            report = self.store.load_artifact(reusable, ReviewReport)
+            self._validate_review(
+                report,
+                "constraints",
+                task_id,
+                {scene.scene_id for scene in script.scenes},
+            )
+            return report
+
+        aggregate_workspace = self.store.workspace(stage)
+        self.store.begin_stage(
+            stage,
+            attempt=aggregate_workspace.attempt,
+            **metadata,
+        )
+        general_input = {
+            **input_data,
+            "review_strategy": "general-constraints-v1",
+            "brief_checks_handled_by_host": [
+                "idea_direction",
+                "must_include",
+                "avoid",
+            ],
+        }
+        general, usage = self._structured_item(
+            stage=stage,
+            item_id="general",
+            task_id=task_id,
+            input_data=general_input,
+            output_model=ReviewReport,
+            invariant=lambda value: self._validate_review(
+                value,
+                "constraints",
+                task_id,
+                {scene.scene_id for scene in script.scenes},
+            ),
+            max_output_tokens=1600,
+            instruction_suffix=(
+                "Review only the non-brief structural, safety, duration, language, and markup "
+                "constraints. Do not assess idea_direction, must_include, or avoid here; the host "
+                "checks each of those separately."
+            ),
+        )
+        findings = list(general.findings)
+        all_usage = list(usage)
+        brief_constraints = [
+            ("idea-direction", 1, self.brief.idea_direction),
+            *(
+                ("must-include", index, value)
+                for index, value in enumerate(self.brief.must_include, start=1)
+            ),
+            *(
+                ("avoid", index, value)
+                for index, value in enumerate(self.brief.avoid, start=1)
+            ),
+        ]
+        expected_scene_ids = {scene.scene_id for scene in script.scenes}
+        outline = input_data["outline"]
+        scene_context = [
+            {
+                key: value
+                for key, value in scene.items()
+                if key
+                in {
+                    "scene_id",
+                    "arc_role",
+                    "purpose",
+                    "key_point",
+                    "continuity_obligations",
+                }
+            }
+            for scene in outline.get("scenes", [])
+        ]
+        for kind, index, constraint in brief_constraints:
+            if not constraint.strip():
+                continue
+            item_id = f"brief-{kind}-{index:03d}"
+
+            def validate_assessment(
+                value: BriefConstraintAssessment,
+                *,
+                current_item_id: str = item_id,
+            ) -> None:
+                if not value.satisfied:
+                    self._require(
+                        value.scene_id in expected_scene_ids,
+                        f"{current_item_id} must choose one supplied Scene ID for repair",
+                    )
+
+            assessment, item_usage = self._structured_item(
+                stage=stage,
+                item_id=item_id,
+                task_id=task_id,
+                input_data={
+                    "review_strategy": "single-brief-constraint-v1",
+                    "constraint_kind": kind,
+                    "constraint": constraint,
+                    "script": input_data["script"],
+                    "scene_context": scene_context,
+                    "content_mode": self.config.content_mode.value,
+                    "content_format": self.config.content_format.value,
+                    "output_language": self.config.output_language.value,
+                },
+                output_model=BriefConstraintAssessment,
+                invariant=validate_assessment,
+                max_output_tokens=400,
+                instruction_suffix=(
+                    "Assess exactly the one supplied brief constraint against the complete spoken "
+                    "Script. For avoid, satisfied means the prohibited content is absent. For "
+                    "idea-direction and must-include, satisfied means the requested idea is clearly "
+                    "present, not merely adjacent or implied. If unsatisfied, choose the one supplied "
+                    "Scene where a minimal repair belongs and give a concise replacement instruction. "
+                    "Do not review anything else and do not rewrite the Script."
+                ),
+            )
+            all_usage.extend(item_usage)
+            if assessment.satisfied:
+                continue
+            findings.append(
+                ReviewFinding(
+                    finding_id=f"constraints:{item_id}",
+                    severity="blocking",
+                    scene_id=assessment.scene_id,
+                    evidence=assessment.evidence,
+                    recommendation=assessment.recommendation,
+                )
+            )
+
+        host_fiction_finding = self._host_fiction_framing_finding(script)
+        if (
+            host_fiction_finding is not None
+            and not self._has_brief_fiction_framing_finding(findings)
+        ):
+            findings.append(host_fiction_finding)
+
+        report = ReviewReport(
+            review_type="constraints",
+            passed=general.passed
+            and not any(finding.severity == "blocking" for finding in findings),
+            findings=findings,
+        )
+        promoted = self.store.promote_stage(
+            aggregate_workspace,
+            report,
+            usage=all_usage,
+        )
+        return ReviewReport.model_validate(promoted)
+
+    def _has_brief_fiction_framing_finding(
+        self,
+        findings: list[ReviewFinding],
+    ) -> bool:
+        framing_finding_ids = {
+            f"constraints:brief-avoid-{index:03d}"
+            for index, constraint in enumerate(self.brief.avoid, start=1)
+            if self._requests_explicit_fiction_framing(constraint)
+        }
+        return any(finding.finding_id in framing_finding_ids for finding in findings)
+
+    @staticmethod
+    def _requests_explicit_fiction_framing(directive: str) -> bool:
+        normalized = directive.casefold()
+        return any(
+            phrase in normalized
+            for phrase in (
+                "clearly fictional",
+                "fictional mechanism as a real fact",
+                "fictional premise as a real fact",
+                "selvästi kuvitteellinen",
+                "kuvitteellisen mekanismin esittäminen todellisena",
+            )
+        )
+
+    def _host_fiction_framing_finding(
+        self,
+        script: NarrationScript,
+    ) -> ReviewFinding | None:
+        if (
+            self.config.content_mode is not ContentMode.FICTION
+            or self.config.content_format is ContentFormat.NARRATIVE
+        ):
+            return None
+        directive = " ".join(
+            [
+                self.brief.idea_direction,
+                *self.brief.must_include,
+                *self.brief.avoid,
+            ]
+        )
+        if not self._requests_explicit_fiction_framing(directive):
+            return None
+        framing_pattern = re.compile(
+            r"\b(?:imagine|imaginary|fiction|fictional|pretend|suppose|picture)\b"
+            r"|\bwhat if\b|\bkuvitt\w*\b|\bentä jos\b|\bleikisti\b",
+            flags=re.IGNORECASE,
+        )
+        if any(framing_pattern.search(scene.spoken_text) for scene in script.scenes):
+            return None
+        actuality_pattern = re.compile(
+            r"\b(?:actually|in reality|the truth is|todellisuudessa|oikeasti|totuus on)\b",
+            flags=re.IGNORECASE,
+        )
+        target_scene = next(
+            (
+                scene
+                for scene in script.scenes
+                if actuality_pattern.search(scene.spoken_text)
+            ),
+            script.scenes[0],
+        )
+        finnish = self.config.output_language.value == "fi"
+        return ReviewFinding(
+            finding_id="constraints:host-explicit-fiction-framing",
+            severity="blocking",
+            scene_id=target_scene.scene_id,
+            evidence=(
+                "Käsikirjoitus ei ilmaise keksittyä mekanismia kuvitelmaksi."
+                if finnish
+                else "The script never explicitly frames the invented mechanism as imagination."
+            ),
+            recommendation=(
+                "Kehystä mekanismi selvästi kuvitelmaksi luontevalla ilmauksella, kuten "
+                "'Kuvittele', ja poista todellisuutta väittävä ilmaus."
+                if finnish
+                else "Frame the mechanism explicitly as imagination with natural wording such as "
+                "'Imagine', and remove any actuality pivot."
+            ),
+        )
 
     @staticmethod
     def _validate_review(
@@ -5775,6 +6047,21 @@ class WorkflowEngine:
                     for evidence in research.evidence
                     if evidence.evidence_id in scene_evidence_ids
                 ]
+            current_total = sum(
+                len(item.spoken_text.split()) for item in working_scenes
+            )
+            current_scene_words = len(scene.spoken_text.split())
+            unchanged_total = current_total - current_scene_words
+            minimum_words = max(1, minimum_total - unchanged_total)
+            maximum_words = maximum_total - unchanged_total
+            self._require(
+                minimum_words <= maximum_words,
+                f"Script Revision calculated an empty word range for {scene.scene_id}",
+            )
+            target_words = min(
+                max(current_scene_words, minimum_words),
+                maximum_words,
+            )
             item_input = {
                 "revision_strategy": "single-scene-replacement-v1",
                 "spoken_text": scene.spoken_text,
@@ -5806,9 +6093,19 @@ class WorkflowEngine:
                 "output_language": self.config.output_language.value,
                 "content_mode": self.config.content_mode.value,
                 "content_format": self.config.content_format.value,
+                "minimum_word_count": minimum_words,
+                "target_word_count": target_words,
+                "maximum_word_count": maximum_words,
+                "count_method": "len(spoken_text.split())",
             }
 
-            def validate_replacement(replacement: ReplacementText) -> None:
+            def validate_replacement(
+                replacement: ReplacementText,
+                *,
+                minimum: int = minimum_words,
+                maximum: int = maximum_words,
+                target_count: int = target_words,
+            ) -> None:
                 NarrationScript.model_validate(
                     {
                         "schema_version": 1,
@@ -5822,6 +6119,24 @@ class WorkflowEngine:
                         ],
                     }
                 )
+                actual = len(replacement.spoken_text.split())
+                if not minimum <= actual <= maximum:
+                    boundary = minimum if actual < minimum else maximum
+                    raise BackendError(
+                        (
+                            f"single-Scene Script Revision has {actual} words; required "
+                            f"inclusive range is {minimum}-{maximum}"
+                        ),
+                        kind=ErrorKind.INVALID_OUTPUT,
+                        details={
+                            "actual_word_count": actual,
+                            "minimum_word_count": minimum,
+                            "maximum_word_count": maximum,
+                            "target_word_count": target_count,
+                            "word_delta": boundary - actual,
+                            "count_method": "len(spoken_text.split())",
+                        },
+                    )
 
             replacement, usage = self._structured_item(
                 stage="script-revision",
@@ -5834,7 +6149,9 @@ class WorkflowEngine:
                 instruction_suffix=(
                     "Return exactly one complete replacement spoken_text for this Scene. "
                     "Apply only the supplied Findings and keep the edit naturally close to the "
-                    "original pacing. Python validates the complete Script's aggregate length. "
+                    f"original pacing. Use {minimum_words}-{maximum_words} whitespace-separated "
+                    f"words inclusive, aiming near {target_words}. Python calculated this residual "
+                    "range from the complete Script and validates it exactly. "
                     "Do not return any host-owned field."
                 ),
             )
@@ -5938,6 +6255,218 @@ class WorkflowEngine:
                         explanation=resolution.explanation,
                     )
                 )
+
+        all_findings = [
+            finding
+            for review_report in reviews
+            for finding in review_report.findings
+        ]
+        finding_indexes = {
+            finding.finding_id: index
+            for index, finding in enumerate(all_findings, start=1)
+        }
+        dispositions_by_id = {
+            disposition.finding_id: disposition for disposition in dispositions
+        }
+        unresolved_scene_ids = list(
+            dict.fromkeys(
+                str(finding.scene_id)
+                for finding in all_findings
+                if dispositions_by_id[finding.finding_id].disposition != "applied"
+            )
+        )
+        for scene_id in unresolved_scene_ids:
+            scene_index = revised_index_by_id[scene_id]
+            scene = revised_script.scenes[scene_index]
+            scene_findings = [
+                finding for finding in all_findings if finding.scene_id == scene_id
+            ]
+            unresolved_findings = [
+                finding
+                for finding in scene_findings
+                if dispositions_by_id[finding.finding_id].disposition != "applied"
+            ]
+            current_total = sum(
+                len(item.spoken_text.split()) for item in revised_script.scenes
+            )
+            current_scene_words = len(scene.spoken_text.split())
+            unchanged_total = current_total - current_scene_words
+            minimum_words = max(1, minimum_total - unchanged_total)
+            maximum_words = maximum_total - unchanged_total
+            self._require(
+                minimum_words <= maximum_words,
+                f"Finding repair calculated an empty word range for {scene_id}",
+            )
+            target_words = min(
+                max(current_scene_words, minimum_words),
+                maximum_words,
+            )
+            outline_scene = outline_by_id[scene_id]
+            scene_evidence_ids = set(
+                self._outline_scene_evidence_ids(outline_scene, research)
+            )
+            allowed_evidence = (
+                [
+                    evidence.model_dump(mode="json")
+                    for evidence in research.evidence
+                    if evidence.evidence_id in scene_evidence_ids
+                ]
+                if isinstance(research, FactualResearchPack)
+                else []
+            )
+
+            def validate_finding_repair(
+                replacement: ReplacementText,
+                *,
+                minimum: int = minimum_words,
+                maximum: int = maximum_words,
+                target_count: int = target_words,
+            ) -> None:
+                NarrationScript.model_validate(
+                    {
+                        "schema_version": 1,
+                        "title": "Finding repair",
+                        "scenes": [
+                            {
+                                "scene_id": "scene-001",
+                                "spoken_text": replacement.spoken_text,
+                                "pause_after_seconds": 0,
+                            }
+                        ],
+                    }
+                )
+                actual = len(replacement.spoken_text.split())
+                if not minimum <= actual <= maximum:
+                    boundary = minimum if actual < minimum else maximum
+                    raise BackendError(
+                        (
+                            f"single-Scene Finding repair has {actual} words; required "
+                            f"inclusive range is {minimum}-{maximum}"
+                        ),
+                        kind=ErrorKind.INVALID_OUTPUT,
+                        details={
+                            "actual_word_count": actual,
+                            "minimum_word_count": minimum,
+                            "maximum_word_count": maximum,
+                            "target_word_count": target_count,
+                            "word_delta": boundary - actual,
+                            "count_method": "len(spoken_text.split())",
+                        },
+                    )
+
+            replacement, repair_usage = self._structured_item(
+                stage="script-revision",
+                item_id=f"finding-repair-{scene_id}",
+                task_id="script_revision",
+                input_data={
+                    "revision_strategy": "single-scene-finding-repair-v1",
+                    "spoken_text": scene.spoken_text,
+                    "adjacent_context": {
+                        "previous_spoken_text": (
+                            revised_script.scenes[scene_index - 1].spoken_text
+                            if scene_index > 0
+                            else ""
+                        ),
+                        "next_spoken_text": (
+                            revised_script.scenes[scene_index + 1].spoken_text
+                            if scene_index + 1 < len(revised_script.scenes)
+                            else ""
+                        ),
+                    },
+                    "all_scene_findings": [
+                        {
+                            "severity": finding.severity,
+                            "evidence": finding.evidence,
+                            "recommendation": finding.recommendation,
+                            "already_resolved": dispositions_by_id[
+                                finding.finding_id
+                            ].disposition
+                            == "applied",
+                        }
+                        for finding in scene_findings
+                    ],
+                    "unresolved_findings": [
+                        {
+                            "severity": finding.severity,
+                            "evidence": finding.evidence,
+                            "recommendation": finding.recommendation,
+                        }
+                        for finding in unresolved_findings
+                    ],
+                    "outline_scene": outline_scene.model_dump(mode="json"),
+                    "allowed_factual_evidence": allowed_evidence,
+                    "output_language": self.config.output_language.value,
+                    "content_mode": self.config.content_mode.value,
+                    "content_format": self.config.content_format.value,
+                    "minimum_word_count": minimum_words,
+                    "target_word_count": target_words,
+                    "maximum_word_count": maximum_words,
+                    "count_method": "len(spoken_text.split())",
+                },
+                output_model=ReplacementText,
+                invariant=validate_finding_repair,
+                max_output_tokens=800,
+                instruction_suffix=(
+                    "Return exactly one replacement spoken_text. Resolve every unresolved Finding "
+                    "while preserving every already-resolved Finding for this Scene. Use "
+                    f"{minimum_words}-{maximum_words} whitespace-separated words inclusive, aiming "
+                    f"near {target_words}. Do not return IDs, counts, explanations, or other fields."
+                ),
+            )
+            item_usage.extend(repair_usage)
+            revised_script.scenes[scene_index].spoken_text = replacement.spoken_text
+            revised_by_id[scene_id] = revised_script.scenes[scene_index]
+
+            for finding in scene_findings:
+                finding_index = finding_indexes[finding.finding_id]
+                resolution, resolution_usage = self._structured_item(
+                    stage="script-revision",
+                    item_id=f"finding-resolution-recheck-{finding_index:03d}",
+                    task_id=finding_review_tasks[finding.finding_id],
+                    input_data={
+                        "review_strategy": "single-finding-resolution-v1",
+                        "finding": {
+                            "severity": finding.severity,
+                            "evidence": finding.evidence,
+                            "recommendation": finding.recommendation,
+                        },
+                        "original_spoken_text": draft_by_id[scene_id].spoken_text,
+                        "revised_spoken_text": revised_script.scenes[
+                            scene_index
+                        ].spoken_text,
+                        "adjacent_context": {
+                            "previous_spoken_text": (
+                                revised_script.scenes[scene_index - 1].spoken_text
+                                if scene_index > 0
+                                else ""
+                            ),
+                            "next_spoken_text": (
+                                revised_script.scenes[scene_index + 1].spoken_text
+                                if scene_index + 1 < len(revised_script.scenes)
+                                else ""
+                            ),
+                        },
+                        "allowed_factual_evidence": allowed_evidence,
+                        "output_language": self.config.output_language.value,
+                    },
+                    output_model=FindingResolution,
+                    max_output_tokens=400,
+                    instruction_suffix=(
+                        "Judge only whether the revised spoken_text resolves the supplied Finding. "
+                        "Return only resolved and explanation; do not edit text or return host-owned "
+                        "fields."
+                    ),
+                )
+                item_usage.extend(resolution_usage)
+                dispositions_by_id[finding.finding_id] = RevisionDisposition(
+                    finding_id=finding.finding_id,
+                    disposition="applied" if resolution.resolved else "rejected",
+                    explanation=resolution.explanation,
+                )
+
+        dispositions = [
+            dispositions_by_id[finding.finding_id] for finding in all_findings
+        ]
 
         revision = RevisedScript(script=revised_script, dispositions=dispositions)
         invariant(revision)
@@ -7295,6 +7824,41 @@ class WorkflowEngine:
             for scene in script.scenes
             if scene.scene_id not in selected_scene_ids
         )
+        if getattr(self, "workflow_policy_version", 33) >= 34:
+            duration_floor = self.config.duration_seconds * 0.85
+            duration_margin = min(
+                1 / self.config.fps,
+                max(
+                    0.0,
+                    (
+                        delivery_ceiling(
+                            self.config.duration_seconds,
+                            self.config.fps,
+                        )
+                        - duration_floor
+                    )
+                    / 4,
+                ),
+            )
+            minimum_speech_window = (
+                duration_floor
+                + duration_margin
+                - sum(scene.pause_after_seconds for scene in script.scenes)
+            )
+            self._require(
+                minimum_speech_window > 0,
+                "Duration Repair has no speech time remaining inside the duration floor",
+            )
+            global_word_floor = math.ceil(
+                delivery.minimum_words_per_second
+                * (1 + DELIVERY_RATE_FIT_MARGIN)
+                * minimum_speech_window
+                - 1e-9
+            )
+            minimum_total = max(
+                minimum_total,
+                global_word_floor - unselected_words,
+            )
         selected_word_ceiling = global_word_ceiling - unselected_words
         feasible_minimum = max(
             1,
@@ -7308,7 +7872,7 @@ class WorkflowEngine:
             ),
         )
         maximum_total = min(maximum_total, selected_word_ceiling)
-        target_total = min(target_total, maximum_total)
+        target_total = max(feasible_minimum, min(target_total, maximum_total))
         return minimum_total, target_total, maximum_total
 
     def _fit_narration_delivery_tempo(
@@ -8618,6 +9182,11 @@ class WorkflowEngine:
                 if self.workflow_policy_version >= 32
                 else "inline-preferred-v1"
             )
+            narration_normalization_policy = (
+                NARRATION_EDGE_TRIM_REVISION
+                if self.workflow_policy_version >= 3
+                else "loudness-v1"
+            )
             item_input = {
                 "scene": scene.model_dump(mode="json"),
                 "voice": self.config.voice.model_dump(mode="json"),
@@ -8626,6 +9195,7 @@ class WorkflowEngine:
                 "preceding_text": preceding_text,
                 "following_text": following_text,
                 "speech_tempo_policy": speech_tempo_policy,
+                "narration_normalization_policy": narration_normalization_policy,
             }
             input_hash = hash_run_input(item_input)
             config_hash = hash_value(
@@ -8634,6 +9204,7 @@ class WorkflowEngine:
                     "voice": self.config.voice.name,
                     "delivery": self._delivery_payload(),
                     "speech_tempo_policy": speech_tempo_policy,
+                    "narration_normalization_policy": narration_normalization_policy,
                 }
             )
             reusable = self.store.reusable_item(
@@ -8666,7 +9237,12 @@ class WorkflowEngine:
             result = self.executor.speech(request)
             if result.asset.scene_id != scene.scene_id:
                 raise BackendError("Speech Backend changed the Scene ID", kind=ErrorKind.INVALID_OUTPUT)
-            probe = normalize_audio(self.tools, self.project_root / result.asset.audio.path, normalized_path)
+            probe = normalize_audio(
+                self.tools,
+                self.project_root / result.asset.audio.path,
+                normalized_path,
+                trim_edge_silence=self.workflow_policy_version >= 3,
+            )
             delivery = self.config.narration_delivery_spec
             if (
                 3 <= self.workflow_policy_version < 32
@@ -9212,6 +9788,30 @@ class WorkflowEngine:
         if target_backend_id == "local:flux.2-klein-4b":
             settings = settings.model_copy(
                 update={"inference_steps": 4, "guidance_scale": 1.0}
+            )
+        elif target_backend_id == "local:z-image-turbo":
+            settings = settings.model_copy(
+                update={
+                    "inference_steps": 9,
+                    "guidance_scale": 0.0,
+                    "cpu_offload": False,
+                }
+            )
+        elif target_backend_id == "local:ideogram-4-nf4":
+            settings = settings.model_copy(
+                update={
+                    "inference_steps": {"low": 12, "medium": 20, "high": 48}[quality],
+                    "guidance_scale": None,
+                    "cpu_offload": True,
+                }
+            )
+        elif target_backend_id == "local:qwen-image-2512-nf4":
+            settings = settings.model_copy(
+                update={
+                    "inference_steps": {"low": 20, "medium": 35, "high": 50}[quality],
+                    "guidance_scale": 4.0,
+                    "cpu_offload": True,
+                }
             )
         elif target_backend_id == "gemini:gemini-3.1-flash-image":
             settings = settings.model_copy(

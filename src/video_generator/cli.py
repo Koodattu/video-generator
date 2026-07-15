@@ -589,7 +589,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     models = commands.add_parser("models", help="inspect or download curated local LLM candidates")
     model_commands = models.add_subparsers(dest="models_command", required=True)
-    model_list = model_commands.add_parser("list", help="list pinned Q4/MTP benchmark candidates")
+    model_list = model_commands.add_parser("list", help="list pinned local LLM benchmark candidates")
     model_list.set_defaults(handler=_command_models_list)
     model_download = model_commands.add_parser(
         "download",

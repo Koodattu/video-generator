@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -18,6 +19,50 @@ from .contracts import ProbeItem, ProbeReport
 from .errors import BackendError, ErrorKind
 from .profiles import EXPECTED_LOCAL_MODEL_REVISIONS
 from .util import atomic_write_json, read_json, sha256_file
+
+
+_CUDA_RUNNER_KINDS = {
+    "voxcpm",
+    "flux",
+    "omnivoice",
+    "moss-tts",
+    "xvoice",
+    "z-image",
+    "ideogram4",
+    "qwen-image",
+}
+
+
+def runner_torch_backend(model_family: str) -> str:
+    if model_family in {"moss-tts", "xvoice"}:
+        return "cu128"
+    if model_family in {"ideogram4", "qwen-image"}:
+        return "cu130"
+    return "auto" if model_family in _CUDA_RUNNER_KINDS else ""
+
+
+def runner_setup_source_revision(model_family: str) -> str:
+    package_root = Path(__file__).resolve().parent
+    requirements = package_root / "assets" / "runners" / f"{model_family}.in"
+    sources = {
+        "requirements": requirements,
+        "requirements_lock": requirements.with_suffix(".lock"),
+        "runner_manager": Path(__file__).resolve(),
+        "setup_implementation": package_root / "setup.py",
+        "profile_pins": package_root / "profiles.py",
+        "worker_implementation": package_root / "workers" / "main.py",
+        "snapshot_implementation": package_root / "workers" / "prepare.py",
+    }
+    if model_family == "xvoice":
+        sources["conda_lock"] = requirements.with_name("xvoice-conda-win-64.lock")
+    source_revisions = [
+        f"{name}={sha256_file(path) if path.is_file() else '<missing>'}"
+        for name, path in sorted(sources.items())
+    ]
+    torch_backend = runner_torch_backend(model_family)
+    return hashlib.sha256(
+        "\0".join([*source_revisions, f"torch-backend={torch_backend}"]).encode("utf-8")
+    ).hexdigest()
 
 
 def runner_slug(backend_id: str) -> str:
@@ -49,6 +94,7 @@ class RunnerSpec(BaseModel):
     environment: dict[str, str] = Field(default_factory=dict)
     model_paths: list[str] = Field(min_length=1)
     asset_manifests: dict[str, str] = Field(min_length=1)
+    asset_revisions: dict[str, str] = Field(default_factory=dict)
     runtime_files: dict[str, str] = Field(min_length=1)
     runtime_revision: str
     model_revision: str
@@ -124,6 +170,8 @@ class _RunnerProcess:
     reader: threading.Thread
     stderr_handle: IO[str]
     started_at: float = field(default_factory=time.monotonic)
+    health: dict[str, Any] = field(default_factory=dict)
+    gpu_baseline: dict[str, Any] = field(default_factory=dict)
 
 
 class RunnerManager:
@@ -163,13 +211,7 @@ class RunnerManager:
             if spec.model_family == "acestep":
                 expected_setup_source = "dce621408bee8c31b4fcf4811682eb9359e1bc94"
             else:
-                requirements = (
-                    Path(__file__).resolve().parent
-                    / "assets"
-                    / "runners"
-                    / f"{spec.model_family}.in"
-                )
-                expected_setup_source = sha256_file(requirements) if requirements.is_file() else "<missing>"
+                expected_setup_source = runner_setup_source_revision(spec.model_family)
             if spec.setup_source_revision != expected_setup_source:
                 raise ValueError("runner was built from an obsolete Setup requirements source")
             return spec
@@ -373,7 +415,9 @@ class RunnerManager:
                     self._verify_asset_manifest(
                         manifest_path,
                         expected_revision=(
-                            None if manifest_path.name == "runtime-source.asset-manifest.json" else spec.model_revision
+                            None
+                            if manifest_path.name == "runtime-source.asset-manifest.json"
+                            else spec.asset_revisions.get(manifest_value, spec.model_revision)
                         ),
                     )
                     if hash_matches
@@ -421,7 +465,17 @@ class RunnerManager:
                 process_exited = bool(cleanup.get("process_exited"))
                 gpu_released = bool(cleanup.get("gpu_process_released"))
                 within_tolerance = bool(cleanup.get("vram_within_tolerance"))
-                ready = process_exited and gpu_released
+                post_exit = cleanup.get("post_exit")
+                gpu_observable = bool(
+                    isinstance(post_exit, dict) and post_exit.get("observable")
+                )
+                requires_gpu_evidence = bool(
+                    spec.requires_cuda or spec.model_family == "llama-server"
+                )
+                ready = process_exited and gpu_released and (
+                    not requires_gpu_evidence
+                    or (gpu_observable and within_tolerance)
+                )
                 items.append(
                     ProbeItem(
                         name="live_worker_cleanup",
@@ -429,24 +483,27 @@ class RunnerManager:
                         detail=json.dumps(cleanup, ensure_ascii=False, sort_keys=True)[:2000],
                         action=(
                             None
-                            if ready and within_tolerance
+                            if ready
                             else (
                                 "Close unrelated GPU applications and repeat live Preflight; "
                                 "the managed process exited, but aggregate Windows VRAM did not return near baseline."
-                                if ready
+                                if process_exited
+                                and gpu_released
+                                and gpu_observable
+                                and not within_tolerance
                                 else "Terminate the residual runner process and repeat live Preflight."
                             )
                         ),
                     )
                 )
-            elif spec.model_family == "llama-server":
+            elif spec.requires_cuda or spec.model_family == "llama-server":
                 items.append(
                     ProbeItem(
                         name="live_worker_cleanup",
                         ready=False,
-                        detail="the live probe produced no fresh llama-server cleanup evidence",
+                        detail="the live probe produced no fresh managed GPU cleanup evidence",
                         action=(
-                            "Inspect the runner log, terminate any residual llama-server process, "
+                            "Inspect the runner log, terminate any residual managed GPU process, "
                             "and repeat live Preflight."
                         ),
                     )
@@ -546,11 +603,13 @@ class RunnerManager:
             "WSLENV",
         }
         environment = {name: value for name, value in os.environ.items() if name.upper() in inherited_names}
+        hf_modules_directory = self.run_root / "scratch" / f"hf-modules-{uuid.uuid4().hex}"
         environment.update(spec.environment)
         environment.update(
             {
                 "HF_HOME": str(self.model_root / "huggingface"),
                 "HUGGINGFACE_HUB_CACHE": str(self.model_root / "huggingface" / "hub"),
+                "HF_MODULES_CACHE": str(hf_modules_directory),
                 "TRANSFORMERS_OFFLINE": "1",
                 "HF_HUB_OFFLINE": "1",
                 "DIFFUSERS_OFFLINE": "1",
@@ -573,9 +632,11 @@ class RunnerManager:
         wsl_root = windows_to_wsl(self.project_root)
         wsl_model_root = windows_to_wsl(self.model_root)
         wsl_run_root = windows_to_wsl(self.run_root)
+        wsl_hf_modules_directory = windows_to_wsl(hf_modules_directory)
         assignments = [
             f"HF_HOME={wsl_model_root}/huggingface",
             f"HUGGINGFACE_HUB_CACHE={wsl_model_root}/huggingface/hub",
+            f"HF_MODULES_CACHE={wsl_hf_modules_directory}",
             "TRANSFORMERS_OFFLINE=1",
             "HF_HUB_OFFLINE=1",
             "DIFFUSERS_OFFLINE=1",
@@ -610,6 +671,16 @@ class RunnerManager:
             "a", encoding="utf-8", errors="replace"
         )
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        gpu_baseline: dict[str, Any] = {}
+        if spec.requires_cuda or spec.model_family == "llama-server":
+            from .workers.llama_server import gpu_snapshot
+
+            baseline = gpu_snapshot()
+            gpu_baseline = {
+                "observable": baseline.observable,
+                "used_mb": baseline.used_mb,
+                "process_ids": list(baseline.process_ids),
+            }
         try:
             process = subprocess.Popen(
                 command,
@@ -653,10 +724,19 @@ class RunnerManager:
 
         reader = threading.Thread(target=read_stdout, name=f"runner-{runner_slug(spec.backend_id)}", daemon=True)
         reader.start()
-        running = _RunnerProcess(spec, process, responses, reader, stderr_handle)
+        running = _RunnerProcess(
+            spec,
+            process,
+            responses,
+            reader,
+            stderr_handle,
+            gpu_baseline=gpu_baseline,
+        )
         self.current = running
         try:
-            self._invoke_current("health", {}, timeout=spec.startup_timeout_seconds)
+            running.health = self._invoke_current(
+                "health", {}, timeout=spec.startup_timeout_seconds
+            )
         except BaseException:
             self.stop_current()
             if self._lease_held:
@@ -753,7 +833,7 @@ class RunnerManager:
             return
         process = runner.process
         lifecycle: dict[str, Any] | None = None
-        shutdown_completed = False
+        forced = False
         if process.poll() is None and process.stdin is not None:
             try:
                 result = self._invoke_current(
@@ -763,23 +843,64 @@ class RunnerManager:
                 if isinstance(reported_lifecycle, dict):
                     lifecycle = dict(reported_lifecycle)
                 process.wait(timeout=10)
-                shutdown_completed = True
             except (BackendError, OSError, subprocess.TimeoutExpired):
+                forced = True
                 self._kill_process_tree(process)
-        if shutdown_completed and lifecycle is not None:
-            if not lifecycle:
+        requires_gpu_evidence = bool(
+            getattr(runner.spec, "requires_cuda", False)
+            or runner.spec.model_family == "llama-server"
+        )
+        if lifecycle is None and requires_gpu_evidence:
+            lifecycle = {}
+        if lifecycle is not None:
+            post_exit = lifecycle.get("post_exit")
+            needs_observable_host_probe = bool(
+                requires_gpu_evidence
+                and not (
+                    isinstance(post_exit, dict)
+                    and post_exit.get("observable") is True
+                )
+            )
+            if (
+                forced
+                or not {"process_exited", "gpu_process_released"}.issubset(lifecycle)
+                or needs_observable_host_probe
+            ):
                 from .workers.llama_server import gpu_snapshot
 
                 post_exit = gpu_snapshot()
                 process_exited = process.poll() is not None
+                tracked_pids = {process.pid}
+                server_pid = getattr(runner, "health", {}).get("server_pid")
+                if isinstance(server_pid, int) and server_pid > 0:
+                    tracked_pids.add(server_pid)
+                gpu_baseline = getattr(runner, "gpu_baseline", {})
+                baseline_used_mb = (
+                    gpu_baseline.get("used_mb")
+                    if isinstance(gpu_baseline, dict)
+                    else None
+                )
+                vram_tolerance_mb = int(lifecycle.get("vram_tolerance_mb") or 512)
+                vram_within_tolerance = bool(
+                    process_exited
+                    and post_exit.observable
+                    and baseline_used_mb is not None
+                    and post_exit.used_mb is not None
+                    and post_exit.used_mb <= baseline_used_mb + vram_tolerance_mb
+                )
                 lifecycle = {
+                    **lifecycle,
                     "worker_pid": process.pid,
+                    "forced": forced,
                     "process_exited": process_exited,
                     "gpu_process_released": (
                         process_exited
-                        and (not post_exit.observable or process.pid not in post_exit.process_ids)
+                        and post_exit.observable
+                        and tracked_pids.isdisjoint(post_exit.process_ids)
                     ),
-                    "vram_within_tolerance": True,
+                    "vram_within_tolerance": vram_within_tolerance,
+                    "vram_tolerance_mb": vram_tolerance_mb,
+                    "manager_baseline": gpu_baseline,
                     "post_exit": {
                         "observable": post_exit.observable,
                         "used_mb": post_exit.used_mb,

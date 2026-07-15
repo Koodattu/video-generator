@@ -232,12 +232,12 @@ class LlamaServerSession:
             raise RuntimeError("llama-server returned a non-object response")
         return value
 
-    def chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.start()
         if self.process is None or self.process.poll() is not None:
             raise RuntimeError("llama-server is not running")
         try:
-            value = self._request_json("POST", "/v1/chat/completions", payload=payload)
+            value = self._request_json("POST", path, payload=payload)
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
@@ -253,6 +253,21 @@ class LlamaServerSession:
         if snapshot.used_mb is not None:
             self.peak_used_mb = max(self.peak_used_mb or 0, snapshot.used_mb)
         return value
+
+    def chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._post_json("/v1/chat/completions", payload)
+
+    def structured_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request = dict(payload)
+        messages = request.pop("messages", None)
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("structured llama-server completion requires messages")
+        templated = self._post_json("/apply-template", {"messages": messages})
+        prompt = templated.get("prompt")
+        if not isinstance(prompt, str) or not prompt:
+            raise RuntimeError("llama-server did not return an applied chat template")
+        request["prompt"] = prompt
+        return self._post_json("/completion", request)
 
     def close(self) -> dict[str, Any]:
         if self._cleanup is not None:

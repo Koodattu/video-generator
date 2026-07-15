@@ -9,12 +9,14 @@ from video_generator.contracts import (
     CaptionTrack,
     ContentFormat,
     ContentMode,
+    CreativeBrief,
     MediaReference,
     NarrationPace,
     NarrationScript,
     NarrationTimeline,
     OutputLanguage,
     RawRunConfig,
+    ReviewFinding,
     ScriptScene,
     TimelineScene,
     TimedImageRequest,
@@ -73,7 +75,7 @@ def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> No
     assert models["visual_plan"] is TimedVisualPlan
     assert models["image_prompt_compile"] is TimedImageRequest
     assert assets["prompt_set_version"] == MULTI_FORMAT_PROMPT_SET_VERSION
-    assert assets["workflow_policy_version"] == 33
+    assert assets["workflow_policy_version"] == 35
     claim_properties = assets["schemas"]["claim_inventory"]["$defs"]["ExtractedClaim"][
         "properties"
     ]
@@ -91,6 +93,58 @@ def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> No
     assert evidence_properties["limitations"]["items"]["maxLength"] == 240
     assert "ResearchFindingDraft" not in assets["schemas"]["research"]["$defs"]
     assert "urgent" in assets["prompts"]["script_draft"]["instructions"].lower()
+
+
+def test_host_requires_explicit_framing_when_fiction_brief_requests_it() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        content_mode=ContentMode.FICTION,
+        content_format=ContentFormat.EXPLAINER,
+        output_language=OutputLanguage.FINNISH,
+    )
+    engine.brief = CreativeBrief(
+        idea_direction="Nopea ja selvästi kuvitteellinen selitysvideo.",
+        avoid=[
+            "Do not mention dragons.",
+            "kuvitteellisen mekanismin esittäminen todellisena tietona",
+        ],
+    )
+    literal = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text="Todellisuudessa pieni miehistö käyttää vipuja keittimen sisällä.",
+                pause_after_seconds=0,
+            )
+        ],
+    )
+
+    finding = engine._host_fiction_framing_finding(literal)
+
+    assert finding is not None
+    assert finding.finding_id == "constraints:host-explicit-fiction-framing"
+    assert finding.scene_id == "scene-001"
+
+    unrelated_avoid_finding = ReviewFinding(
+        finding_id="constraints:brief-avoid-001",
+        severity="blocking",
+        scene_id="scene-001",
+        evidence="The script contains an unrelated prohibited detail.",
+        recommendation="Remove that detail.",
+    )
+    assert not engine._has_brief_fiction_framing_finding([unrelated_avoid_finding])
+
+    framing_avoid_finding = unrelated_avoid_finding.model_copy(
+        update={"finding_id": "constraints:brief-avoid-002"}
+    )
+    assert engine._has_brief_fiction_framing_finding([framing_avoid_finding])
+
+    framed = literal.model_copy(deep=True)
+    framed.scenes[0].spoken_text = (
+        "Kuvittele pieni miehistö käyttämässä vipuja keittimen sisällä."
+    )
+    assert engine._host_fiction_framing_finding(framed) is None
 
 
 def test_shot_schedule_is_frame_aligned_and_keeps_parent_scene_ids() -> None:

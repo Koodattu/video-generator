@@ -1,12 +1,54 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 
 import pytest
 
 from video_generator.contracts import RenderPlan, RenderScene
-from video_generator.media import qc_video, render_video
+from video_generator.media import MediaTools, normalize_audio, qc_video, render_video
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="edge-silence normalization requires ffmpeg and ffprobe",
+)
+def test_narration_normalization_trims_only_edge_silence(tmp_path: Path) -> None:
+    tools = MediaTools.discover()
+    source = tmp_path / "padded.wav"
+    normalized = tmp_path / "normalized.wav"
+    inputs = [
+        "aevalsrc=0:s=48000:d=0.4",
+        "sine=f=440:r=48000:d=0.3",
+        "aevalsrc=0:s=48000:d=0.25",
+        "sine=f=660:r=48000:d=0.3",
+        "aevalsrc=0:s=48000:d=0.5",
+    ]
+    command = [tools.ffmpeg, "-y", "-v", "error"]
+    for value in inputs:
+        command.extend(("-f", "lavfi", "-i", value))
+    command.extend(
+        (
+            "-filter_complex",
+            "[0:a][1:a][2:a][3:a][4:a]concat=n=5:v=0:a=1[out]",
+            "-map",
+            "[out]",
+            "-c:a",
+            "pcm_s16le",
+            str(source),
+        )
+    )
+    tools.run(command)
+
+    probe = normalize_audio(
+        tools,
+        source,
+        normalized,
+        trim_edge_silence=True,
+    )
+
+    assert 0.8 < probe.duration_seconds < 1.1
 
 
 def test_music_render_uses_ffmpeg_42_compatible_exact_sum_without_double_attenuation(

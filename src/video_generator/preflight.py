@@ -193,6 +193,17 @@ def estimate_cost(
 def _voice_checks(config: ResolvedRunConfig, project_root: Path) -> list[ProbeItem]:
     backend_id = config.task_bindings["narration_synthesis"]
     descriptor = BACKEND_DESCRIPTORS[backend_id]
+    private_root = (project_root / "private").resolve()
+
+    def private_path(value: str) -> tuple[Path, bool]:
+        raw = Path(value)
+        path = raw.resolve() if raw.is_absolute() else (project_root / raw).resolve()
+        try:
+            path.relative_to(private_root)
+        except ValueError:
+            return path, False
+        return path, True
+
     checks = [
         ProbeItem(
             name="voice_authorization",
@@ -201,6 +212,20 @@ def _voice_checks(config: ResolvedRunConfig, project_root: Path) -> list[ProbeIt
         )
     ]
     if descriptor.provider == "local" and descriptor.supports_voice_cloning:
+        if descriptor.requires_reference_language:
+            language_ready = config.voice.reference_language in descriptor.languages
+            checks.append(
+                ProbeItem(
+                    name="voice_reference_language",
+                    ready=language_ready,
+                    detail=f"reference language: {config.voice.reference_language}",
+                    action=(
+                        None
+                        if language_ready
+                        else "Choose a reference language supported by the narration Backend."
+                    ),
+                )
+            )
         if not config.voice.reference_audio:
             checks.append(
                 ProbeItem(
@@ -211,14 +236,24 @@ def _voice_checks(config: ResolvedRunConfig, project_root: Path) -> list[ProbeIt
                 )
             )
         else:
-            audio = (project_root / config.voice.reference_audio).resolve()
-            audio_exists = audio.is_file()
+            audio, audio_is_private = private_path(config.voice.reference_audio)
+            audio_exists = audio_is_private and audio.is_file()
             checks.append(
                 ProbeItem(
                     name="voice_reference_audio",
                     ready=audio_exists,
-                    detail=str(audio) if audio_exists else f"missing: {audio}",
-                    action=None if audio_exists else "Add the authorized recording under private/.",
+                    detail=(
+                        str(audio)
+                        if audio_exists
+                        else f"outside private/: {audio}"
+                        if not audio_is_private
+                        else f"missing: {audio}"
+                    ),
+                    action=(
+                        None
+                        if audio_exists
+                        else "Add the authorized recording under private/."
+                    ),
                 )
             )
             if audio_exists:
@@ -249,11 +284,21 @@ def _voice_checks(config: ResolvedRunConfig, project_root: Path) -> list[ProbeIt
                             action="Replace the file with a decodable voice reference recording.",
                         )
                     )
-        if config.voice.reference_transcript:
-            transcript = (project_root / config.voice.reference_transcript).resolve()
+        if descriptor.requires_reference_transcript or config.voice.reference_transcript:
             transcript_ready = False
-            transcript_detail = f"missing: {transcript}"
-            if transcript.is_file():
+            transcript_detail = "not configured"
+            transcript = None
+            transcript_is_private = False
+            if config.voice.reference_transcript:
+                transcript, transcript_is_private = private_path(
+                    config.voice.reference_transcript
+                )
+                transcript_detail = (
+                    f"missing: {transcript}"
+                    if transcript_is_private
+                    else f"outside private/: {transcript}"
+                )
+            if transcript is not None and transcript_is_private and transcript.is_file():
                 try:
                     transcript_text = transcript.read_text(encoding="utf-8").strip()
                     transcript_ready = bool(transcript_text)
@@ -272,7 +317,12 @@ def _voice_checks(config: ResolvedRunConfig, project_root: Path) -> list[ProbeIt
                     action=(
                         None
                         if transcript_ready
-                        else "Add the nonempty exact UTF-8 transcript under private/ or clear the setting."
+                        else (
+                            "Set voice.reference_transcript to the nonempty exact UTF-8 transcript "
+                            "under private/."
+                            if descriptor.requires_reference_transcript
+                            else "Add the nonempty exact UTF-8 transcript under private/ or clear the setting."
+                        )
                     ),
                 )
             )

@@ -1,0 +1,7 @@
+torch==2.13.0
+diffusers==0.39.0
+transformers>=5.3,<6
+accelerate>=1.10,<2
+huggingface-hub>=1.5,<2
+sentencepiece>=0.2,<1
+bitsandbytes>=0.49.2,<1

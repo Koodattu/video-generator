@@ -1,6 +1,6 @@
-# Initial model matrix
+# Model matrix
 
-Verified against first-party documentation on 2026-07-10. These are v0 candidates, not timeless claims or quality winners. A model enters a built-in profile only after capability conformance, an English/Finnish fixture, platform smoke tests, and license/terms checks.
+Verified against first-party documentation on 2026-07-15. These are candidates, not timeless claims or quality winners. A model enters a built-in profile only after capability conformance, an English/Finnish fixture, native-Windows smoke tests, and license/terms checks.
 
 ## Selection policy
 
@@ -84,11 +84,16 @@ Voice cloning requires the user's own authorized recordings, kept under `private
 
 ### Manifest-selected GGUF through stock llama.cpp
 
-The workflow no longer bakes in one local text model. One typed `local-llm.toml` selects an exact target GGUF, optional compatible drafter, full repository and stock llama.cpp commits, independent file hashes, reviewed license, context tier, and MTP mode. A stdlib control worker owns one native-Windows `llama-server.exe`, reuses it for the adjacent text batch, and keeps JSON Schema plus domain validation outside the model runtime. [llama-server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md), [speculative decoding](https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md)
+The workflow no longer bakes in one local text model. One typed `local-llm.toml` selects an exact target GGUF, optional compatible drafter, full repository and stock llama.cpp commits, independent file hashes, reviewed license, context tier, and MTP mode. A stdlib control worker owns one native-Windows `llama-server.exe` and reuses it for the adjacent text batch. Python supplies the task-specific schema, owns IDs and aggregation, and performs semantic validation; llama.cpp grammar constrains the model response to the requested JSON shape. [llama-server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md), [speculative decoding](https://github.com/ggml-org/llama.cpp/blob/master/docs/speculative.md)
 
-Qwen3.6 27B/35B-A3B and Gemma 4 31B/26B-A4B GGUF variants are reasonable first candidates, not defaults. Qwen MTP can be embedded in the target GGUF; current Gemma 4 MTP artifacts use a separate assistant GGUF. The same target must be evaluated with MTP off and on because speculative decoding can improve generation while worsening prompt processing, memory, or runtime stability. [Qwen 27B MTP GGUF](https://huggingface.co/unsloth/Qwen3.6-27B-MTP-GGUF), [Qwen 35B-A3B MTP GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF), [Gemma 4 31B QAT GGUF](https://huggingface.co/unsloth/gemma-4-31B-it-qat-GGUF), [Gemma 4 26B-A4B QAT GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF)
+Qwen3.6, Gemma 4, and EuroLLM-22B are explicit candidates, not defaults. Qwen MTP can be embedded in the target GGUF; current Gemma 4 MTP artifacts use a separate assistant GGUF. EuroLLM has no official GGUF, so the curated entry pins Bartowski's exact Q4_K_M file and independent SHA-256; it advertises Finnish and uses the existing llama.cpp JSON-Schema grammar rather than claiming native tool-call training. [EuroLLM model](https://huggingface.co/utter-project/EuroLLM-22B-Instruct-2512), [pinned EuroLLM GGUF](https://huggingface.co/bartowski/utter-project_EuroLLM-22B-Instruct-2512-GGUF), [llama-server structured output](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
 
-Start with one Qwen and one Gemma candidate rather than downloading the whole matrix. Use one slot, 32K as the first application benchmark tier, and MTP disabled. Context is allocated at server startup; 64K/128K/256K are separate relaunch profiles and become usable only after real 24 GB fit, structured-output, and quality evidence. A native model context limit does not prove that its quantized runtime plus KV cache and work buffers fit this GPU.
+Use one slot and MTP disabled. Start Qwen/Gemma at 32K and EuroLLM at 16K; EuroLLM's 32K context is a later fit variant. Context is allocated at server startup, and a native context limit does not prove that the quantized runtime plus KV cache and work buffers fit this GPU.
+
+The optional EuroLLM profile passed direct English and Finnish strict one-field schema smokes through
+llama.cpp `/completion` at about 53 generated tokens/second. Finnish was not clearly better than the
+current Gemma profile, which reached about 91 tokens/second in the matched smoke. Full workflow-schema
+and script-quality validation remain open.
 
 Visual Review remains a separate capability. A text GGUF cannot claim it merely because the original architecture family is multimodal. The existing Qwen vision path stays evaluation-gated until its projector/runtime passes memory and image fixtures; another explicit VLM may win independently of the text benchmark.
 
@@ -103,6 +108,22 @@ Do not create separate Finnish orchestration or assume a separate Finnish LLM. M
 Use language-matched recordings of the same authorized voice rather than separate TTS models unless evaluation says otherwise. The adapter probes the actual output sample rate and duration instead of hardcoding a documentation claim. VoxCPM does not provide the authoritative word timing required for captions.
 
 VoxCPM's optional `voxcpm[timestamps]`/stable-ts post-processing is worth benchmarking as an Alignment implementation. It is not native authoritative TTS timing and must pass the same exact-script coverage checks as the implemented ASR Backends.
+
+### OmniVoice, MOSS-TTS, and X-Voice challengers
+
+`k2-fsa/OmniVoice` is the first local TTS challenger. Its official Python package supports native Windows CUDA, Finnish and English, transcript-assisted voice cloning, and 24 kHz output. The worker disables its optional ASR so it cannot fetch another model at runtime, requires the authorized transcript already present in `private/`, and leaves cadence correction and word timing to the host/faster-whisper path. The weights are treated conservatively as CC-BY-NC even though the code is Apache-2.0. [OmniVoice model](https://huggingface.co/k2-fsa/OmniVoice), [OmniVoice repository](https://github.com/k2-fsa/OmniVoice)
+
+`OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5` is a conditional native-Windows challenger. Setup pins both its main checkpoint and `MOSS-Audio-Tokenizer-v2`; inference forces local-only remote code and SDPA, never FlashAttention or a server/container. The native TorchCodec/shared-FFmpeg path produced short English and Finnish 48 kHz stereo smokes at about 12.9 GB peak VRAM. Both assets are Apache-2.0. [MOSS-TTS v1.5](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5), [MOSS Audio Tokenizer v2](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer-v2)
+
+`XRXRX/X-Voice` Stage 1 is an experimental native-Windows challenger. Its isolated runtime combines
+a pinned micromamba/Conda layer for Pynini/OpenFST, hash-locked uv packages, an exact source checkout,
+Vocos, eSpeak NG, and bounded support data. It requires the exact transcript and the actual language
+of the authorized reference clip. Short English and Finnish 24 kHz mono smokes and cleanup passed at
+about 2.0 GB peak VRAM, but a Finnish brand-name pronunciation error remains. The source is MIT and
+the weights are CC-BY-NC, so the adapter is limited to personal noncommercial use. [X-Voice](https://github.com/sunnyxrxrx/X-Voice)
+
+OmniVoice also passed short English and Finnish synthesis plus ASR smokes at about 6.1 GB peak VRAM.
+These are component smokes, not the 30-second bilingual end-to-end or 60–90-second promotion gates.
 
 ### faster-whisper large-v3-turbo
 
@@ -124,6 +145,29 @@ scene-locked local generation remains possible without STT when captions are exp
 
 The 4B model is the simpler default even though the declared personal noncommercial Usage Purpose may allow experiments with other licenses. Larger variants are not implied fallbacks and need their own memory/license evaluation.
 
+`Tongyi-MAI/Z-Image-Turbo` is the first image challenger: Apache-2.0, native Diffusers/SDPA, 9 steps, and an official sub-16 GB VRAM target. Turbo guidance is zero, so its negative input would be ignored; Python instead folds exclusions into the approved positive prompt and records that policy. [Z-Image-Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo), [Diffusers Z-Image](https://huggingface.co/docs/diffusers/api/pipelines/z_image)
+
+The implemented 1024×576 doodle smoke was valid and peaked near 22.6 GB on this RTX 4090, materially
+above the official planning claim. Do not run it concurrently with another GPU model.
+
+`ideogram-ai/ideogram-4-nf4-diffusers` is gated and noncommercial. Its adapter never invokes Ideogram's hosted magic-prompt service and never asks the orchestration LLM for another large JSON object. Python deterministically wraps the existing approved image prompt in the strict native caption schema, uses a per-step guidance schedule, and begins with model CPU offload. [Ideogram 4 repository](https://github.com/ideogram-oss/ideogram4), [prompt schema](https://github.com/ideogram-oss/ideogram4/blob/main/docs/prompting.md), [Diffusers pipeline](https://huggingface.co/docs/diffusers/main/api/pipelines/ideogram4)
+
+`Qwen/Qwen-Image-2512` is loaded only through on-the-fly NF4 quantization of the transformer and text encoder plus CPU offload. Full BF16 is not a 24 GB configuration. The adapter passes actual negative conditioning with `true_cfg_scale`, starts at exact 1024×576, and does not advertise reference-image editing. [Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512), [Diffusers quantization/offload](https://huggingface.co/docs/diffusers/en/quicktour)
+
+The Qwen smoke produced a valid image at about 17.5 GB peak, but was more painterly/noisy than Z-Image
+for the minimalist doodle fixture. Ideogram setup and model loading succeeded, but generation returned
+its gray safety placeholder; the adapter rejected it. That is not a usable-generation pass.
+
+### Native-Windows exclusions
+
+| Candidate | Decision under the native-Windows-only rule |
+|---|---|
+| Higgs TTS 3 | Not integrated: official supported inference is SGLang-Omni/vLLM-Omni on Linux/container paths; no validated complete native-Windows TTS/codec runtime |
+| HiDream-O1 Dev | Not integrated: the official custom runtime hard-requires or source-edits around FlashAttention, whose Windows path is not supported/tested sufficiently for this project |
+
+Neither exclusion is a failed quality or VRAM benchmark; the project did not run an unsupported
+platform route.
+
 ## Local music
 
 `ACE-Step/acestep-v15-xl-turbo` is the initial local Music Backend. ACE-Step 1.5 is MIT-licensed, documents native Windows paths, supports instrumental output and requested durations from 10 to 600 seconds, and recommends at least 20 GB for XL without offload. On 24 GB it must run alone, batch 1. The standard Turbo checkpoint and smaller planning model are explicit lower-memory alternatives if evaluation favors them. [ACE-Step repository](https://github.com/ace-step/ACE-Step-1.5), [XL Turbo checkpoint](https://huggingface.co/ACE-Step/acestep-v15-xl-turbo), [GPU compatibility](https://github.com/ace-step/ACE-Step-1.5/blob/main/docs/en/GPU_COMPATIBILITY.md), [inference parameters](https://github.com/ace-step/ACE-Step-1.5/blob/main/docs/en/INFERENCE.md)
@@ -144,18 +188,31 @@ evidence ingestion is not implemented, so Offline factual configuration is rejec
 
 ## Hardware and platform implications
 
-The target machine has 24 GB VRAM and 64 GB system RAM. These figures are planning reservations, not benchmark results:
+The target machine has 24 GB VRAM and 64 GB system RAM. These figures are planning reservations:
 
 | Local Backend | Conservative implication |
 | --- | --- |
 | 14–19 GB GGUF candidate | Near the GPU limit once context/MTP/work buffers and Windows display use are included; start at 32K, one slot, MTP off |
 | VoxCPM2 | About 8 GB reported; native compatibility path |
+| OmniVoice | First native EN/FI TTS challenger |
+| MOSS-TTS v1.5 + codec | Main model and codec share the card; run alone |
+| X-Voice Stage 1 | Low-memory experimental native EN/FI challenger; noncommercial weights |
 | faster-whisper Turbo | Native CTranslate2 CUDA worker; live probe must confirm the exact Windows wheel and GPU |
 | Parakeet 0.6B | Optional WSL2 comparison Backend |
 | FLUX.2 klein 4B | Reserve 13 GB; batch images while resident |
+| Z-Image-Turbo | Reserve the full card despite the lower official claim |
+| Ideogram 4 NF4 | Budget the full 24 GB and begin with model CPU offload |
+| Qwen-Image-2512 NF4 | Quantized/offloaded challenger; run alone |
 | ACE-Step XL Turbo | Reserve the full card; no concurrent model |
 
-Only one local model family is resident. Process termination is the v0 VRAM-release boundary. For llama-server, live Preflight now requires process exit/GPU-PID disappearance when observable and records baseline/load/peak/post-exit aggregate VRAM. Exact aggregate return is advisory on Windows WDDM. Other model workers retain sequential load/process-exit probes until they add equivalent telemetry.
+Measured component smokes on 2026-07-15 reached approximately 6.1 GB peak for OmniVoice, 12.9 GB
+for MOSS-TTS, 2.0 GB for X-Voice, 22.6 GB for Z-Image Turbo, and 17.5 GB for Qwen-Image. Measurements
+are implementation- and fixture-specific, not general vendor specifications.
+
+Only one local model family is resident. Process termination is the v0 VRAM-release boundary. Live
+Preflight requires fresh process-exit and observable GPU-PID cleanup evidence for every CUDA runner.
+llama-server additionally records baseline/load/peak/post-exit aggregate VRAM; exact aggregate return
+is advisory on Windows WDDM.
 
 The model cache is `./.cache/models`, not a global surprise cache. Download manifests pin repositories, revisions, exact files, hashes, licenses, expected disk size, and required runtime. Hugging Face credentials are used only for gated downloads and never copied into a Run Bundle.
 
@@ -178,9 +235,15 @@ These candidates from the supplied local-model research are useful contingencies
 | --- | --- |
 | Selected local GGUF | model-specific; frozen in `local-llm.toml` and the runner manifest |
 | VoxCPM2 | Apache 2.0 |
+| OmniVoice weights | CC-BY-NC |
+| MOSS-TTS v1.5 / Audio Tokenizer v2 | Apache 2.0 |
+| X-Voice Stage 1 weights | CC-BY-NC |
 | faster-whisper Turbo runtime/model | MIT |
 | Parakeet TDT 0.6B v3 | CC BY 4.0 |
 | FLUX.2 klein 4B | Apache 2.0 |
+| Z-Image-Turbo | Apache 2.0 |
+| Ideogram 4 NF4 | Ideogram 4 Non-Commercial |
+| Qwen-Image-2512 | Apache 2.0 |
 | ACE-Step 1.5 | MIT |
 
 This table is not legal advice and does not cover training inputs, hosted-service terms, voice rights, or generated-output restrictions. Setup stores the exact license text/revision associated with every pulled asset and compares it with `personal_noncommercial`; later commercial use requires a fresh review.

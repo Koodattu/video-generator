@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -15,18 +18,84 @@ from .contracts import ProbeItem
 from .errors import ErrorKind, VideoGeneratorError
 from .local_llm import LocalLlmProfile, load_local_llm_profile
 from .profiles import BACKEND_DESCRIPTORS, PROFILES
-from .runners import RunnerManager, RunnerSpec, decode_wsl_output, runner_slug, windows_to_wsl
-from .util import atomic_write_json, atomic_write_text, relative_path, replace_path, sha256_file
+from .runners import (
+    RunnerManager,
+    RunnerSpec,
+    decode_wsl_output,
+    runner_setup_source_revision,
+    runner_slug,
+    runner_torch_backend,
+    windows_to_wsl,
+)
+from .util import (
+    atomic_write_json,
+    atomic_write_text,
+    read_json,
+    relative_path,
+    replace_path,
+    sha256_file,
+)
 
 
 VOXCPM_REVISION = "bffb3df5a29440629464e5e839f4d214c8714c3d"
 FASTER_WHISPER_REVISION = "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
 PARAKEET_REVISION = "7c35754d166cca382ad1e53e68b01e7c575f3a1d"
 FLUX_REVISION = "e7b7dc27f91deacad38e78976d1f2b499d76a294"
+OMNIVOICE_REVISION = "c5fdb5ccb189668d56333f77ba2629f4cd7535f4"
+MOSS_TTS_REVISION = "be7766a6735b98bd793f7c79fb720b4d0f5d13b8"
+MOSS_AUDIO_TOKENIZER_REVISION = "f6e20e543b33d2c252a7ef71bdf8aa71e5ff9169"
+XVOICE_SOURCE_REPOSITORY = "https://github.com/sunnyxrxrx/X-Voice.git"
+XVOICE_SOURCE_REVISION = "b1a5d25459aecdea5dfce6e892da384400ac32e9"
+XVOICE_MODEL_REVISION = "7f24fe778ddf7a47e25d87e5d5153599c1d4d5c2"
+XVOICE_VOCOS_REVISION = "0feb3fdd929bcd6649e0e7c5a688cf7dd012ef21"
+XVOICE_MICROMAMBA_VERSION = "2.8.1"
+XVOICE_MICROMAMBA_URL = "https://micro.mamba.pm/api/micromamba/win-64/2.8.1"
+XVOICE_MICROMAMBA_ARCHIVE_SHA256 = (
+    "8648c6d302bb6d7432e5d620bc862c2be14c00f39ddd7e10c5eb6d73250dbba1"
+)
+XVOICE_MICROMAMBA_EXE_SHA256 = (
+    "8a51f88ec02600488ea20c3acd93fbd4da6c0f03fc499aa53fd234c6749b94b0"
+)
+XVOICE_ESPEAK_VERSION = "1.52.0"
+XVOICE_ESPEAK_EXE_SHA256 = (
+    "3080ec3822c1b266ef557c710bc79a97d20a7ab133a34bac308b81ab0afc733e"
+)
+XVOICE_ESPEAK_DLL_SHA256 = (
+    "e737572df0a35a32b7bd444537c661c1c916b13b0b91351030c7f1d531307beb"
+)
+XVOICE_ESPEAK_BUNDLE_SHA256 = (
+    "cab76dca69fd1a5c5b6aecff9cd9a62b8668346983bd735bd1fc52ba2e705bc9"
+)
+XVOICE_FASTTEXT_LID_URL = (
+    "https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz"
+)
+XVOICE_FASTTEXT_LID_SHA256 = (
+    "8f3472cfe8738a7b6099e8e999c3cbfae0dcd15696aac7d7738a8039db603e83"
+)
+XVOICE_NLTK_DATA_REVISION = "550b6625bcef1f2abff2ff770a5a0d272c9c6b2a"
+XVOICE_CMUDICT_URL = (
+    "https://raw.githubusercontent.com/nltk/nltk_data/"
+    f"{XVOICE_NLTK_DATA_REVISION}/packages/corpora/cmudict.zip"
+)
+XVOICE_CMUDICT_SHA256 = (
+    "d07cca47fd72ad32ea9d8ad1219f85301eeaf4568f8b6b73747506a71fb5afd6"
+)
+Z_IMAGE_TURBO_REVISION = "f332072aa78be7aecdf3ee76d5c247082da564a6"
+IDEOGRAM_4_NF4_REVISION = "1874bc70267ba2c823a7239e1d70dd308c8d64dc"
+QWEN_IMAGE_2512_REVISION = "25468b98e3276ca6700de15c6628e51b7de54a26"
 ACE_REPOSITORY_TAG = "v0.1.8"
 ACE_REPOSITORY_REVISION = "dce621408bee8c31b4fcf4811682eb9359e1bc94"
 ACE_XL_REVISION = "d4a0b288b83ebb7e25a8c0b32c573c22e134e8ee"
 MINIMUM_UV_TORCH_BACKEND_VERSION = (0, 6, 9)
+
+
+@dataclass(frozen=True)
+class SupportingModelDefinition:
+    environment_name: str
+    model_repo: str
+    model_revision: str
+    model_subdir: str
+    allow_patterns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -40,6 +109,9 @@ class LocalDefinition:
     model_revision: str
     model_subdir: str
     allow_patterns: tuple[str, ...] = ()
+    supporting_models: tuple[SupportingModelDefinition, ...] = ()
+    timeout_seconds: float = 600
+    startup_timeout_seconds: float = 600
 
 
 @dataclass(frozen=True)
@@ -91,6 +163,9 @@ _DOWNLOAD_ENVIRONMENT_NAMES = {
     "no_proxy",
 }
 _DOWNLOAD_ENVIRONMENT_NAMES_CASEFOLD = {name.casefold() for name in _DOWNLOAD_ENVIRONMENT_NAMES}
+_SETUP_TOOL_ENVIRONMENT_PREFIXES = ("cuda_", "nvidia_", "pip_", "torch_", "uv_")
+_SNAPSHOT_EXECUTABLE_SUFFIXES = {".py", ".pyi", ".pyc", ".pyd", ".dll", ".so"}
+_SNAPSHOT_EXCLUDED_ROOTS = {".cache", "__pycache__"}
 
 # These are benchmark candidates, not silently selected defaults. Each entry pins the exact
 # third-party quantization named in docs/model-matrix.md and independently verified file hashes.
@@ -133,6 +208,24 @@ CURATED_LLM_CANDIDATES: dict[str, CuratedLlmCandidate] = {
                 role="draft-model",
                 filename="mtp-gemma-4-26B-A4B-it.gguf",
                 sha256="62bd3af7f66c9308de9a5454233852f8c7324c93767e8dfb824ed45b9179864a",
+            ),
+        ),
+    ),
+    "eurollm-22b-instruct-2512-q4": CuratedLlmCandidate(
+        candidate_id="eurollm-22b-instruct-2512-q4",
+        model_id="utter-project/EuroLLM-22B-Instruct-2512",
+        repository="bartowski/utter-project_EuroLLM-22B-Instruct-2512-GGUF",
+        revision="1dbd312ffa10e83e5faa855e3727cbf4abc45f08",
+        license_name="Apache-2.0",
+        quantization="Q4_K_M",
+        mtp="none",
+        speculative_tokens=2,
+        estimated_download_gb=13.7,
+        artifacts=(
+            CuratedLlmArtifact(
+                role="model",
+                filename="utter-project_EuroLLM-22B-Instruct-2512-Q4_K_M.gguf",
+                sha256="2a222374c4adacd55b55795e2f9dca42a2f100d5a2d5858442f928c4c8bdf5e7",
             ),
         ),
     ),
@@ -188,6 +281,99 @@ LOCAL_DEFINITIONS: dict[str, LocalDefinition] = {
         model_repo="black-forest-labs/FLUX.2-klein-4B",
         model_revision=FLUX_REVISION,
         model_subdir="flux.2-klein-4b",
+    ),
+    "local:omnivoice": LocalDefinition(
+        backend_id="local:omnivoice",
+        kind="omnivoice",
+        platform="native",
+        python_version="3.11",
+        requirements_name="omnivoice.in",
+        model_repo="k2-fsa/OmniVoice",
+        model_revision=OMNIVOICE_REVISION,
+        model_subdir="omnivoice",
+    ),
+    "local:moss-tts-v1.5": LocalDefinition(
+        backend_id="local:moss-tts-v1.5",
+        kind="moss-tts",
+        platform="native",
+        python_version="3.12",
+        requirements_name="moss-tts.in",
+        model_repo="OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5",
+        model_revision=MOSS_TTS_REVISION,
+        model_subdir="moss-tts-v1.5",
+        supporting_models=(
+            SupportingModelDefinition(
+                environment_name="VIDEO_GENERATOR_CODEC_PATH",
+                model_repo="OpenMOSS-Team/MOSS-Audio-Tokenizer-v2",
+                model_revision=MOSS_AUDIO_TOKENIZER_REVISION,
+                model_subdir="moss-audio-tokenizer-v2",
+            ),
+        ),
+        timeout_seconds=1200,
+        startup_timeout_seconds=1200,
+    ),
+    "local:x-voice": LocalDefinition(
+        backend_id="local:x-voice",
+        kind="xvoice",
+        platform="native",
+        python_version="3.11",
+        requirements_name="xvoice.in",
+        model_repo="XRXRX/X-Voice",
+        model_revision=XVOICE_MODEL_REVISION,
+        model_subdir="x-voice-stage1",
+        allow_patterns=(
+            "XVoice_Base_Stage1/model_600000.safetensors",
+            "XVoice_Base_Stage1/vocab.txt",
+            "README.md",
+            "LICENSE*",
+        ),
+        supporting_models=(
+            SupportingModelDefinition(
+                environment_name="VIDEO_GENERATOR_XVOICE_VOCODER_PATH",
+                model_repo="charactr/vocos-mel-24khz",
+                model_revision=XVOICE_VOCOS_REVISION,
+                model_subdir="vocos-mel-24khz",
+                allow_patterns=("config.yaml", "pytorch_model.bin", "README.md", "LICENSE*"),
+            ),
+        ),
+        timeout_seconds=1200,
+        startup_timeout_seconds=900,
+    ),
+    "local:z-image-turbo": LocalDefinition(
+        backend_id="local:z-image-turbo",
+        kind="z-image",
+        platform="native",
+        python_version="3.11",
+        requirements_name="z-image.in",
+        model_repo="Tongyi-MAI/Z-Image-Turbo",
+        model_revision=Z_IMAGE_TURBO_REVISION,
+        model_subdir="z-image-turbo",
+        timeout_seconds=900,
+        startup_timeout_seconds=900,
+    ),
+    "local:ideogram-4-nf4": LocalDefinition(
+        backend_id="local:ideogram-4-nf4",
+        kind="ideogram4",
+        platform="native",
+        python_version="3.11",
+        requirements_name="ideogram4.in",
+        model_repo="ideogram-ai/ideogram-4-nf4-diffusers",
+        model_revision=IDEOGRAM_4_NF4_REVISION,
+        model_subdir="ideogram-4-nf4",
+        timeout_seconds=1200,
+        startup_timeout_seconds=1200,
+    ),
+    "local:qwen-image-2512-nf4": LocalDefinition(
+        backend_id="local:qwen-image-2512-nf4",
+        kind="qwen-image",
+        platform="native",
+        python_version="3.11",
+        requirements_name="qwen-image.in",
+        model_repo="Qwen/Qwen-Image-2512",
+        model_revision=QWEN_IMAGE_2512_REVISION,
+        model_subdir="qwen-image-2512",
+        timeout_seconds=1800,
+        startup_timeout_seconds=1200,
     ),
 }
 
@@ -330,6 +516,18 @@ def _model_download_environment(environment: Mapping[str, str], project_root: Pa
     return download_environment
 
 
+def _setup_tool_environment(environment: Mapping[str, str], project_root: Path) -> dict[str, str]:
+    setup_environment = _model_download_environment(environment, project_root)
+    setup_environment.update(
+        {
+            name: value
+            for name, value in environment.items()
+            if value and name.casefold().startswith(_SETUP_TOOL_ENVIRONMENT_PREFIXES)
+        }
+    )
+    return setup_environment
+
+
 def download_curated_llm_candidate(
     *,
     project_root: Path,
@@ -373,53 +571,55 @@ def download_curated_llm_candidate(
                 dir=managed_root,
             )
         )
-        download_environment = _model_download_environment(environment, project_root)
-        download_environment.update(
-            {"TEMP": str(staging), "TMP": str(staging), "TMPDIR": str(staging)}
-        )
-        _run(
-            [
-                uv,
-                "tool",
-                "run",
-                "--from",
-                f"huggingface-hub=={HUGGINGFACE_HUB_TOOL_VERSION}",
-                "hf",
-                "download",
-                candidate.repository,
-                *[artifact.filename for artifact in missing],
-                "--revision",
-                candidate.revision,
-                "--local-dir",
-                str(staging),
-            ],
-            cwd=project_root,
-            environment=download_environment,
-            timeout=21600,
-        )
-        staged_hashes: dict[str, str] = {}
-        for artifact in missing:
-            staged = staging / artifact.filename
-            if not staged.is_file():
-                raise VideoGeneratorError(
-                    f"Hugging Face download did not produce {artifact.filename}",
-                    kind=ErrorKind.NOT_READY,
-                )
-            actual = sha256_file(staged)
-            if actual.casefold() != artifact.sha256.casefold():
-                staged.unlink(missing_ok=True)
-                raise VideoGeneratorError(
-                    f"SHA-256 mismatch for downloaded {artifact.filename}",
-                    kind=ErrorKind.NOT_READY,
-                    action=f"Expected {artifact.sha256.lower()}, got {actual.lower()}.",
-                )
-            staged_hashes[artifact.filename] = actual
-        destination.mkdir(parents=True, exist_ok=True)
-        for artifact in missing:
-            staged = staging / artifact.filename
-            replace_path(staged, destination / artifact.filename)
-            verified_hashes[artifact.filename] = staged_hashes[artifact.filename]
-        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            download_environment = _model_download_environment(environment, project_root)
+            download_environment.update(
+                {"TEMP": str(staging), "TMP": str(staging), "TMPDIR": str(staging)}
+            )
+            _run(
+                [
+                    uv,
+                    "tool",
+                    "run",
+                    "--from",
+                    f"huggingface-hub=={HUGGINGFACE_HUB_TOOL_VERSION}",
+                    "hf",
+                    "download",
+                    candidate.repository,
+                    *[artifact.filename for artifact in missing],
+                    "--revision",
+                    candidate.revision,
+                    "--local-dir",
+                    str(staging),
+                ],
+                cwd=project_root,
+                environment=download_environment,
+                timeout=21600,
+            )
+            staged_hashes: dict[str, str] = {}
+            for artifact in missing:
+                staged = staging / artifact.filename
+                if not staged.is_file():
+                    raise VideoGeneratorError(
+                        f"Hugging Face download did not produce {artifact.filename}",
+                        kind=ErrorKind.NOT_READY,
+                    )
+                actual = sha256_file(staged)
+                if actual.casefold() != artifact.sha256.casefold():
+                    staged.unlink(missing_ok=True)
+                    raise VideoGeneratorError(
+                        f"SHA-256 mismatch for downloaded {artifact.filename}",
+                        kind=ErrorKind.NOT_READY,
+                        action=f"Expected {artifact.sha256.lower()}, got {actual.lower()}.",
+                    )
+                staged_hashes[artifact.filename] = actual
+            destination.mkdir(parents=True, exist_ok=True)
+            for artifact in missing:
+                staged = staging / artifact.filename
+                replace_path(staged, destination / artifact.filename)
+                verified_hashes[artifact.filename] = staged_hashes[artifact.filename]
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     files = []
     for artifact in candidate.artifacts:
@@ -460,7 +660,12 @@ def download_curated_llm_candidate(
     return destination
 
 
-def _install_native_environment(project_root: Path, definition: LocalDefinition) -> tuple[Path, Path]:
+def _install_native_environment(
+    project_root: Path,
+    definition: LocalDefinition,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[Path, Path]:
     uv = _find_uv()
     if not uv:
         raise VideoGeneratorError("uv is required for local Setup", kind=ErrorKind.NOT_READY)
@@ -468,12 +673,22 @@ def _install_native_environment(project_root: Path, definition: LocalDefinition)
     runtime.mkdir(parents=True, exist_ok=True)
     lock = runtime / "requirements.lock"
     source = _requirements_path(definition.requirements_name)
+    reviewed_lock = source.with_suffix(".lock")
     source_marker = runtime / "requirements.source.sha256"
-    source_revision = sha256_file(source)
+    source_revision = runner_setup_source_revision(definition.kind)
     recorded_source = source_marker.read_text(encoding="utf-8").strip() if source_marker.is_file() else ""
-    torch_backend_args = ["--torch-backend", "auto"] if definition.kind in {"voxcpm", "flux"} else []
+    setup_environment = _setup_tool_environment(environment or os.environ, project_root)
+    torch_backend = runner_torch_backend(definition.kind)
+    torch_backend_args = ["--torch-backend", torch_backend] if torch_backend else []
     if torch_backend_args:
-        uv_version = _parse_uv_version(_run([uv, "--version"], cwd=project_root, timeout=30))
+        uv_version = _parse_uv_version(
+            _run(
+                [uv, "--version"],
+                cwd=project_root,
+                environment=setup_environment,
+                timeout=30,
+            )
+        )
         if uv_version is None or uv_version < MINIMUM_UV_TORCH_BACKEND_VERSION:
             raise VideoGeneratorError(
                 "local CUDA Setup requires uv 0.6.9 or newer",
@@ -483,29 +698,38 @@ def _install_native_environment(project_root: Path, definition: LocalDefinition)
                     "then rerun Setup."
                 ),
             )
-    if not lock.is_file() or recorded_source != source_revision:
-        _run(
-            [
-                uv,
-                "pip",
-                "compile",
-                str(source),
-                "--python-version",
-                definition.python_version,
-                *torch_backend_args,
-                "-o",
-                str(lock),
-            ],
-            cwd=project_root,
+    if not reviewed_lock.is_file():
+        raise VideoGeneratorError(
+            f"reviewed Windows dependency lock is missing: {reviewed_lock}",
+            kind=ErrorKind.NOT_READY,
         )
+    if (
+        not lock.is_file()
+        or recorded_source != source_revision
+        or sha256_file(lock) != sha256_file(reviewed_lock)
+    ):
+        _copy_verified_file(reviewed_lock, lock, sha256_file(reviewed_lock))
         atomic_write_text(source_marker, source_revision + "\n")
     python = _native_python(runtime)
     if not python.is_file():
-        _run([uv, "venv", "--python", definition.python_version, str(runtime / ".venv")], cwd=project_root)
+        _run(
+            [uv, "venv", "--python", definition.python_version, str(runtime / ".venv")],
+            cwd=project_root,
+            environment=setup_environment,
+        )
     _run(
-        [uv, "pip", "sync", "--python", str(python), *torch_backend_args, str(lock)],
+        [
+            uv,
+            "pip",
+            "sync",
+            "--python",
+            str(python),
+            *torch_backend_args,
+            "--require-hashes",
+            str(lock),
+        ],
         cwd=project_root,
-        environment=os.environ,
+        environment=setup_environment,
     )
     return python, lock
 
@@ -593,6 +817,25 @@ def _download_snapshot(
     environment: Mapping[str, str],
     wsl_distribution: str = "",
 ) -> None:
+    project_root = project_root.resolve()
+    destination = destination.resolve()
+    model_root = (project_root / ".cache" / "models").resolve()
+    destination.relative_to(model_root)
+    existing_manifest = destination / "asset-manifest.json"
+    if existing_manifest.is_file():
+        try:
+            _verify_snapshot_manifest(existing_manifest, definition)
+            return
+        except (OSError, ValueError):
+            pass
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=f".{destination.name}.",
+            suffix=".download",
+            dir=destination.parent,
+        )
+    )
     command = [
         *python_command,
         "-m",
@@ -602,16 +845,18 @@ def _download_snapshot(
         "--revision",
         definition.model_revision,
         "--destination",
-        str(destination),
+        str(staging),
     ]
     for pattern in definition.allow_patterns:
         command.extend(["--allow", pattern])
-    setup_environment = dict(environment)
+    setup_environment = _model_download_environment(environment, project_root)
+    if environment.get("HF_TOKEN"):
+        setup_environment["HF_TOKEN"] = environment["HF_TOKEN"]
     setup_environment["PYTHONPATH"] = str(project_root / "src")
     if definition.platform == "wsl":
         wsl = shutil.which("wsl.exe") or shutil.which("wsl")
         root_wsl = windows_to_wsl(project_root)
-        destination_wsl = windows_to_wsl(destination)
+        destination_wsl = windows_to_wsl(staging)
         translated = list(command)
         destination_index = translated.index("--destination") + 1
         translated[destination_index] = destination_wsl
@@ -629,7 +874,62 @@ def _download_snapshot(
             f"PYTHONPATH={source_path}",
             *translated,
         ]
-    _run(command, cwd=project_root, environment=setup_environment)
+    backup: Path | None = None
+    try:
+        _run(command, cwd=project_root, environment=setup_environment)
+        staged_manifest = staging / "asset-manifest.json"
+        try:
+            _verify_snapshot_manifest(staged_manifest, definition)
+        except (OSError, ValueError) as exc:
+            raise VideoGeneratorError(
+                f"downloaded model snapshot failed verification: {exc}",
+                kind=ErrorKind.NOT_READY,
+            ) from exc
+        if destination.exists():
+            backup = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{destination.name}.",
+                    suffix=".backup",
+                    dir=destination.parent,
+                )
+            )
+            backup.rmdir()
+            replace_path(destination, backup)
+        try:
+            replace_path(staging, destination)
+        except BaseException:
+            if backup is not None and backup.exists() and not destination.exists():
+                replace_path(backup, destination)
+            raise
+        if backup is not None:
+            shutil.rmtree(backup)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _verify_snapshot_manifest(
+    manifest_path: Path,
+    definition: LocalDefinition,
+) -> None:
+    manifest = read_json(manifest_path)
+    expected_source = f"https://huggingface.co/{definition.model_repo}"
+    if manifest.get("source") != expected_source:
+        raise ValueError(f"asset manifest source does not match {expected_source}")
+    if tuple(manifest.get("allow_patterns") or ()) != definition.allow_patterns:
+        raise ValueError("asset manifest allow-pattern policy changed")
+    suffixes = {str(value).casefold() for value in manifest.get("exact_file_suffixes") or ()}
+    if suffixes != _SNAPSHOT_EXECUTABLE_SUFFIXES:
+        raise ValueError("asset manifest executable-source policy is obsolete")
+    excluded_roots = {
+        str(value).casefold() for value in manifest.get("exact_exclude_roots") or ()
+    }
+    if excluded_roots != _SNAPSHOT_EXCLUDED_ROOTS:
+        raise ValueError("asset manifest executable-source exclusions are obsolete")
+    RunnerManager._verify_asset_manifest(
+        manifest_path,
+        expected_revision=definition.model_revision,
+    )
 
 
 def _write_runner_manifest(
@@ -641,6 +941,7 @@ def _write_runner_manifest(
     model_path: Path,
     wsl_distribution: str = "",
     extra_environment: dict[str, str] | None = None,
+    supporting_model_paths: Mapping[SupportingModelDefinition, Path] | None = None,
 ) -> Path:
     environment = {
         "PYTHONPATH": str(project_root / "src"),
@@ -649,6 +950,9 @@ def _write_runner_manifest(
         "VIDEO_GENERATOR_MODEL_REVISION": definition.model_revision,
     }
     environment.update(extra_environment or {})
+    supporting_model_paths = dict(supporting_model_paths or {})
+    for supporting, path in supporting_model_paths.items():
+        environment[supporting.environment_name] = relative_path(path, project_root)
     if definition.platform == "wsl":
         environment["PYTHONPATH"] = windows_to_wsl(project_root / "src")
     asset_manifest = model_path / "asset-manifest.json" if model_path.is_dir() else model_path.parent / "asset-manifest.json"
@@ -657,17 +961,42 @@ def _write_runner_manifest(
             f"model asset manifest is missing: {asset_manifest}",
             kind=ErrorKind.NOT_READY,
         )
+    supporting_manifests = {
+        path / "asset-manifest.json": supporting
+        for supporting, path in supporting_model_paths.items()
+    }
+    missing_supporting_manifest = next(
+        (path for path in supporting_manifests if not path.is_file()),
+        None,
+    )
+    if missing_supporting_manifest is not None:
+        raise VideoGeneratorError(
+            f"supporting model asset manifest is missing: {missing_supporting_manifest}",
+            kind=ErrorKind.NOT_READY,
+        )
     spec = RunnerSpec(
         backend_id=definition.backend_id,
         platform=definition.platform,
         command=[command_python, "-m", "video_generator.workers.main", "--kind", definition.kind],
         model_family=definition.kind,
-        startup_timeout_seconds=600,
+        timeout_seconds=definition.timeout_seconds,
+        startup_timeout_seconds=definition.startup_timeout_seconds,
         wsl_distribution=wsl_distribution,
         environment=environment,
-        model_paths=[relative_path(model_path, project_root)],
+        model_paths=[
+            relative_path(path, project_root)
+            for path in (model_path, *supporting_model_paths.values())
+        ],
         asset_manifests={
-            relative_path(asset_manifest, project_root): sha256_file(asset_manifest)
+            relative_path(path, project_root): sha256_file(path)
+            for path in (asset_manifest, *supporting_manifests)
+        },
+        asset_revisions={
+            relative_path(asset_manifest, project_root): definition.model_revision,
+            **{
+                relative_path(path, project_root): supporting.model_revision
+                for path, supporting in supporting_manifests.items()
+            },
         },
         runtime_files={
             relative_path(lock_path, project_root): sha256_file(lock_path),
@@ -677,7 +1006,7 @@ def _write_runner_manifest(
         },
         runtime_revision=sha256_file(lock_path),
         model_revision=definition.model_revision,
-        setup_source_revision=sha256_file(_requirements_path(definition.requirements_name)),
+        setup_source_revision=runner_setup_source_revision(definition.kind),
         license_name=BACKEND_DESCRIPTORS[definition.backend_id].license_name,
     )
     path = project_root / ".cache" / "runners" / runner_slug(definition.backend_id) / "runner.json"
@@ -949,6 +1278,7 @@ def prepare_llama_server_backend(project_root: Path, profile_path: Path) -> Prob
         "VIDEO_GENERATOR_LLM_PROFILE_ID": profile.profile_id,
         "VIDEO_GENERATOR_LLAMA_CONTEXT": str(profile.context_size),
         "VIDEO_GENERATOR_LLAMA_SPECULATION": profile.speculation,
+        "VIDEO_GENERATOR_LLAMA_STRUCTURED_MODE": profile.structured_output_mode,
     }
     spec = RunnerSpec(
         backend_id="local:llama-server",
@@ -967,7 +1297,7 @@ def prepare_llama_server_backend(project_root: Path, profile_path: Path) -> Prob
         },
         runtime_revision=profile.llama_cpp_revision,
         model_revision=profile.model_revision,
-        setup_source_revision=sha256_file(requirements),
+        setup_source_revision=runner_setup_source_revision("llama-server"),
         license_name=profile.license_name,
         metadata={
             "local_llm_profile": profile.model_dump(mode="json"),
@@ -993,7 +1323,11 @@ def prepare_standard_backend(
     wsl_distribution: str,
 ) -> ProbeItem:
     if definition.platform == "native":
-        python, lock = _install_native_environment(project_root, definition)
+        python, lock = _install_native_environment(
+            project_root,
+            definition,
+            environment=environment,
+        )
         python_command = [str(python)]
         command_python = str(python)
     else:
@@ -1010,6 +1344,36 @@ def prepare_standard_backend(
             environment=environment,
             wsl_distribution=wsl_distribution,
         )
+    supporting_model_paths: dict[SupportingModelDefinition, Path] = {}
+    for supporting in definition.supporting_models:
+        supporting_root = project_root / ".cache" / "models" / supporting.model_subdir
+        if download:
+            supporting_definition = LocalDefinition(
+                backend_id=definition.backend_id,
+                kind=definition.kind,
+                platform=definition.platform,
+                python_version=definition.python_version,
+                requirements_name=definition.requirements_name,
+                model_repo=supporting.model_repo,
+                model_revision=supporting.model_revision,
+                model_subdir=supporting.model_subdir,
+                allow_patterns=supporting.allow_patterns,
+            )
+            _download_snapshot(
+                project_root=project_root,
+                python_command=python_command,
+                definition=supporting_definition,
+                destination=supporting_root,
+                environment=environment,
+                wsl_distribution=wsl_distribution,
+            )
+        if not (supporting_root / "asset-manifest.json").is_file():
+            raise VideoGeneratorError(
+                f"supporting model snapshot is not prepared: {supporting_root}",
+                kind=ErrorKind.NOT_READY,
+                action=f"Run Setup again without --no-download for {definition.backend_id}.",
+            )
+        supporting_model_paths[supporting] = supporting_root
     if not (model_root / "asset-manifest.json").is_file():
         raise VideoGeneratorError(
             f"model snapshot is not prepared: {model_root}",
@@ -1029,8 +1393,768 @@ def prepare_standard_backend(
         model_path=model_path,
         wsl_distribution=wsl_distribution,
         extra_environment={"VIDEO_GENERATOR_VOXCPM_OPTIMIZE": "0"} if definition.kind == "voxcpm" else None,
+        supporting_model_paths=supporting_model_paths,
     )
     return ProbeItem(name=definition.backend_id, ready=True, detail=f"prepared: {path}")
+
+
+def _download_verified_url(
+    *,
+    url: str,
+    destination: Path,
+    expected_sha256: str,
+    download: bool,
+) -> Path:
+    if destination.is_file() and sha256_file(destination).casefold() == expected_sha256.casefold():
+        return destination
+    if not download:
+        raise VideoGeneratorError(
+            f"required pinned X-Voice artifact is missing or changed: {destination}",
+            kind=ErrorKind.NOT_READY,
+            action="Rerun Setup without --no-download for local:x-voice.",
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.",
+        suffix=".download",
+        dir=destination.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "video-generator-setup/1"})
+        with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as output:
+            shutil.copyfileobj(response, output)
+        actual = sha256_file(temporary)
+        if actual.casefold() != expected_sha256.casefold():
+            raise VideoGeneratorError(
+                f"SHA-256 mismatch for downloaded {destination.name}",
+                kind=ErrorKind.NOT_READY,
+                action=f"Expected {expected_sha256.lower()}, got {actual.lower()}.",
+            )
+        replace_path(temporary, destination)
+    except VideoGeneratorError:
+        raise
+    except (OSError, TimeoutError) as exc:
+        raise VideoGeneratorError(
+            f"could not download pinned X-Voice artifact {destination.name}: {exc}",
+            kind=ErrorKind.NOT_READY,
+        ) from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def _prepare_xvoice_micromamba(runtime: Path, *, download: bool) -> tuple[Path, Path]:
+    tools_root = runtime / "tools"
+    archive = tools_root / f"micromamba-{XVOICE_MICROMAMBA_VERSION}-win-64.tar.bz2"
+    executable = tools_root / "micromamba.exe"
+    if executable.is_file() and sha256_file(executable) == XVOICE_MICROMAMBA_EXE_SHA256:
+        if archive.is_file() and sha256_file(archive) == XVOICE_MICROMAMBA_ARCHIVE_SHA256:
+            return executable, archive
+    _download_verified_url(
+        url=XVOICE_MICROMAMBA_URL,
+        destination=archive,
+        expected_sha256=XVOICE_MICROMAMBA_ARCHIVE_SHA256,
+        download=download,
+    )
+    tools_root.mkdir(parents=True, exist_ok=True)
+    temporary = executable.with_name(executable.name + ".tmp")
+    try:
+        with tarfile.open(archive, mode="r:bz2") as bundle:
+            member = bundle.getmember("Library/bin/micromamba.exe")
+            if not member.isfile():
+                raise VideoGeneratorError(
+                    "the pinned micromamba archive does not contain a regular Windows executable",
+                    kind=ErrorKind.NOT_READY,
+                )
+            source = bundle.extractfile(member)
+            if source is None:
+                raise VideoGeneratorError(
+                    "the pinned micromamba executable could not be extracted",
+                    kind=ErrorKind.NOT_READY,
+                )
+            with source, temporary.open("wb") as output:
+                shutil.copyfileobj(source, output)
+        actual = sha256_file(temporary)
+        if actual != XVOICE_MICROMAMBA_EXE_SHA256:
+            raise VideoGeneratorError(
+                "the extracted micromamba executable failed SHA-256 verification",
+                kind=ErrorKind.NOT_READY,
+            )
+        replace_path(temporary, executable)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return executable, archive
+
+
+def _validated_xvoice_runtime_path(
+    project_root: Path,
+    runtime: Path,
+    candidate: Path,
+) -> Path:
+    project = project_root.resolve()
+    managed_root_path = project / ".cache" / "runtimes"
+    managed_root = managed_root_path.resolve()
+    expected_runtime = managed_root / runner_slug("local:x-voice")
+    expected_candidate = expected_runtime / candidate.name
+    if (
+        managed_root != managed_root_path
+        or runtime.resolve() != expected_runtime
+        or candidate.parent.resolve() != expected_runtime
+        or candidate.resolve() != expected_candidate
+    ):
+        raise VideoGeneratorError(
+            "X-Voice Setup refused a redirected managed runtime path",
+            kind=ErrorKind.NOT_READY,
+            action="Remove cache junctions or links and rerun Setup inside the project runtime cache.",
+        )
+    return candidate
+
+
+def _xvoice_active_environment(
+    project_root: Path,
+    candidates: Sequence[Path],
+) -> tuple[Path | None, bool]:
+    manifest = (
+        project_root
+        / ".cache"
+        / "runners"
+        / runner_slug("local:x-voice")
+        / "runner.json"
+    )
+    command_python: Path | None = None
+    manifest_valid = False
+    try:
+        data = read_json(manifest)
+        command = data.get("command")
+        if (
+            data.get("backend_id") == "local:x-voice"
+            and isinstance(command, list)
+            and command
+            and isinstance(command[0], str)
+        ):
+            value = Path(command[0])
+            if value.is_absolute():
+                command_python = value.resolve()
+                manifest_valid = True
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    if command_python is not None:
+        for candidate in candidates:
+            python = candidate / "python.exe"
+            if python.is_file() and python.resolve() == command_python:
+                return candidate, True
+    if manifest_valid:
+        return None, False
+    return None, not any(candidate.exists() for candidate in candidates)
+
+
+def _xvoice_environment_target(
+    project_root: Path,
+    legacy_prefix: Path,
+    slot_a: Path,
+    slot_b: Path,
+) -> tuple[Path | None, Path]:
+    active_prefix, identity_known = _xvoice_active_environment(
+        project_root,
+        (legacy_prefix, slot_a, slot_b),
+    )
+    if active_prefix == slot_a:
+        return active_prefix, slot_b
+    if active_prefix in {legacy_prefix, slot_b}:
+        return active_prefix, slot_a
+    if identity_known:
+        return None, slot_a
+    for candidate in (slot_a, slot_b):
+        if not (candidate / "python.exe").is_file():
+            return None, candidate
+    raise VideoGeneratorError(
+        "X-Voice Setup could not identify a safe inactive environment slot",
+        kind=ErrorKind.NOT_READY,
+        action=(
+            "Restore the last valid X-Voice runner manifest or remove one known-inactive "
+            "conda slot, then rerun Setup."
+        ),
+    )
+
+
+def _prepare_xvoice_environment(
+    project_root: Path,
+    runtime: Path,
+    *,
+    environment: Mapping[str, str],
+    download: bool,
+) -> tuple[Path, Path, Path, Path, Path]:
+    legacy_prefix = _validated_xvoice_runtime_path(
+        project_root, runtime, runtime / "conda"
+    )
+    slot_a = _validated_xvoice_runtime_path(
+        project_root, runtime, runtime / "conda-a"
+    )
+    slot_b = _validated_xvoice_runtime_path(
+        project_root, runtime, runtime / "conda-b"
+    )
+    active_prefix, conda_prefix = _xvoice_environment_target(
+        project_root,
+        legacy_prefix,
+        slot_a,
+        slot_b,
+    )
+    slot_name = "a" if conda_prefix == slot_a else "b"
+    python = conda_prefix / "python.exe"
+    uv = _find_uv()
+    if not uv:
+        raise VideoGeneratorError("uv is required for X-Voice Setup", kind=ErrorKind.NOT_READY)
+    micromamba, micromamba_archive = _prepare_xvoice_micromamba(runtime, download=download)
+    conda_source = _requirements_path("xvoice-conda-win-64.lock")
+    conda_lock = _validated_xvoice_runtime_path(
+        project_root,
+        runtime,
+        runtime / f"conda-{slot_name}.explicit.lock",
+    )
+    atomic_write_text(conda_lock, conda_source.read_text(encoding="utf-8"))
+    conda_root = runtime / "micromamba-root"
+    setup_environment = _setup_tool_environment(environment, project_root)
+    setup_environment.update(
+        {
+            "MAMBA_ROOT_PREFIX": str(conda_root),
+            "MAMBA_NO_BANNER": "1",
+        }
+    )
+    requirements = _requirements_path("xvoice.in")
+    reviewed_requirements_lock = requirements.with_suffix(".lock")
+    requirements_lock = _validated_xvoice_runtime_path(
+        project_root,
+        runtime,
+        runtime / f"conda-{slot_name}.requirements.lock",
+    )
+    source_marker = _validated_xvoice_runtime_path(
+        project_root,
+        runtime,
+        runtime / f"conda-{slot_name}.source.sha256",
+    )
+    source_revision = runner_setup_source_revision("xvoice")
+    if not reviewed_requirements_lock.is_file():
+        raise VideoGeneratorError(
+            f"reviewed Windows dependency lock is missing: {reviewed_requirements_lock}",
+            kind=ErrorKind.NOT_READY,
+        )
+    if (
+        not requirements_lock.is_file()
+        or sha256_file(requirements_lock) != sha256_file(reviewed_requirements_lock)
+    ):
+        _copy_verified_file(
+            reviewed_requirements_lock,
+            requirements_lock,
+            sha256_file(reviewed_requirements_lock),
+        )
+    atomic_write_text(source_marker, "preparing\n")
+    if conda_prefix.exists():
+        shutil.rmtree(
+            _validated_xvoice_runtime_path(project_root, runtime, conda_prefix)
+        )
+    if active_prefix in {slot_a, slot_b} and legacy_prefix.exists():
+        shutil.rmtree(
+            _validated_xvoice_runtime_path(project_root, runtime, legacy_prefix)
+        )
+    try:
+        _run(
+            [
+                str(micromamba),
+                "create",
+                "--yes",
+                "--no-rc",
+                "--root-prefix",
+                str(conda_root),
+                "--prefix",
+                str(conda_prefix),
+                "--file",
+                str(conda_lock),
+            ],
+            cwd=project_root,
+            environment=setup_environment,
+            timeout=3600,
+        )
+        if not python.is_file():
+            raise VideoGeneratorError(
+                "the pinned X-Voice Conda environment did not produce python.exe",
+                kind=ErrorKind.NOT_READY,
+            )
+        uv_version = _parse_uv_version(
+            _run([uv, "--version"], cwd=project_root, environment=setup_environment, timeout=30)
+        )
+        if uv_version is None or uv_version < MINIMUM_UV_TORCH_BACKEND_VERSION:
+            raise VideoGeneratorError(
+                "X-Voice CUDA Setup requires uv 0.6.9 or newer",
+                kind=ErrorKind.NOT_READY,
+            )
+        _run(
+            [
+                uv,
+                "pip",
+                "install",
+                "--python",
+                str(python),
+                "--torch-backend",
+                "cu128",
+                "--require-hashes",
+                "-r",
+                str(requirements_lock),
+            ],
+            cwd=project_root,
+            environment=setup_environment,
+            timeout=3600,
+        )
+        pynini_version = _run(
+            [str(python), "-c", "import pynini; print(pynini.__version__)"],
+            cwd=project_root,
+            environment=setup_environment,
+            timeout=60,
+        ).strip()
+        if pynini_version != "2.1.7":
+            raise VideoGeneratorError(
+                f"X-Voice Setup expected Pynini 2.1.7, got {pynini_version or 'no version'}",
+                kind=ErrorKind.NOT_READY,
+            )
+        atomic_write_text(source_marker, source_revision + "\n")
+    except BaseException:
+        if conda_prefix.exists():
+            shutil.rmtree(
+                _validated_xvoice_runtime_path(project_root, runtime, conda_prefix)
+            )
+        conda_lock.unlink(missing_ok=True)
+        requirements_lock.unlink(missing_ok=True)
+        source_marker.unlink(missing_ok=True)
+        raise
+    return python, conda_lock, requirements_lock, source_marker, micromamba_archive
+
+
+def _prepare_xvoice_source(
+    project_root: Path,
+    runtime: Path,
+    *,
+    download: bool,
+) -> tuple[Path, Path]:
+    git = shutil.which("git")
+    if not git:
+        raise VideoGeneratorError("git is required for X-Voice Setup", kind=ErrorKind.NOT_READY)
+    source = runtime / "source"
+    if not source.exists():
+        if not download:
+            raise VideoGeneratorError("the pinned X-Voice source checkout is missing", kind=ErrorKind.NOT_READY)
+        staging = Path(tempfile.mkdtemp(prefix=".xvoice-source.", dir=runtime))
+        try:
+            _run([git, "init", str(staging)], cwd=project_root, timeout=60)
+            _run(
+                [git, "remote", "add", "origin", XVOICE_SOURCE_REPOSITORY],
+                cwd=staging,
+                timeout=60,
+            )
+            _run(
+                [git, "fetch", "--depth", "1", "origin", XVOICE_SOURCE_REVISION],
+                cwd=staging,
+                timeout=600,
+            )
+            _run([git, "checkout", "--detach", "FETCH_HEAD"], cwd=staging, timeout=120)
+            replace_path(staging, source)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+    if not (source / ".git").exists():
+        raise VideoGeneratorError(
+            "the X-Voice runtime is not a verifiable Git checkout",
+            kind=ErrorKind.NOT_READY,
+        )
+    commit = _run([git, "rev-parse", "HEAD"], cwd=source, timeout=60).strip()
+    if commit.casefold() != XVOICE_SOURCE_REVISION.casefold():
+        raise VideoGeneratorError(
+            f"X-Voice checkout is {commit}, expected {XVOICE_SOURCE_REVISION}",
+            kind=ErrorKind.NOT_READY,
+            action="Remove the managed X-Voice runtime and rerun Setup.",
+        )
+    status = [
+        line
+        for line in _run(
+            [git, "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=source,
+            timeout=60,
+        ).splitlines()
+        if line.strip() and line.strip() != "?? runtime-source.asset-manifest.json"
+    ]
+    if status:
+        raise VideoGeneratorError(
+            "the pinned X-Voice checkout contains modified or unexpected files",
+            kind=ErrorKind.NOT_READY,
+            action=f"Inspect the managed runtime; first unexpected entry: {status[0]}",
+        )
+    tracked = [
+        line.strip().replace("\\", "/")
+        for line in _run([git, "ls-files"], cwd=source, timeout=60).splitlines()
+        if line.strip() and (source / line.strip()).is_file()
+    ]
+    manifest = source / "runtime-source.asset-manifest.json"
+    atomic_write_json(
+        manifest,
+        {
+            "schema_version": 1,
+            "root": ".",
+            "source": XVOICE_SOURCE_REPOSITORY,
+            "source_revision": commit,
+            "revision": commit,
+            "exact_file_suffixes": [".py", ".pyi", ".pyd", ".dll", ".so"],
+            "exact_exclude_roots": [".git", "__pycache__"],
+            "files": [
+                {
+                    "path": value,
+                    "size": (source / value).stat().st_size,
+                    "sha256": sha256_file(source / value),
+                }
+                for value in tracked
+            ],
+        },
+    )
+    RunnerManager._verify_asset_manifest(manifest, expected_revision=None)
+    return source, manifest
+
+
+def _manifest_file_set_sha256(metadata: Mapping[str, object]) -> str:
+    files = metadata.get("files")
+    if not isinstance(files, list):
+        raise VideoGeneratorError(
+            "asset manifest has no file set",
+            kind=ErrorKind.NOT_READY,
+        )
+    values = []
+    for item in files:
+        if not isinstance(item, dict) or not item.get("path") or not item.get("sha256"):
+            raise VideoGeneratorError(
+                "asset manifest contains a malformed file entry",
+                kind=ErrorKind.NOT_READY,
+            )
+        values.append((str(item["path"]), str(item["sha256"]).casefold()))
+    return hashlib.sha256(
+        json.dumps(sorted(values), separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _prepare_xvoice_espeak(runtime: Path) -> tuple[Path, Path, str]:
+    destination = runtime / "espeak"
+    manifest = destination / "asset-manifest.json"
+    if manifest.is_file():
+        metadata = read_json(manifest)
+        revision = str(metadata.get("revision") or "")
+        RunnerManager._verify_asset_manifest(
+            manifest,
+            expected_revision=XVOICE_ESPEAK_VERSION,
+        )
+        if revision != XVOICE_ESPEAK_VERSION:
+            raise VideoGeneratorError(
+                f"managed X-Voice eSpeak version is {revision or 'unknown'}, "
+                f"expected {XVOICE_ESPEAK_VERSION}",
+                kind=ErrorKind.NOT_READY,
+            )
+        if _manifest_file_set_sha256(metadata) != XVOICE_ESPEAK_BUNDLE_SHA256:
+            raise VideoGeneratorError(
+                "managed X-Voice eSpeak bundle is not the reviewed Windows build",
+                kind=ErrorKind.NOT_READY,
+            )
+        return destination / "libespeak-ng.dll", manifest, revision
+    if destination.exists():
+        raise VideoGeneratorError(
+            "the managed X-Voice eSpeak runtime is incomplete",
+            kind=ErrorKind.NOT_READY,
+            action="Remove the managed X-Voice runtime and rerun Setup.",
+        )
+    executable_value = shutil.which("espeak-ng")
+    if not executable_value:
+        raise VideoGeneratorError(
+            "X-Voice requires a native Windows eSpeak NG installation",
+            kind=ErrorKind.NOT_READY,
+            action="Install eSpeak NG for Windows and ensure espeak-ng.exe is on PATH.",
+        )
+    executable = Path(executable_value).resolve()
+    source_root = executable.parent
+    source_dll = source_root / "libespeak-ng.dll"
+    source_data = source_root / "espeak-ng-data"
+    if not source_dll.is_file() or not source_data.is_dir():
+        raise VideoGeneratorError(
+            "the Windows eSpeak NG installation is missing its DLL or language data",
+            kind=ErrorKind.NOT_READY,
+        )
+    if any(path.is_symlink() for path in source_data.rglob("*")):
+        raise VideoGeneratorError(
+            "the eSpeak NG data tree contains unsupported symbolic links",
+            kind=ErrorKind.NOT_READY,
+        )
+    version_output = _run([str(executable), "--version"], cwd=runtime, timeout=30)
+    match = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", version_output)
+    revision = match.group(1) if match else ""
+    if revision != XVOICE_ESPEAK_VERSION:
+        raise VideoGeneratorError(
+            f"X-Voice requires the reviewed eSpeak NG {XVOICE_ESPEAK_VERSION} Windows build",
+            kind=ErrorKind.NOT_READY,
+        )
+    if sha256_file(executable) != XVOICE_ESPEAK_EXE_SHA256:
+        raise VideoGeneratorError(
+            "the eSpeak NG executable does not match the reviewed Windows build",
+            kind=ErrorKind.NOT_READY,
+        )
+    if sha256_file(source_dll) != XVOICE_ESPEAK_DLL_SHA256:
+        raise VideoGeneratorError(
+            "the eSpeak NG library does not match the reviewed Windows build",
+            kind=ErrorKind.NOT_READY,
+        )
+    staging = Path(tempfile.mkdtemp(prefix=".espeak.", dir=runtime))
+    try:
+        shutil.copy2(source_dll, staging / source_dll.name)
+        shutil.copytree(source_data, staging / source_data.name)
+        files = [
+            {
+                "path": path.relative_to(staging).as_posix(),
+                "size": path.stat().st_size,
+                "sha256": sha256_file(path),
+            }
+            for path in sorted(item for item in staging.rglob("*") if item.is_file())
+        ]
+        if _manifest_file_set_sha256({"files": files}) != XVOICE_ESPEAK_BUNDLE_SHA256:
+            raise VideoGeneratorError(
+                "the eSpeak NG data bundle does not match the reviewed Windows build",
+                kind=ErrorKind.NOT_READY,
+            )
+        atomic_write_json(
+            staging / "asset-manifest.json",
+            {
+                "schema_version": 1,
+                "root": ".",
+                "source": str(source_root),
+                "revision": revision,
+                "exact_file_suffixes": [".dll"],
+                "exact_exclude_roots": [],
+                "files": files,
+            },
+        )
+        RunnerManager._verify_asset_manifest(
+            staging / "asset-manifest.json", expected_revision=revision
+        )
+        replace_path(staging, destination)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    return destination / "libespeak-ng.dll", destination / "asset-manifest.json", revision
+
+
+def _prepare_xvoice_support(runtime: Path, *, download: bool) -> tuple[Path, Path, str]:
+    destination = runtime / "support"
+    manifest = destination / "asset-manifest.json"
+    revision = f"fasttext-lid.176.ftz+nltk-data-{XVOICE_NLTK_DATA_REVISION}"
+    if manifest.is_file():
+        RunnerManager._verify_asset_manifest(manifest, expected_revision=revision)
+        return destination, manifest, revision
+    if destination.exists():
+        raise VideoGeneratorError(
+            "the managed X-Voice support-data runtime is incomplete",
+            kind=ErrorKind.NOT_READY,
+            action="Remove the managed X-Voice runtime and rerun Setup.",
+        )
+    staging = Path(tempfile.mkdtemp(prefix=".xvoice-support.", dir=runtime))
+    try:
+        language_id = _download_verified_url(
+            url=XVOICE_FASTTEXT_LID_URL,
+            destination=staging / "home" / ".cache" / "lid.176.ftz",
+            expected_sha256=XVOICE_FASTTEXT_LID_SHA256,
+            download=download,
+        )
+        cmudict = _download_verified_url(
+            url=XVOICE_CMUDICT_URL,
+            destination=staging / "nltk_data" / "corpora" / "cmudict.zip",
+            expected_sha256=XVOICE_CMUDICT_SHA256,
+            download=download,
+        )
+        atomic_write_json(
+            staging / "asset-manifest.json",
+            {
+                "schema_version": 1,
+                "root": ".",
+                "revision": revision,
+                "sources": {
+                    "fasttext_language_id": XVOICE_FASTTEXT_LID_URL,
+                    "nltk_data_revision": XVOICE_NLTK_DATA_REVISION,
+                },
+                "files": [
+                    {
+                        "path": language_id.relative_to(staging).as_posix(),
+                        "size": language_id.stat().st_size,
+                        "sha256": sha256_file(language_id),
+                    },
+                    {
+                        "path": cmudict.relative_to(staging).as_posix(),
+                        "size": cmudict.stat().st_size,
+                        "sha256": sha256_file(cmudict),
+                    },
+                ],
+            },
+        )
+        RunnerManager._verify_asset_manifest(
+            staging / "asset-manifest.json", expected_revision=revision
+        )
+        replace_path(staging, destination)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    return destination, destination / "asset-manifest.json", revision
+
+
+def prepare_xvoice_backend(
+    project_root: Path,
+    *,
+    environment: Mapping[str, str],
+    download: bool,
+) -> ProbeItem:
+    if os.name != "nt":
+        raise VideoGeneratorError(
+            "the X-Voice adapter is intentionally supported only on native Windows",
+            kind=ErrorKind.UNSUPPORTED,
+        )
+    definition = LOCAL_DEFINITIONS["local:x-voice"]
+    runtime = project_root / ".cache" / "runtimes" / runner_slug(definition.backend_id)
+    runtime.mkdir(parents=True, exist_ok=True)
+    python, conda_lock, requirements_lock, source_marker, micromamba_archive = (
+        _prepare_xvoice_environment(
+            project_root,
+            runtime,
+            environment=environment,
+            download=download,
+        )
+    )
+    source, source_manifest = _prepare_xvoice_source(
+        project_root,
+        runtime,
+        download=download,
+    )
+    espeak_dll, espeak_manifest, espeak_revision = _prepare_xvoice_espeak(runtime)
+    support, support_manifest, support_revision = _prepare_xvoice_support(
+        runtime,
+        download=download,
+    )
+    model_root = project_root / ".cache" / "models" / definition.model_subdir
+    if download:
+        _download_snapshot(
+            project_root=project_root,
+            python_command=[str(python)],
+            definition=definition,
+            destination=model_root,
+            environment=environment,
+        )
+    model_manifest = model_root / "asset-manifest.json"
+    if not model_manifest.is_file():
+        raise VideoGeneratorError("the X-Voice Stage1 snapshot is missing", kind=ErrorKind.NOT_READY)
+    supporting = definition.supporting_models[0]
+    vocoder_root = project_root / ".cache" / "models" / supporting.model_subdir
+    supporting_definition = LocalDefinition(
+        backend_id=definition.backend_id,
+        kind=definition.kind,
+        platform=definition.platform,
+        python_version=definition.python_version,
+        requirements_name=definition.requirements_name,
+        model_repo=supporting.model_repo,
+        model_revision=supporting.model_revision,
+        model_subdir=supporting.model_subdir,
+        allow_patterns=supporting.allow_patterns,
+    )
+    if download:
+        _download_snapshot(
+            project_root=project_root,
+            python_command=[str(python)],
+            definition=supporting_definition,
+            destination=vocoder_root,
+            environment=environment,
+        )
+    vocoder_manifest = vocoder_root / "asset-manifest.json"
+    if not vocoder_manifest.is_file():
+        raise VideoGeneratorError("the pinned X-Voice Vocos snapshot is missing", kind=ErrorKind.NOT_READY)
+    matplotlib_cache = runtime / "matplotlib"
+    matplotlib_cache.mkdir(parents=True, exist_ok=True)
+    micromamba = runtime / "tools" / "micromamba.exe"
+    runtime_revision = hashlib.sha256(
+        (
+            XVOICE_SOURCE_REVISION
+            + "\0"
+            + sha256_file(conda_lock)
+            + "\0"
+            + sha256_file(requirements_lock)
+        ).encode("utf-8")
+    ).hexdigest()
+    environment_values = {
+        "PYTHONPATH": os.pathsep.join([str(project_root / "src"), str(source / "src")]),
+        "VIDEO_GENERATOR_MODEL_PATH": relative_path(model_root, project_root),
+        "VIDEO_GENERATOR_XVOICE_VOCODER_PATH": relative_path(vocoder_root, project_root),
+        "VIDEO_GENERATOR_XVOICE_SOURCE_PATH": relative_path(source, project_root),
+        "VIDEO_GENERATOR_RUNTIME_REVISION": runtime_revision,
+        "VIDEO_GENERATOR_MODEL_REVISION": definition.model_revision,
+        "PHONEMIZER_ESPEAK_LIBRARY": str(espeak_dll),
+        "ESPEAK_DATA_PATH": str(espeak_dll.parent / "espeak-ng-data"),
+        "USERPROFILE": str(support / "home"),
+        "HOME": str(support / "home"),
+        "NLTK_DATA": str(support / "nltk_data"),
+        "MPLCONFIGDIR": str(matplotlib_cache),
+        "WANDB_MODE": "disabled",
+        "WANDB_SILENT": "true",
+    }
+    manifests = {
+        model_manifest: definition.model_revision,
+        vocoder_manifest: supporting.model_revision,
+        source_manifest: XVOICE_SOURCE_REVISION,
+        espeak_manifest: espeak_revision,
+        support_manifest: support_revision,
+    }
+    spec = RunnerSpec(
+        backend_id=definition.backend_id,
+        platform="native",
+        command=[str(python), "-m", "video_generator.workers.main", "--kind", "xvoice"],
+        model_family="xvoice",
+        timeout_seconds=definition.timeout_seconds,
+        startup_timeout_seconds=definition.startup_timeout_seconds,
+        environment=environment_values,
+        model_paths=[
+            relative_path(model_root, project_root),
+            relative_path(vocoder_root, project_root),
+            relative_path(source, project_root),
+        ],
+        asset_manifests={
+            relative_path(path, project_root): sha256_file(path) for path in manifests
+        },
+        asset_revisions={
+            relative_path(path, project_root): revision for path, revision in manifests.items()
+        },
+        runtime_files={
+            relative_path(path, project_root): sha256_file(path)
+            for path in (
+                conda_lock,
+                requirements_lock,
+                source_marker,
+                micromamba,
+                micromamba_archive,
+            )
+        },
+        runtime_revision=runtime_revision,
+        model_revision=definition.model_revision,
+        setup_source_revision=runner_setup_source_revision("xvoice"),
+        license_name=BACKEND_DESCRIPTORS[definition.backend_id].license_name,
+        metadata={
+            "source_repository": XVOICE_SOURCE_REPOSITORY,
+            "source_revision": XVOICE_SOURCE_REVISION,
+            "vocoder_revision": supporting.model_revision,
+            "micromamba_version": XVOICE_MICROMAMBA_VERSION,
+            "micromamba_archive_sha256": XVOICE_MICROMAMBA_ARCHIVE_SHA256,
+            "pynini_version": "2.1.7",
+            "supported_languages": ["en", "fi"],
+            "weights_usage": "noncommercial",
+        },
+    )
+    path = project_root / ".cache" / "runners" / runner_slug(spec.backend_id) / "runner.json"
+    atomic_write_json(path, spec.model_dump(mode="json"))
+    return ProbeItem(name=spec.backend_id, ready=True, detail=f"prepared: {path}")
 
 
 def prepare_ace_step(project_root: Path, *, download: bool) -> ProbeItem:
@@ -1302,6 +2426,15 @@ def setup_backends(
             )
             continue
         if backend_id == "local:llama-server":
+            continue
+        if backend_id == "local:x-voice":
+            results.append(
+                prepare_xvoice_backend(
+                    project_root,
+                    environment=environment,
+                    download=download,
+                )
+            )
             continue
         if backend_id == "local:ace-step-1.5-xl-turbo":
             results.append(prepare_ace_step(project_root, download=download))

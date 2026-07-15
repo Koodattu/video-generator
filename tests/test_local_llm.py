@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from video_generator.local_llm import LocalLlmProfile
+from video_generator.local_llm import LocalLlmProfile, load_local_llm_profile
 from video_generator.runners import RunnerManager
 from video_generator.setup import prepare_llama_server_backend
 from video_generator.util import sha256_file
@@ -41,6 +41,18 @@ def test_local_llm_profile_requires_full_nonzero_provenance() -> None:
         LocalLlmProfile.model_validate(
             _profile_values(speculation="draft-mtp", draft_model_path="draft.gguf")
         )
+
+
+def test_eurollm_example_is_a_valid_no_speculation_profile() -> None:
+    profile = load_local_llm_profile(
+        Path(__file__).resolve().parents[1] / "local-llm.eurollm.example.toml"
+    )
+
+    assert profile.profile_id == "eurollm-22b-instruct-2512-q4-16k"
+    assert profile.context_size == 16384
+    assert profile.speculation == "none"
+    assert profile.structured_output_mode == "template_completion"
+    assert not profile.draft_model_path
 
 
 def test_prepare_llama_server_profile_freezes_runtime_and_launch_settings(
@@ -91,6 +103,7 @@ def test_prepare_llama_server_profile_freezes_runtime_and_launch_settings(
     arguments = json.loads(spec.environment["VIDEO_GENERATOR_LLAMA_ARGUMENTS"])
     assert arguments[arguments.index("--ctx-size") + 1] == "32768"
     assert arguments[arguments.index("--spec-type") + 1] == "draft-mtp"
+    assert spec.environment["VIDEO_GENERATOR_LLAMA_STRUCTURED_MODE"] == "chat_completions"
     assert spec.metadata["local_llm_profile"]["profile_id"] == "fixture-mtp"
     assert any(path.endswith("llama-server.exe") for path in spec.runtime_files)
     assert any(path.endswith("ggml-cuda.dll") for path in spec.runtime_files)
@@ -118,13 +131,15 @@ class _FakeOpener:
         self.requests.append(request)
         if request.full_url.endswith("/health"):
             return _FakeResponse({"status": "ok"})
+        if request.full_url.endswith("/apply-template"):
+            return _FakeResponse({"prompt": "<template>"})
         return _FakeResponse(
             {
-                "id": "local-request",
-                "choices": [
-                    {"message": {"content": '{"title":"Yö"}'}, "finish_reason": "stop"}
-                ],
-                "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+                "content": '{"title":"Yö"}',
+                "stop": True,
+                "stop_type": "eos",
+                "tokens_evaluated": 7,
+                "tokens_predicted": 3,
             }
         )
 
@@ -183,8 +198,18 @@ def test_llama_server_session_is_loopback_authenticated_and_reused(
     )
 
     session.start()
-    session.chat_completion({"messages": [{"role": "user", "content": "Hei"}]})
-    session.chat_completion({"messages": [{"role": "user", "content": "Yö"}]})
+    session.structured_completion(
+        {
+            "messages": [{"role": "user", "content": "Hei"}],
+            "json_schema": {"type": "object"},
+        }
+    )
+    session.structured_completion(
+        {
+            "messages": [{"role": "user", "content": "Yö"}],
+            "json_schema": {"type": "object"},
+        }
+    )
     cleanup = session.close()
 
     assert len(popen_calls) == 1
@@ -195,9 +220,18 @@ def test_llama_server_session_is_loopback_authenticated_and_reused(
     assert kwargs["env"]["LLAMA_API_KEY"]
     assert cleanup["process_exited"]
     assert cleanup["gpu_process_released"]
-    chat_requests = [request for request in requests if request.full_url.endswith("/v1/chat/completions")]
-    assert len(chat_requests) == 2
-    assert chat_requests[0].get_header("Authorization").startswith("Bearer ")
+    template_requests = [
+        request for request in requests if request.full_url.endswith("/apply-template")
+    ]
+    completion_requests = [
+        request for request in requests if request.full_url.endswith("/completion")
+    ]
+    assert len(template_requests) == 2
+    assert len(completion_requests) == 2
+    assert template_requests[0].get_header("Authorization").startswith("Bearer ")
+    completion_body = json.loads(completion_requests[0].data.decode("utf-8"))
+    assert completion_body["prompt"] == "<template>"
+    assert completion_body["json_schema"] == {"type": "object"}
 
 
 def test_llama_server_session_rejects_network_and_model_overrides(tmp_path: Path) -> None:
@@ -235,14 +269,14 @@ def test_llama_worker_maps_finnish_schema_request(monkeypatch, tmp_path: Path) -
         def start(self) -> None:
             return None
 
-        def chat_completion(self, payload):
+        def structured_completion(self, payload):
             captured.append(payload)
             return {
-                "id": "request-fi",
-                "choices": [
-                    {"message": {"content": '{"title":"Yö"}'}, "finish_reason": "stop"}
-                ],
-                "usage": {"prompt_tokens": 5, "completion_tokens": 2},
+                "content": '{"title":"Yö"}',
+                "stop": True,
+                "stop_type": "eos",
+                "tokens_evaluated": 5,
+                "tokens_predicted": 2,
             }
 
         def close(self):
@@ -254,6 +288,9 @@ def test_llama_worker_maps_finnish_schema_request(monkeypatch, tmp_path: Path) -
     monkeypatch.setenv("VIDEO_GENERATOR_MODEL_PATH", str(model))
     monkeypatch.setenv("VIDEO_GENERATOR_LLAMA_SERVER", str(server))
     monkeypatch.setenv("VIDEO_GENERATOR_LLAMA_ARGUMENTS", "[]")
+    monkeypatch.setenv(
+        "VIDEO_GENERATOR_LLAMA_STRUCTURED_MODE", "template_completion"
+    )
     worker = LlamaServerWorker(Paths())
 
     result = worker.dispatch(
@@ -273,5 +310,5 @@ def test_llama_worker_maps_finnish_schema_request(monkeypatch, tmp_path: Path) -
     )
 
     assert result["data"] == {"title": "Yö"}
-    assert captured[0]["response_format"]["type"] == "json_schema"
+    assert captured[0]["json_schema"]["properties"] == {"title": {"type": "string"}}
     assert "yö" in captured[0]["messages"][1]["content"]

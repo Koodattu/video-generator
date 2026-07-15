@@ -45,6 +45,14 @@ def test_models_download_selects_a_curated_candidate() -> None:
     assert args.dry_run
 
 
+def test_models_download_accepts_eurollm_candidate() -> None:
+    args = build_parser().parse_args(
+        ["models", "download", "eurollm-22b-instruct-2512-q4", "--dry-run"]
+    )
+
+    assert args.candidate == "eurollm-22b-instruct-2512-q4"
+
+
 def test_backend_descriptor_set_order_does_not_invalidate_rerun(resolved_config) -> None:
     old = build_frozen_assets(resolved_config)
     new = deepcopy(old)

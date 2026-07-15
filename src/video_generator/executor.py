@@ -92,7 +92,11 @@ def _canonicalize_host_owned_fields(
     }
     if (
         task_id in review_types
-        and input_data.get("review_strategy") != "single-finding-resolution-v1"
+        and input_data.get("review_strategy")
+        not in {
+            "single-finding-resolution-v1",
+            "single-brief-constraint-v1",
+        }
     ):
         review_type = review_types[task_id]
         normalized["review_type"] = review_type

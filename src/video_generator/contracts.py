@@ -159,6 +159,7 @@ class VoiceSettings(ContractModel):
     name: Annotated[str, Field(min_length=1, max_length=120)]
     reference_audio: str = ""
     reference_transcript: str = ""
+    reference_language: OutputLanguage = OutputLanguage.ENGLISH
     elevenlabs_voice_id: str = ""
     authorization: Literal["self", "explicit_permission"] = "self"
 
@@ -668,6 +669,25 @@ class ReviewFinding(ContractModel):
     scene_id: str | None = None
     evidence: str
     recommendation: str
+
+
+class BriefConstraintAssessment(ContractModel):
+    satisfied: bool
+    scene_id: str | None = None
+    evidence: Annotated[str, Field(max_length=2000)] = ""
+    recommendation: Annotated[str, Field(max_length=2000)] = ""
+
+    @model_validator(mode="after")
+    def validate_unsatisfied_assessment(self) -> "BriefConstraintAssessment":
+        if not self.satisfied and (
+            not self.scene_id
+            or not self.evidence.strip()
+            or not self.recommendation.strip()
+        ):
+            raise ValueError(
+                "an unsatisfied brief constraint requires a Scene ID, evidence, and recommendation"
+            )
+        return self
 
 
 class ReviewReport(VersionedContract):
@@ -1198,7 +1218,10 @@ class BackendDescriptor(VersionedContract):
     supports_vision: bool = False
     supports_word_timing: bool = False
     supports_voice_cloning: bool = False
+    requires_reference_transcript: bool = False
+    requires_reference_language: bool = False
     supports_reference_images: bool = False
+    supports_negative_prompt: bool = False
     max_duration_seconds: Annotated[FiniteFloat, Field(gt=0)] | None = None
     supports_looping: bool = False
     exclusive_gpu: bool = False

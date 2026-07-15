@@ -432,6 +432,13 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             )
         return {"schema_version": 1, "title": outline.get("title", "Fixture Story"), "scenes": scenes}
     if task.startswith("review_"):
+        if data.get("review_strategy") == "single-brief-constraint-v1":
+            return {
+                "satisfied": True,
+                "scene_id": None,
+                "evidence": "",
+                "recommendation": "",
+            }
         if data.get("review_strategy") == "single-finding-resolution-v1":
             return {
                 "resolved": data.get("revised_spoken_text")
@@ -486,6 +493,8 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                 "spoken_text": " ".join(text.split()[:desired_words]).rstrip(".,;:") + "."
             }
         if data.get("revision_strategy") == "single-scene-replacement-v1":
+            return {"spoken_text": data["spoken_text"]}
+        if data.get("revision_strategy") == "single-scene-finding-repair-v1":
             return {"spoken_text": data["spoken_text"]}
         return {"schema_version": 1, "script": data["script"], "dispositions": []}
     if task == "claim_inventory":

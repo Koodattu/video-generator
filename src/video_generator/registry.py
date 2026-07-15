@@ -129,14 +129,24 @@ class BackendRegistry:
             )
         if backend_id in {"local:llama-server", "local:qwen3.6-27b-q4-vision"}:
             return LocalStructuredTextBackend(backend_id, self.runners)
-        if backend_id == "local:voxcpm2":
+        if backend_id in {
+            "local:voxcpm2",
+            "local:omnivoice",
+            "local:moss-tts-v1.5",
+            "local:x-voice",
+        }:
             return LocalSpeechBackend(backend_id, self.runners)
         if backend_id in {
             "local:faster-whisper-large-v3-turbo",
             "local:parakeet-tdt-0.6b-v3",
         }:
             return LocalAlignmentBackend(backend_id, self.runners)
-        if backend_id == "local:flux.2-klein-4b":
+        if backend_id in {
+            "local:flux.2-klein-4b",
+            "local:z-image-turbo",
+            "local:ideogram-4-nf4",
+            "local:qwen-image-2512-nf4",
+        }:
             return LocalImageBackend(backend_id, self.runners)
         if backend_id == "local:ace-step-1.5-xl-turbo":
             return LocalMusicBackend(backend_id, self.runners)

@@ -17,7 +17,13 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def write_asset_manifest(destination: Path, *, repo: str, revision: str) -> Path:
+def write_asset_manifest(
+    destination: Path,
+    *,
+    repo: str,
+    revision: str,
+    allow_patterns: list[str] | None = None,
+) -> Path:
     files = []
     for path in sorted(item for item in destination.rglob("*") if item.is_file()):
         relative = path.relative_to(destination)
@@ -34,6 +40,9 @@ def write_asset_manifest(destination: Path, *, repo: str, revision: str) -> Path
         "schema_version": 1,
         "source": f"https://huggingface.co/{repo}",
         "revision": revision,
+        "allow_patterns": list(allow_patterns or []),
+        "exact_file_suffixes": [".py", ".pyi", ".pyc", ".pyd", ".dll", ".so"],
+        "exact_exclude_roots": [".cache", "__pycache__"],
         "files": files,
     }
     temporary = destination / ".asset-manifest.tmp"
@@ -54,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
 
     destination = args.destination.resolve()
     destination.mkdir(parents=True, exist_ok=True)
+    if any(destination.iterdir()):
+        raise RuntimeError("model snapshot destination must be empty")
     snapshot_download(
         repo_id=args.repo,
         revision=args.revision,
@@ -61,7 +72,12 @@ def main(argv: list[str] | None = None) -> int:
         allow_patterns=args.allow or None,
         token=os.environ.get("HF_TOKEN") or None,
     )
-    write_asset_manifest(destination, repo=args.repo, revision=args.revision)
+    write_asset_manifest(
+        destination,
+        repo=args.repo,
+        revision=args.revision,
+        allow_patterns=args.allow,
+    )
     return 0
 
 

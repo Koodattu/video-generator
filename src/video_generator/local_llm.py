@@ -43,6 +43,9 @@ class LocalLlmProfile(BaseModel):
     flash_attention: bool = True
     speculation: Literal["none", "draft-mtp"] = "none"
     speculative_tokens: Annotated[int, Field(ge=1, le=8)] = 2
+    structured_output_mode: Literal["chat_completions", "template_completion"] = (
+        "chat_completions"
+    )
 
     draft_model_id: Annotated[str, Field(max_length=200)] = ""
     draft_model_repo: Annotated[str, Field(max_length=200)] = ""

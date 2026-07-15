@@ -748,7 +748,8 @@ def test_scene_local_revision_only_replaces_affected_spoken_text(
             == "single-scene-replacement-v1"
         ):
             replacement_requests.append(request)
-            return {"spoken_text": request.input_data["spoken_text"] + " Therefore."}
+            words = request.input_data["spoken_text"].split()
+            return {"spoken_text": " ".join(["Therefore,"] + words[1:])}
         return original_fixture(request)
 
     monkeypatch.setattr(deterministic_backend, "_fake_structured", scene_revision_fixture)
@@ -775,6 +776,9 @@ def test_scene_local_revision_only_replaces_affected_spoken_text(
     revision = store.load_artifact(revision_record, RevisedScript)
     assert len(replacement_requests) == 1
     assert len(resolution_requests) == 1
+    assert replacement_requests[0].input_data["minimum_word_count"] <= len(
+        replacement_requests[0].input_data["spoken_text"].split()
+    ) <= replacement_requests[0].input_data["maximum_word_count"]
     assert set(replacement_requests[0].output_schema["properties"]) == {"spoken_text"}
     assert set(resolution_requests[0].output_schema["properties"]) == {
         "resolved",
@@ -793,7 +797,9 @@ def test_scene_local_revision_only_replaces_affected_spoken_text(
         assert revised_scene.scene_id == original_scene.scene_id
         assert revised_scene.pause_after_seconds == original_scene.pause_after_seconds
         if revised_scene.scene_id == "scene-002":
-            assert revised_scene.spoken_text == original_scene.spoken_text + " Therefore."
+            assert revised_scene.spoken_text == " ".join(
+                ["Therefore,"] + original_scene.spoken_text.split()[1:]
+            )
         else:
             assert revised_scene.spoken_text == original_scene.spoken_text
 

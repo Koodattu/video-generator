@@ -124,6 +124,53 @@ def test_flux_request_uses_host_owned_dimensions_and_sampler_settings() -> None:
     assert request.settings.guidance_scale == 1.0
 
 
+@pytest.mark.parametrize(
+    ("backend_id", "quality", "steps", "guidance", "cpu_offload"),
+    [
+        ("local:z-image-turbo", "high", 9, 0.0, False),
+        ("local:ideogram-4-nf4", "low", 12, None, True),
+        ("local:ideogram-4-nf4", "medium", 20, None, True),
+        ("local:ideogram-4-nf4", "high", 48, None, True),
+        ("local:qwen-image-2512-nf4", "low", 20, 4.0, True),
+        ("local:qwen-image-2512-nf4", "medium", 35, 4.0, True),
+        ("local:qwen-image-2512-nf4", "high", 50, 4.0, True),
+    ],
+)
+def test_challenger_image_requests_use_host_owned_runtime_settings(
+    backend_id: str,
+    quality: str,
+    steps: int,
+    guidance: float | None,
+    cpu_offload: bool,
+) -> None:
+    compiled = ImageRequest(
+        scene_id="scene-001",
+        target_backend_id="wrong-backend",
+        prompt="A fox beside a tiny amber lantern.",
+        width=2048,
+        height=1152,
+        settings=ImageGenerationSettings(
+            inference_steps=99,
+            guidance_scale=19.0,
+            cpu_offload=not cpu_offload,
+        ),
+    )
+
+    request = WorkflowEngine._canonical_image_request(
+        compiled,
+        scene_id="scene-001",
+        target_backend_id=backend_id,
+        width=1024,
+        height=576,
+        quality=quality,
+        reference_paths=[],
+    )
+
+    assert request.settings.inference_steps == steps
+    assert request.settings.guidance_scale == guidance
+    assert request.settings.cpu_offload is cpu_offload
+
+
 def test_raw_image_extension_matches_backend_output_format() -> None:
     assert _raw_image_extension("gemini:gemini-3.1-flash-image") == ".jpg"
     assert _raw_image_extension("local:flux.2-klein-4b") == ".png"

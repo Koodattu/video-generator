@@ -130,3 +130,145 @@ def test_local_voice_preflight_rejects_invalid_audio(tmp_path: Path, resolved_co
 
     media_check = next(item for item in checks if item.name == "voice_reference_audio_media")
     assert media_check.ready is False
+
+
+def test_local_voice_preflight_rejects_audio_outside_private(
+    tmp_path: Path,
+    resolved_config,
+) -> None:
+    outside = tmp_path / "outside.wav"
+    outside.write_bytes(b"fixture")
+    config = resolved_config.model_copy(
+        update={
+            "project_root": str(tmp_path),
+            "voice": resolved_config.voice.model_copy(
+                update={"reference_audio": "private/../outside.wav"}
+            ),
+        }
+    )
+
+    checks = _voice_checks(config, tmp_path)
+
+    audio = next(item for item in checks if item.name == "voice_reference_audio")
+    assert audio.ready is False
+    assert "outside private/" in audio.detail
+
+
+def test_local_voice_preflight_rejects_transcript_outside_private(
+    tmp_path: Path,
+    resolved_config,
+) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("Exact transcript.", encoding="utf-8")
+    config = resolved_config.model_copy(
+        update={
+            "project_root": str(tmp_path),
+            "voice": resolved_config.voice.model_copy(
+                update={"reference_transcript": "private/../outside.txt"}
+            ),
+        }
+    )
+
+    checks = _voice_checks(config, tmp_path)
+
+    transcript = next(
+        item for item in checks if item.name == "voice_reference_transcript"
+    )
+    assert transcript.ready is False
+    assert "outside private/" in transcript.detail
+
+
+def test_omnivoice_preflight_requires_reference_transcript(
+    tmp_path: Path,
+    resolved_config,
+) -> None:
+    bindings = dict(resolved_config.task_bindings)
+    bindings["narration_synthesis"] = "local:omnivoice"
+    config = resolved_config.model_copy(
+        update={
+            "project_root": str(tmp_path),
+            "task_bindings": bindings,
+            "voice": resolved_config.voice.model_copy(update={"reference_transcript": ""}),
+        }
+    )
+
+    check = next(
+        item for item in _voice_checks(config, tmp_path)
+        if item.name == "voice_reference_transcript"
+    )
+
+    assert check.ready is False
+    assert check.detail == "not configured"
+    assert "Set voice.reference_transcript" in (check.action or "")
+
+
+def test_omnivoice_preflight_rejects_empty_reference_transcript(
+    tmp_path: Path,
+    resolved_config,
+) -> None:
+    transcript = tmp_path / "private" / "voice" / "me.txt"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("  \n", encoding="utf-8")
+    bindings = dict(resolved_config.task_bindings)
+    bindings["narration_synthesis"] = "local:omnivoice"
+    config = resolved_config.model_copy(
+        update={
+            "project_root": str(tmp_path),
+            "task_bindings": bindings,
+            "voice": resolved_config.voice.model_copy(
+                update={"reference_transcript": "private/voice/me.txt"}
+            ),
+        }
+    )
+
+    check = next(
+        item for item in _voice_checks(config, tmp_path)
+        if item.name == "voice_reference_transcript"
+    )
+
+    assert check.ready is False
+    assert check.detail.startswith("empty:")
+
+
+def test_xvoice_preflight_records_the_explicit_reference_language(
+    tmp_path: Path,
+    resolved_config,
+) -> None:
+    bindings = dict(resolved_config.task_bindings)
+    bindings["narration_synthesis"] = "local:x-voice"
+    config = resolved_config.model_copy(
+        update={
+            "project_root": str(tmp_path),
+            "task_bindings": bindings,
+            "voice": resolved_config.voice.model_copy(update={"reference_language": "en"}),
+        }
+    )
+
+    check = next(
+        item for item in _voice_checks(config, tmp_path)
+        if item.name == "voice_reference_language"
+    )
+
+    assert check.ready is True
+    assert check.detail == "reference language: en"
+
+
+@pytest.mark.parametrize("backend_id", ["local:voxcpm2", "local:moss-tts-v1.5"])
+def test_optional_transcript_backends_accept_an_unconfigured_transcript(
+    tmp_path: Path,
+    resolved_config,
+    backend_id: str,
+) -> None:
+    bindings = dict(resolved_config.task_bindings)
+    bindings["narration_synthesis"] = backend_id
+    config = resolved_config.model_copy(
+        update={
+            "project_root": str(tmp_path),
+            "task_bindings": bindings,
+            "voice": resolved_config.voice.model_copy(update={"reference_transcript": ""}),
+        }
+    )
+
+    checks = _voice_checks(config, tmp_path)
+
+    assert all(item.name != "voice_reference_transcript" for item in checks)

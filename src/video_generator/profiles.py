@@ -6,13 +6,19 @@ from .contracts import BackendDescriptor, OutputLanguage, ProtocolName, TASK_IDS
 from .costs import PRICING_SNAPSHOT
 
 
-PROFILE_VERSION = "2026-07-13.v6"
+PROFILE_VERSION = "2026-07-15.v9"
 
 EXPECTED_LOCAL_MODEL_REVISIONS: dict[str, str] = {
     "local:voxcpm2": "bffb3df5a29440629464e5e839f4d214c8714c3d",
     "local:faster-whisper-large-v3-turbo": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
     "local:parakeet-tdt-0.6b-v3": "7c35754d166cca382ad1e53e68b01e7c575f3a1d",
     "local:flux.2-klein-4b": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+    "local:omnivoice": "c5fdb5ccb189668d56333f77ba2629f4cd7535f4",
+    "local:moss-tts-v1.5": "be7766a6735b98bd793f7c79fb720b4d0f5d13b8",
+    "local:x-voice": "7f24fe778ddf7a47e25d87e5d5153599c1d4d5c2",
+    "local:z-image-turbo": "f332072aa78be7aecdf3ee76d5c247082da564a6",
+    "local:ideogram-4-nf4": "1874bc70267ba2c823a7239e1d70dd308c8d64dc",
+    "local:qwen-image-2512-nf4": "25468b98e3276ca6700de15c6628e51b7de54a26",
     "local:ace-step-1.5-xl-turbo": "d4a0b288b83ebb7e25a8c0b32c573c22e134e8ee",
 }
 
@@ -23,7 +29,12 @@ def image_generation_dimensions(
     delivery_width: int,
     delivery_height: int,
 ) -> tuple[int, int]:
-    if backend_id == "local:flux.2-klein-4b":
+    if backend_id in {
+        "local:flux.2-klein-4b",
+        "local:z-image-turbo",
+        "local:ideogram-4-nf4",
+        "local:qwen-image-2512-nf4",
+    }:
         return 1024, 576
     if backend_id == "deterministic:stick":
         return delivery_width, delivery_height
@@ -210,6 +221,57 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         exclusive_gpu=True,
         license_name="Apache-2.0",
     ),
+    "local:omnivoice": BackendDescriptor(
+        backend_id="local:omnivoice",
+        provider="local",
+        model_id="k2-fsa/OmniVoice",
+        revision="runner-manifest-v1",
+        protocols={ProtocolName.SPEECH},
+        cloud=False,
+        runner="native",
+        languages=_all_languages(),
+        required_assets=["omnivoice"],
+        supports_voice_cloning=True,
+        requires_reference_transcript=True,
+        exclusive_gpu=True,
+        license_name="CC-BY-NC-4.0",
+        notes="Native Windows challenger; authorized 3–10 second voice references are recommended.",
+    ),
+    "local:moss-tts-v1.5": BackendDescriptor(
+        backend_id="local:moss-tts-v1.5",
+        provider="local",
+        model_id="OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5",
+        revision="runner-manifest-v1",
+        protocols={ProtocolName.SPEECH},
+        cloud=False,
+        runner="native",
+        languages=_all_languages(),
+        required_assets=["moss-tts-v1.5", "moss-audio-tokenizer-v2"],
+        supports_voice_cloning=True,
+        exclusive_gpu=True,
+        license_name="Apache-2.0",
+        notes="Native Windows challenger using pinned local remote code and SDPA; requires a fit probe.",
+    ),
+    "local:x-voice": BackendDescriptor(
+        backend_id="local:x-voice",
+        provider="local",
+        model_id="XRXRX/X-Voice Stage1",
+        revision="runner-manifest-v1",
+        protocols={ProtocolName.SPEECH},
+        cloud=False,
+        runner="native",
+        languages=_all_languages(),
+        required_assets=["x-voice-stage1", "vocos-mel-24khz", "espeak-ng"],
+        supports_voice_cloning=True,
+        requires_reference_transcript=True,
+        requires_reference_language=True,
+        exclusive_gpu=True,
+        license_name="CC-BY-NC-4.0",
+        notes=(
+            "Experimental native-Windows Stage1 backend with a pinned Conda/Pynini runtime; "
+            "the model weights prohibit commercial use."
+        ),
+    ),
     "local:parakeet-tdt-0.6b-v3": BackendDescriptor(
         backend_id="local:parakeet-tdt-0.6b-v3",
         provider="local",
@@ -274,8 +336,55 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         languages=_all_languages(),
         required_assets=["flux.2-klein-4b"],
         supports_reference_images=True,
+        supports_negative_prompt=True,
         exclusive_gpu=True,
         license_name="Apache-2.0",
+        notes="Negative exclusions are folded into the positive prompt at this low-guidance setting.",
+    ),
+    "local:z-image-turbo": BackendDescriptor(
+        backend_id="local:z-image-turbo",
+        provider="local",
+        model_id="Tongyi-MAI/Z-Image-Turbo",
+        revision="runner-manifest-v1",
+        protocols={ProtocolName.IMAGE},
+        cloud=False,
+        runner="native",
+        languages=_all_languages(),
+        required_assets=["z-image-turbo"],
+        supports_negative_prompt=True,
+        exclusive_gpu=True,
+        license_name="Apache-2.0",
+        notes="Text-to-image only; Turbo guidance is zero, so exclusions are compiled into the positive prompt.",
+    ),
+    "local:ideogram-4-nf4": BackendDescriptor(
+        backend_id="local:ideogram-4-nf4",
+        provider="local",
+        model_id="ideogram-ai/ideogram-4-nf4-diffusers",
+        revision="runner-manifest-v1",
+        protocols={ProtocolName.IMAGE},
+        cloud=False,
+        runner="native",
+        languages=_all_languages(),
+        required_assets=["ideogram-4-nf4"],
+        supports_negative_prompt=True,
+        exclusive_gpu=True,
+        license_name="Ideogram 4 Non-Commercial",
+        notes="Gated text-to-image challenger; Python compiles the existing prompt into native JSON locally.",
+    ),
+    "local:qwen-image-2512-nf4": BackendDescriptor(
+        backend_id="local:qwen-image-2512-nf4",
+        provider="local",
+        model_id="Qwen/Qwen-Image-2512",
+        revision="runner-manifest-v1",
+        protocols={ProtocolName.IMAGE},
+        cloud=False,
+        runner="native",
+        languages=_all_languages(),
+        required_assets=["qwen-image-2512"],
+        supports_negative_prompt=True,
+        exclusive_gpu=True,
+        license_name="Apache-2.0",
+        notes="Text-to-image only; transformer and text encoder load as NF4 with model CPU offload.",
     ),
     "elevenlabs:music_v2": BackendDescriptor(
         backend_id="elevenlabs:music_v2",

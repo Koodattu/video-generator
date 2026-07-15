@@ -1216,6 +1216,25 @@ def test_policy_thirty_three_net_tempo_stays_inside_duration_boundary() -> None:
     assert final_duration_seconds == pytest.approx(24 * 0.85 + 1 / 30)
 
 
+def test_net_tempo_accepts_edge_trimmed_fast_paced_voice() -> None:
+    tempo = WorkflowEngine._narration_net_tempo_rate(
+        speech_seconds=16.0,
+        pause_seconds=0.24,
+        word_count=35,
+        budget_seconds=20,
+        fps=30,
+        preferred_tempo=1.18,
+        minimum_words_per_second=2.025,
+        maximum_words_per_second=2.577,
+    )
+
+    assert tempo == pytest.approx(16 / (20 * 0.85 + 1 / 30 - 0.24))
+    assert 0.95 < tempo < 1
+    final_speech_seconds = 16 / tempo
+    assert 20 * 0.85 <= final_speech_seconds + 0.24 <= 20
+    assert 35 / final_speech_seconds >= 2.025
+
+
 def test_policy_thirty_two_tts_cache_identity_includes_neighboring_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1283,6 +1302,9 @@ def test_policy_thirty_two_tts_cache_identity_includes_neighboring_text(
     assert {
         item["speech_tempo_policy"] for item in captured_inputs
     } == {"post-synthesis-net-v1"}
+    assert {
+        item["narration_normalization_policy"] for item in captured_inputs
+    } == {"edge-silence-v1"}
 
 
 def test_policy_thirty_three_partial_tts_repair_invalidates_adjacent_context(
@@ -1405,6 +1427,50 @@ def test_policy_twenty_four_delivery_word_range_reserves_pauses_and_unselected_w
     )
 
     assert aggregate_range == (45, 50, 51)
+
+
+def test_policy_thirty_four_delivery_word_range_reserves_duration_floor() -> None:
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id=f"scene-{index:03d}",
+                spoken_text="short scene",
+                pause_after_seconds=0.08 if index < 4 else 0,
+            )
+            for index in range(1, 5)
+        ],
+    )
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 34
+    engine.config = SimpleNamespace(
+        duration_seconds=12,
+        fps=30,
+        narration_delivery_spec=NarrationDeliverySpec(
+            target_words_per_second=2.301,
+            minimum_words_per_second=2.025,
+            maximum_words_per_second=2.577,
+            target_pause_seconds=0.08,
+            maximum_pause_seconds=0.3,
+            tempo_multiplier=1.18,
+        ),
+    )
+
+    aggregate_range = engine._duration_repair_aggregate_word_range(
+        script=script,
+        scene_repair_targets=[
+            {
+                "scene_id": f"scene-{index:03d}",
+                "minimum_word_count": 5,
+                "target_word_count": 5,
+                "maximum_word_count": 6,
+            }
+            for index in range(1, 5)
+        ],
+        selected_scene_ids={f"scene-{index:03d}" for index in range(1, 5)},
+    )
+
+    assert aggregate_range == (21, 21, 24)
 
 
 def _policy_twenty_eight_factual_duration_fixture(
