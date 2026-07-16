@@ -8,6 +8,7 @@ from video_generator.contracts import (
     ContentFormat,
     CreativeBrief,
     NarrationPace,
+    VideoStyle,
     VisualShotMode,
 )
 from video_generator.errors import CheckpointError
@@ -125,6 +126,7 @@ def test_aggregate_checkpoint_detects_corrupt_item_media(tmp_path: Path, resolve
         ({"content_format": ContentFormat.EXPLAINER}, "research"),
         ({"narration_pace": NarrationPace.FAST}, "script-draft"),
         ({"narration_delivery": "Measured and reflective."}, "script-draft"),
+        ({"video_style": VideoStyle.REMOTION_EXPLAINER}, "research"),
         ({"visual_shot_mode": VisualShotMode.CADENCED}, "captions"),
         ({"shot_target_seconds": 4}, "visual-plan"),
     ],
@@ -178,3 +180,42 @@ def test_legacy_fiction_run_loads_without_claim_inventory_binding(
         reopened.config.task_bindings["factual_review"]
     )
     assert "claim_inventory" not in read_json(reopened.config_path)["task_bindings"]
+
+
+def test_legacy_run_loads_without_remotion_task_bindings(
+    tmp_path: Path,
+    resolved_config,
+) -> None:
+    config = resolved_config.model_copy(
+        update={
+            "profile": "deterministic-test",
+            "project_root": str(tmp_path),
+            "offline": True,
+            "task_bindings": dict(PROFILES["deterministic-test"]),
+        }
+    )
+    store = RunStore.create(
+        project_root=tmp_path,
+        config=config,
+        brief=CreativeBrief(idea_direction="A tiny winter mystery"),
+        frozen_assets=build_frozen_assets(config),
+    )
+    stored_config = read_json(store.config_path)
+    del stored_config["task_bindings"]["remotion_direction"]
+    del stored_config["task_bindings"]["remotion_asset_select"]
+    atomic_write_json(store.config_path, stored_config)
+    manifest = read_json(store.manifest_path)
+    manifest["config_hash"] = hash_value(stored_config)
+    atomic_write_json(store.manifest_path, manifest)
+
+    reopened = RunStore.open(store.root)
+
+    assert reopened.config.task_bindings["remotion_direction"] == (
+        reopened.config.task_bindings["visual_plan"]
+    )
+    assert reopened.config.task_bindings["remotion_asset_select"] == (
+        reopened.config.task_bindings["image_prompt_compile"]
+    )
+    persisted = read_json(reopened.config_path)["task_bindings"]
+    assert "remotion_direction" not in persisted
+    assert "remotion_asset_select" not in persisted

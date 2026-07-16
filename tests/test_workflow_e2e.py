@@ -806,6 +806,122 @@ def test_scene_local_revision_only_replaces_affected_spoken_text(
 
 @pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="WorkflowEngine requires FFmpeg discovery for a stopped workflow",
+)
+def test_scene_finding_repair_uses_recheck_feedback_once(
+    tmp_path: Path,
+    resolved_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = resolved_config.model_copy(
+        update={
+            "profile": "deterministic-test",
+            "project_root": str(tmp_path),
+            "task_bindings": dict(PROFILES["deterministic-test"]),
+            "content_format": ContentFormat.EXPLAINER,
+            "duration_seconds": 12,
+            "visual_target_seconds": 5,
+            "visual_min_seconds": 4,
+            "visual_max_seconds": 8,
+            "idea_candidates": 1,
+            "research_query_limit": 0,
+            "research_source_limit": 0,
+            "offline": True,
+        }
+    )
+    brief = CreativeBrief(idea_direction="Explain an imaginary pocket weather machine.")
+    original_fixture = deterministic_backend._fake_structured
+    repair_requests = []
+    resolution_requests = []
+
+    def fixture(request):
+        if request.task_id == "review_spoken":
+            if request.input_data.get("review_strategy") == "single-finding-resolution-v1":
+                resolution_requests.append(request)
+                revised = request.input_data["revised_spoken_text"].casefold()
+                resolved = "mushroom" in revised and "lamp" in revised
+                return {
+                    "resolved": resolved,
+                    "explanation": (
+                        "The visual joke is now explicit."
+                        if resolved
+                        else "The edit is cosmetic and still contains no visual joke."
+                    ),
+                }
+            return {
+                "schema_version": 1,
+                "review_type": "wrong-on-purpose",
+                "passed": False,
+                "findings": [
+                    {
+                        "finding_id": "model-owned-id",
+                        "severity": "blocking",
+                        "scene_id": "scene-002",
+                        "evidence": "The action has no quiet visual joke.",
+                        "recommendation": "Turn a mushroom into a lamp as a visual joke.",
+                    }
+                ],
+            }
+        if request.task_id == "script_revision":
+            strategy = request.input_data.get("revision_strategy")
+            if strategy == "single-scene-replacement-v1":
+                return {"spoken_text": request.input_data["spoken_text"]}
+            if strategy == "single-scene-finding-repair-v1":
+                repair_requests.append(request)
+                if request.input_data["repair_attempt"] == 1:
+                    return {"spoken_text": request.input_data["spoken_text"]}
+                target = int(request.input_data["target_word_count"])
+                words = [
+                    "The",
+                    "fox's",
+                    "lantern",
+                    "turned",
+                    "a",
+                    "mushroom",
+                    "into",
+                    "a",
+                    "lamp.",
+                ]
+                while len(words) < target:
+                    words.insert(-1, "quietly")
+                return {"spoken_text": " ".join(words[:target])}
+        return original_fixture(request)
+
+    monkeypatch.setattr(deterministic_backend, "_fake_structured", fixture)
+    frozen_assets = build_frozen_assets(config)
+    frozen_assets["runtime_snapshot"] = build_runtime_snapshot(config)
+    store = RunStore.create(
+        project_root=tmp_path,
+        config=config,
+        brief=brief,
+        frozen_assets=frozen_assets,
+    )
+
+    with WorkflowEngine(
+        store=store,
+        environment={},
+        stop_after="script-revision",
+    ) as workflow:
+        assert workflow.run() is None
+
+    revision_record = store.stage_record("script-revision")
+    assert revision_record is not None
+    revision = store.load_artifact(revision_record, RevisedScript)
+    assert [request.input_data["repair_attempt"] for request in repair_requests] == [1, 2]
+    assert repair_requests[1].input_data["prior_resolution_feedback"] == [
+        {
+            "recommendation": "Turn a mushroom into a lamp as a visual joke.",
+            "rejection_explanation": "The edit is cosmetic and still contains no visual joke.",
+        }
+    ]
+    assert len(resolution_requests) == 2
+    assert "finding-repair-scene-002-attempt-2" in revision_record.item_ids
+    assert "mushroom" in revision.script.scenes[1].spoken_text.casefold()
+    assert revision.dispositions[0].disposition == "applied"
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="WorkflowEngine requires FFmpeg discovery even when the factual gate blocks TTS",
 )
 def test_unsupported_factual_claim_blocks_all_tts_calls(

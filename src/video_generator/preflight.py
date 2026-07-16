@@ -16,6 +16,7 @@ from .contracts import (
     ProtocolName,
     Quality,
     ResolvedRunConfig,
+    VideoStyle,
     PUBLIC_STAGES,
     TASK_PROTOCOL,
 )
@@ -23,6 +24,7 @@ from .errors import VideoGeneratorError
 from .media import MediaTools
 from .profiles import BACKEND_DESCRIPTORS, image_generation_dimensions
 from .registry import BackendRegistry
+from .remotion_renderer import probe_remotion_runtime
 
 
 TASK_LAST_USE_STAGE: dict[str, str] = {
@@ -42,6 +44,8 @@ TASK_LAST_USE_STAGE: dict[str, str] = {
     "duration_repair": "narration",
     "caption_alignment": "captions",
     "visual_plan": "visual-plan",
+    "remotion_direction": "visual-plan",
+    "remotion_asset_select": "images",
     "image_prompt_compile": "image-prompt-compile",
     "image_generate": "visual-review",
     "visual_review": "visual-review",
@@ -109,7 +113,8 @@ def estimate_cost(
             visual_shot_count * 2
             if task_id == "visual_review"
             else visual_shot_count
-            if task_id == "image_prompt_compile"
+            if task_id
+            in {"image_prompt_compile", "remotion_direction", "remotion_asset_select"}
             else 2
             if task_id in {"claim_inventory", "factual_review"}
             else 1
@@ -374,6 +379,12 @@ def run_preflight(
     )
     if "narration_synthesis" in remaining_tasks:
         checks.extend(_voice_checks(config, project_root))
+
+    render_is_remaining = from_stage is None or (
+        PUBLIC_STAGES.index(from_stage) <= PUBLIC_STAGES.index("render")
+    )
+    if config.video_style is VideoStyle.REMOTION_EXPLAINER and render_is_remaining:
+        checks.extend(probe_remotion_runtime(project_root))
 
     try:
         tools = MediaTools.discover()

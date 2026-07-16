@@ -975,9 +975,39 @@ def render_video(
         tools.run(command, timeout=1800)
     finally:
         concat_path.unlink(missing_ok=True)
-    outputs = []
-    if plan.caption_srt_path:
-        srt = workspace_root / plan.caption_srt_path
+    return finalize_rendered_video(
+        tools,
+        base_path=base_path,
+        output_path=output_path,
+        workspace_root=workspace_root,
+        caption_srt_path=plan.caption_srt_path,
+        caption_ass_path=plan.caption_ass_path,
+        caption_language=plan.caption_language,
+        burned_output_path=burned_output_path,
+    )
+
+
+def finalize_rendered_video(
+    tools: MediaTools,
+    *,
+    base_path: Path,
+    output_path: Path,
+    workspace_root: Path,
+    caption_srt_path: str | None,
+    caption_ass_path: str | None,
+    caption_language: OutputLanguage | None,
+    burned_output_path: Path | None = None,
+) -> list[Path]:
+    """Attach selectable/burned captions to an already muxed local base video."""
+
+    outputs: list[Path] = []
+    if caption_srt_path:
+        if caption_language is None:
+            raise MediaError(
+                "caption language is required when attaching an SRT track",
+                kind=ErrorKind.INVALID_OUTPUT,
+            )
+        srt = workspace_root / caption_srt_path
         tools.run(
             [
                 tools.ffmpeg,
@@ -1001,7 +1031,7 @@ def render_video(
                 "-c:s",
                 "mov_text",
                 "-metadata:s:s:0",
-                "language=fin" if plan.caption_language is OutputLanguage.FINNISH else "language=eng",
+                "language=fin" if caption_language is OutputLanguage.FINNISH else "language=eng",
                 "-movflags",
                 "+faststart",
                 str(output_path),
@@ -1012,8 +1042,8 @@ def render_video(
     else:
         replace_path(base_path, output_path)
         outputs.append(output_path)
-    if burned_output_path and plan.caption_ass_path:
-        ass_path = (workspace_root / plan.caption_ass_path).resolve()
+    if burned_output_path and caption_ass_path:
+        ass_path = (workspace_root / caption_ass_path).resolve()
         filter_value = "ass=" + ass_path.name.replace("\\", "/").replace(":", r"\:")
         tools.run(
             [

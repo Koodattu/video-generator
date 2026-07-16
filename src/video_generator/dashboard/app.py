@@ -33,16 +33,27 @@ from ..contracts import (
     OutputLanguage,
     PUBLIC_STAGES,
     Quality,
+    RemotionAssetBundle,
+    RemotionAssetKind,
+    RemotionAssetPolicy,
+    RemotionEditPlan,
+    RemotionEditShot,
+    RemotionSfxPreset,
+    RemotionTemplate,
     TASK_IDS,
     TASK_PROTOCOL,
+    VideoStyle,
     VisualShotMode,
 )
 from ..errors import CheckpointError, ConfigurationError, VideoGeneratorError
 from ..preflight import run_preflight
 from ..profiles import BACKEND_DESCRIPTORS, PROFILES
 from ..prompting import build_frozen_assets
-from ..provenance import build_runtime_snapshot
+from ..provenance import build_runtime_snapshot, verify_runtime_snapshot
+from ..remotion_renderer import remotion_motion_for_template
 from ..run_store import RunStore
+from ..util import hash_value
+from ..workflow import RemotionVisualReviewBundle
 
 
 TASK_GROUPS: dict[str, tuple[str, ...]] = {
@@ -61,7 +72,14 @@ TASK_GROUPS: dict[str, tuple[str, ...]] = {
         "duration_repair",
     ),
     "Voice": ("narration_synthesis", "caption_alignment"),
-    "Visuals": ("visual_plan", "image_prompt_compile", "image_generate", "visual_review"),
+    "Visuals": (
+        "visual_plan",
+        "remotion_direction",
+        "remotion_asset_select",
+        "image_prompt_compile",
+        "image_generate",
+        "visual_review",
+    ),
     "Music": ("music_brief", "music_generate"),
 }
 
@@ -110,8 +128,15 @@ class RunOptions(DashboardModel):
     content_format: ContentFormat = ContentFormat.NARRATIVE
     narration_pace: NarrationPace = NarrationPace.STANDARD
     narration_delivery: Annotated[str, Field(max_length=500)] = ""
+    video_style: VideoStyle = VideoStyle.STILL_IMAGE
     style: Annotated[str, Field(min_length=1, max_length=120)] = "ms_paint_stick"
     style_description: Annotated[str, Field(max_length=1000)] = ""
+    remotion_asset_policy: RemotionAssetPolicy = RemotionAssetPolicy.STOCK_PREFERRED
+    remotion_allow_share_alike: bool = False
+    remotion_require_asset_approval: bool = False
+    remotion_source_screenshot_hosts: Annotated[list[str], Field(max_length=50)] = Field(
+        default_factory=list
+    )
     offline: bool = False
     cost_ceiling_usd: Annotated[FiniteFloat, Field(ge=0, le=10000)] = 10
     idea_candidates: Annotated[int, Field(ge=1, le=10)] = 5
@@ -133,6 +158,20 @@ class RunOptions(DashboardModel):
 class RunRequest(DashboardModel):
     brief: CreativeBrief
     options: RunOptions
+
+
+class RemotionShotPatch(DashboardModel):
+    template: RemotionTemplate | None = None
+    headline: Annotated[str | None, Field(min_length=1, max_length=80)] = None
+    supporting_text: Annotated[str | None, Field(max_length=160)] = None
+    body_lines: Annotated[list[Annotated[str, Field(min_length=1, max_length=120)]] | None, Field(max_length=8)] = None
+    asset_kind: RemotionAssetKind | None = None
+    asset_query: Annotated[str | None, Field(max_length=180)] = None
+    sfx: RemotionSfxPreset | None = None
+
+
+class EmptyAction(DashboardModel):
+    pass
 
 
 def _sanitized_defaults(project_root: Path) -> dict[str, Any]:
@@ -237,6 +276,64 @@ def create_dashboard_app(
             raise HTTPException(status_code=404, detail="Run not found.") from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def fork_run(
+        run_id: str,
+        request: Request,
+        *,
+        fork_stage: str,
+        additions: Callable[[RunStore], dict[str, Any]],
+    ) -> dict[str, Any]:
+        run_root = api_run_root(run_id)
+        controller = supervisor(request).snapshot(run_id)
+        if controller and controller.get("status") in {"queued", "running", "stopping"}:
+            raise HTTPException(status_code=409, detail="Stop this Run before creating a child Run.")
+        initial_parent = RunStore.open(run_root)
+        try:
+            with initial_parent.execution_lock():
+                parent = RunStore.open(run_root)
+                if parent.config.video_style is not VideoStyle.REMOTION_EXPLAINER:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Shot editing and asset approval are available only for Remotion Runs.",
+                    )
+                verify_runtime_snapshot(parent.config, parent.frozen_assets)
+                environment = load_environment(project_root / "config.toml")
+                report = run_preflight(
+                    config=parent.config,
+                    environment=environment,
+                    live=False,
+                    from_stage=fork_stage,
+                )
+                if not report.ready:
+                    raise HTTPException(status_code=422, detail=report.model_dump(mode="json"))
+                assets = build_frozen_assets(parent.config)
+                assets["runtime_snapshot"] = build_runtime_snapshot(parent.config)
+                assets["creation_preflight"] = report.model_dump(mode="json")
+                if "remotion_edit_plan_override" in parent.frozen_assets:
+                    assets["remotion_edit_plan_override"] = parent.frozen_assets[
+                        "remotion_edit_plan_override"
+                    ]
+                assets.update(additions(parent))
+                child = RunStore.fork(
+                    parent=parent,
+                    config=parent.config,
+                    brief=parent.brief,
+                    frozen_assets=assets,
+                    fork_stage=fork_stage,
+                )
+        except CheckpointError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": exc.message, "action": exc.action},
+            ) from exc
+        job = supervisor(request).enqueue(child.manifest.run_id)
+        return {
+            "run_id": child.manifest.run_id,
+            "parent_run_id": run_id,
+            "fork_stage": fork_stage,
+            "job": job,
+        }
 
     def event_run_root(run_id: str, request: Request) -> Path:
         run_root = api_run_root(run_id)
@@ -380,6 +477,152 @@ def create_dashboard_app(
                 detail="This Run is already executing outside this dashboard.",
             )
         return {"run_id": run_id, "job": supervisor(request).enqueue(run_id)}
+
+    @app.post("/api/runs/{run_id}/approve-assets", dependencies=[mutation_guard])
+    def approve_assets(
+        run_id: str,
+        payload: EmptyAction,
+        request: Request,
+    ) -> dict[str, Any]:
+        del payload
+
+        existing_parent = RunStore.open(api_run_root(run_id))
+        existing_review = existing_parent.stage_record("visual-review")
+        fork_stage = (
+            "music-brief"
+            if existing_review is not None and existing_review.status == "complete"
+            else "visual-review"
+        )
+
+        def additions(parent: RunStore) -> dict[str, Any]:
+            if not parent.config.remotion_require_asset_approval:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This Run does not require an asset-approval fork.",
+                )
+            record = parent.stage_record("images")
+            if record is None or record.status != "complete":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Finish asset resolution before approving media.",
+                )
+            bundle = parent.load_artifact(record, RemotionAssetBundle)
+            if not bundle.assets:
+                raise HTTPException(status_code=409, detail="This Run has no media assets to approve.")
+            assets = list(bundle.assets)
+            review_record = parent.stage_record("visual-review")
+            if review_record is not None and review_record.status == "complete":
+                reviewed = parent.load_artifact(review_record, RemotionVisualReviewBundle)
+                assets.extend(reviewed.assets.assets)
+            approvals_by_record = {
+                hash_value(asset.model_dump(mode="json")): asset for asset in assets
+            }
+            return {
+                "remotion_asset_approvals": [
+                    {
+                        "asset_id": asset.asset_id,
+                        "shot_id": asset.shot_id,
+                        "record_sha256": record_sha256,
+                    }
+                    for record_sha256, asset in approvals_by_record.items()
+                ]
+            }
+
+        return fork_run(
+            run_id,
+            request,
+            fork_stage=fork_stage,
+            additions=additions,
+        )
+
+    @app.post(
+        "/api/runs/{run_id}/shots/{shot_id}/fork",
+        dependencies=[mutation_guard],
+    )
+    def edit_remotion_shot(
+        run_id: str,
+        shot_id: str,
+        payload: RemotionShotPatch,
+        request: Request,
+    ) -> dict[str, Any]:
+        updates = payload.model_dump(mode="python", exclude_none=True)
+        if not updates:
+            raise HTTPException(status_code=422, detail="Change at least one Shot field.")
+
+        def additions(parent: RunStore) -> dict[str, Any]:
+            record = parent.stage_record("visual-plan")
+            if record is None or record.status != "complete":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Finish visual planning before editing a Shot.",
+                )
+            plan = parent.load_artifact(record, RemotionEditPlan)
+            index = next(
+                (position for position, shot in enumerate(plan.shots) if shot.shot_id == shot_id),
+                None,
+            )
+            if index is None:
+                raise HTTPException(status_code=404, detail="Shot not found in this Run.")
+            source_screenshot_eligible = (
+                0 < index < len(plan.shots) - 1
+                and parent.config.content_mode is ContentMode.FACTUAL
+                and not parent.config.offline
+                and bool(parent.config.remotion_source_screenshot_hosts)
+                and bool(plan.shots[index].source_screenshot_source_ids)
+            )
+            shot_payload = plan.shots[index].model_dump(mode="python")
+            shot_payload.update(updates)
+            template = RemotionTemplate(shot_payload["template"])
+            shot_payload["motion"] = remotion_motion_for_template(template)
+            try:
+                edited_shot = RemotionEditShot.model_validate(shot_payload)
+                if index == 0 and edited_shot.template is not RemotionTemplate.KINETIC_HOOK:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="The opening Shot must keep the Kinetic Hook template.",
+                    )
+                if (
+                    index == len(plan.shots) - 1
+                    and edited_shot.template is not RemotionTemplate.CONCLUSION
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="The final Shot must keep the Conclusion template.",
+                    )
+                edited_shots = list(plan.shots)
+                edited_shots[index] = edited_shot
+                edited_plan = RemotionEditPlan.model_validate(
+                    {
+                        **plan.model_dump(mode="python"),
+                        "shots": edited_shots,
+                    }
+                )
+                if (
+                    edited_shot.asset_kind is RemotionAssetKind.SOURCE_SCREENSHOT
+                    and not source_screenshot_eligible
+                ):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "This Shot has no approved, scene-grounded source available for a "
+                            "source screenshot."
+                        ),
+                    )
+            except HTTPException:
+                raise
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail="The edited fields are not compatible with the selected template.",
+                ) from exc
+            return {"remotion_edit_plan_override": edited_plan.model_dump(mode="json")}
+
+        return fork_run(
+            run_id,
+            request,
+            fork_stage="visual-plan",
+            additions=additions,
+        )
 
     @app.post("/api/runs/{run_id}/stop", dependencies=[mutation_guard])
     def stop_run(run_id: str, request: Request) -> dict[str, Any]:

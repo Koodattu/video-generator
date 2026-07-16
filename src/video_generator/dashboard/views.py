@@ -10,7 +10,7 @@ from .jobs import RunSupervisor
 from ..contracts import PUBLIC_STAGES
 from ..errors import CheckpointError
 from ..run_store import RunExecutionLock
-from ..util import read_json
+from ..util import hash_value, read_json
 
 
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -397,6 +397,18 @@ def scene_views(
         visual_id = generated.get("shot_id") or generated.get("scene_id")
         if isinstance(visual_id, str):
             image_items[visual_id] = item
+    remotion_bundle = (
+        review.get("assets")
+        if isinstance(review.get("assets"), dict)
+        else images
+    )
+    for asset in remotion_bundle.get("assets") or []:
+        if not isinstance(asset, dict) or not isinstance(asset.get("shot_id"), str):
+            continue
+        image_items[asset["shot_id"]] = {
+            "normalized_image": asset.get("normalized"),
+            "asset": asset,
+        }
     report = review.get("report") if isinstance(review.get("report"), dict) else {}
     review_items = _by_visual(report.get("items"))
     visual_ids = list(dict.fromkeys([*briefs, *requests, *image_items])) or list(scripts)
@@ -404,6 +416,9 @@ def scene_views(
     for visual_id in visual_ids:
         image_item = image_items.get(visual_id, {})
         normalized = image_item.get("normalized_image")
+        remotion_asset = (
+            image_item.get("asset") if isinstance(image_item.get("asset"), dict) else {}
+        )
         brief = briefs.get(visual_id, {})
         request = image_item.get("request") or requests.get(visual_id) or {}
         scene_id = str(brief.get("scene_id") or request.get("scene_id") or visual_id)
@@ -440,6 +455,8 @@ def scene_views(
                 "image_request": request or None,
                 "image": normalized,
                 "image_url": _media_url(project_root, run_root, run_id, normalized),
+                "media_kind": remotion_asset.get("media_kind") or "image",
+                "asset": remotion_asset or None,
                 "review": review_items.get(visual_id),
             }
         )
@@ -503,6 +520,11 @@ def run_detail(project_root: Path, run_root: Path, supervisor: RunSupervisor) ->
         "content_mode": "fiction",
         "content_format": "narrative",
         "narration_pace": "standard",
+        "video_style": "still_image",
+        "remotion_asset_policy": "stock_preferred",
+        "remotion_allow_share_alike": False,
+        "remotion_require_asset_approval": False,
+        "remotion_source_screenshot_hosts": [],
         "visual_shot_mode": "scene_locked",
         **{
             key: value
@@ -510,6 +532,36 @@ def run_detail(project_root: Path, run_root: Path, supervisor: RunSupervisor) ->
             if key not in {"voice", "project_root"}
         },
     }
+    frozen_assets = _read_optional(run_root / "inputs" / "frozen-assets" / "assets.json")
+    images = _stage_artifact(run_root, manifest, "images")
+    review = _stage_artifact(run_root, manifest, "visual-review")
+    reviewed_bundle = review.get("assets") if isinstance(review.get("assets"), dict) else {}
+    current_assets = (
+        reviewed_bundle.get("assets")
+        if isinstance(reviewed_bundle.get("assets"), list)
+        else images.get("assets")
+        if isinstance(images.get("assets"), list)
+        else []
+    )
+    expected_approvals = {
+        (
+            asset.get("asset_id"),
+            asset.get("shot_id"),
+            hash_value(asset),
+        )
+        for asset in current_assets
+        if isinstance(asset, dict)
+    }
+    approved_records = {
+        (
+            item.get("asset_id"),
+            item.get("shot_id"),
+            item.get("record_sha256"),
+        )
+        for item in frozen_assets.get("remotion_asset_approvals") or []
+        if isinstance(item, dict)
+    }
+    approval_required = bool(safe_config.get("remotion_require_asset_approval"))
     files = artifact_entries(run_root, manifest)
     return {
         "summary": run_summary(
@@ -526,5 +578,10 @@ def run_detail(project_root: Path, run_root: Path, supervisor: RunSupervisor) ->
         "scenes": scene_views(project_root, run_root, manifest),
         "files": files,
         "outputs": [item for item in files if item["category"] == "outputs"],
+        "asset_approval": {
+            "required": approval_required,
+            "approved": bool(expected_approvals) and expected_approvals.issubset(approved_records),
+            "asset_count": len(expected_approvals),
+        },
         "cost": cost_summary(manifest),
     }

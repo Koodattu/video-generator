@@ -231,17 +231,27 @@ class RunStore:
     def config(self) -> ResolvedRunConfig:
         data = read_json(self.config_path)
         bindings = data.get("task_bindings") if isinstance(data, dict) else None
-        if (
-            isinstance(bindings, dict)
-            and "claim_inventory" not in bindings
-            and data.get("content_mode", "fiction") == "fiction"
-        ):
-            fallback = bindings.get("factual_review") or bindings.get("script_revision")
-            if fallback:
-                data = {
-                    **data,
-                    "task_bindings": {**bindings, "claim_inventory": fallback},
-                }
+        if isinstance(bindings, dict):
+            migrated = dict(bindings)
+            if (
+                "claim_inventory" not in migrated
+                and data.get("content_mode", "fiction") == "fiction"
+            ):
+                fallback = migrated.get("factual_review") or migrated.get("script_revision")
+                if fallback:
+                    migrated["claim_inventory"] = fallback
+            legacy_remotion_fallbacks = {
+                "remotion_direction": migrated.get("visual_plan")
+                or migrated.get("script_revision"),
+                "remotion_asset_select": migrated.get("image_prompt_compile")
+                or migrated.get("visual_plan")
+                or migrated.get("script_revision"),
+            }
+            for task_id, fallback in legacy_remotion_fallbacks.items():
+                if task_id not in migrated and fallback:
+                    migrated[task_id] = fallback
+            if migrated != bindings:
+                data = {**data, "task_bindings": migrated}
         return ResolvedRunConfig.model_validate(data)
 
     @property
@@ -927,8 +937,13 @@ CONFIG_IMPACT: dict[str, str] = {
     "research_query_limit": "research",
     "research_source_limit": "research",
     "voice": "narration",
+    "video_style": "research",
     "style": "visual-plan",
     "style_description": "visual-plan",
+    "remotion_asset_policy": "image-prompt-compile",
+    "remotion_allow_share_alike": "images",
+    "remotion_require_asset_approval": "visual-review",
+    "remotion_source_screenshot_hosts": "visual-plan",
     "visual_target_seconds": "outline",
     "visual_min_seconds": "outline",
     "visual_max_seconds": "outline",
@@ -965,6 +980,8 @@ TASK_STAGE_IMPACT: dict[str, str] = {
     "duration_repair": "narration",
     "caption_alignment": "captions",
     "visual_plan": "visual-plan",
+    "remotion_direction": "visual-plan",
+    "remotion_asset_select": "images",
     "image_prompt_compile": "image-prompt-compile",
     "image_generate": "image-prompt-compile",
     "visual_review": "visual-review",

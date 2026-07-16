@@ -15,12 +15,15 @@ from video_generator.contracts import (
     NarrationScript,
     NarrationTimeline,
     OutputLanguage,
+    OutlineScene,
     RawRunConfig,
     ReviewFinding,
     ScriptScene,
+    StoryOutline,
     TimelineScene,
     TimedImageRequest,
     TimedVisualPlan,
+    VideoStyle,
     VisualShotMode,
     VoiceSettings,
     WordTiming,
@@ -75,7 +78,25 @@ def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> No
     assert models["visual_plan"] is TimedVisualPlan
     assert models["image_prompt_compile"] is TimedImageRequest
     assert assets["prompt_set_version"] == MULTI_FORMAT_PROMPT_SET_VERSION
-    assert assets["workflow_policy_version"] == 35
+    assert assets["workflow_policy_version"] == 41
+    assert assets["prompts"]["research"]["version"] == (
+        f"{MULTI_FORMAT_PROMPT_SET_VERSION}:research"
+    )
+    assert assets["prompts"]["script_draft"]["version"].endswith(
+        ":spoken-text-only-v1"
+    )
+    assert assets["prompts"]["review_story"]["version"].endswith(
+        ":spoken-script-scope-and-resolution-v1"
+    )
+    assert assets["prompts"]["review_spoken"]["version"].endswith(
+        ":spoken-script-scope-and-resolution-v1"
+    )
+    assert assets["prompts"]["review_constraints"]["version"].endswith(
+        ":scope-aware-brief-and-remotion-plan-v2"
+    )
+    assert "complete revised_script" in assets["prompts"]["review_constraints"][
+        "instructions"
+    ]
     claim_properties = assets["schemas"]["claim_inventory"]["$defs"]["ExtractedClaim"][
         "properties"
     ]
@@ -93,6 +114,286 @@ def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> No
     assert evidence_properties["limitations"]["items"]["maxLength"] == 240
     assert "ResearchFindingDraft" not in assets["schemas"]["research"]["$defs"]
     assert "urgent" in assets["prompts"]["script_draft"]["instructions"].lower()
+
+
+def test_visual_brief_constraints_are_routed_out_of_spoken_script() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.brief = CreativeBrief(
+        idea_direction="A fox finds a lantern.",
+        must_include=["a tiny amber lantern", "one quiet visual joke"],
+    )
+
+    assert engine._script_brief_must_include() == ["a tiny amber lantern"]
+    assert engine._script_brief_avoid() == []
+    assert WorkflowEngine._is_visual_brief_constraint("ruudulla näkyvä meemi")
+    assert not WorkflowEngine._is_visual_brief_constraint("an unexpected friendship")
+    assert not WorkflowEngine._is_visual_brief_constraint(
+        "make the cost visible in the fox's choice"
+    )
+    assert not WorkflowEngine._is_visual_brief_constraint("a visibly nervous fox")
+    assert not WorkflowEngine._is_visual_brief_constraint(
+        "tee seuraukset näkyviksi ketun valinnassa"
+    )
+    assert not WorkflowEngine._is_visual_brief_constraint("one last shot at redemption")
+    assert WorkflowEngine._is_visual_brief_constraint("one reaction shot")
+
+
+@pytest.mark.parametrize(
+    ("value", "narrative", "visual"),
+    [
+        (
+            "Tell the fox story and show a reaction GIF",
+            "Tell the fox story",
+            "show a reaction GIF",
+        ),
+        (
+            "Kerro ketun tarina ja näytä reaktio-GIF",
+            "Kerro ketun tarina",
+            "näytä reaktio-GIF",
+        ),
+        (
+            "Tell the fox story and show how friendship changes him",
+            "Tell the fox story and show how friendship changes him",
+            None,
+        ),
+        ("Show a reaction GIF", "Show a reaction GIF", None),
+        ("A visibly nervous fox finds courage", "A visibly nervous fox finds courage", None),
+    ],
+)
+def test_remotion_idea_direction_splits_only_a_trailing_visual_command(
+    value: str,
+    narrative: str,
+    visual: str | None,
+) -> None:
+    assert WorkflowEngine._split_remotion_idea_direction(value) == (narrative, visual)
+
+
+def test_remotion_routes_a_mixed_idea_direction_to_script_and_visual_plan() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(video_style=VideoStyle.REMOTION_EXPLAINER)
+    engine.brief = CreativeBrief(
+        idea_direction="Tell the fox story and show a reaction GIF",
+        must_include=["one quiet visual joke", "a tiny lantern"],
+        avoid=["avoid stock footage", "chosen-one plots"],
+    )
+
+    assert engine._script_idea_direction() == "Tell the fox story"
+    assert engine._script_review_brief_payload()["idea_direction"] == (
+        "Tell the fox story"
+    )
+    assert engine._editorial_brief_payload()["idea_direction"] == "Tell the fox story"
+    assert "show a reaction GIF" not in str(engine._editorial_brief_payload())
+    assert engine._research_query_candidates() == ["Tell the fox story"]
+    assert engine._remotion_visual_brief_constraints() == [
+        ("must-include", 0, "show a reaction GIF"),
+        ("must-include", 1, "one quiet visual joke"),
+        ("avoid", 1, "avoid stock footage"),
+    ]
+
+    engine.config.video_style = VideoStyle.STILL_IMAGE
+    assert engine._script_idea_direction() == engine.brief.idea_direction
+    assert engine._editorial_brief_payload()["idea_direction"] == engine.brief.idea_direction
+    assert engine._research_query_candidates() == [engine.brief.idea_direction]
+    assert engine._remotion_visual_brief_constraints() == []
+
+
+def test_story_and_spoken_review_payloads_exclude_visual_only_requirements() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(video_style=VideoStyle.REMOTION_EXPLAINER)
+    engine.brief = CreativeBrief(
+        idea_direction="A fox finds a lantern.",
+        must_include=["a tiny amber lantern", "one visible visual joke"],
+        avoid=["chosen-one plots", "avoid stock footage"],
+    )
+    outline = StoryOutline(
+        title="Fixture",
+        concept_summary="A winter story.",
+        scenes=[
+            OutlineScene(
+                scene_id="scene-001",
+                narrative_purpose="Introduce the fox.",
+                change="The fox finds warmth.",
+                emotional_beat="Relief",
+                visual_opportunity="The fox hides the lantern under a tiny leaf.",
+                provisional_seconds=6,
+            )
+        ],
+    )
+
+    brief_payload = engine._script_review_brief_payload()
+    outline_payload = engine._script_review_outline_payload(outline)
+
+    assert brief_payload["must_include"] == ["a tiny amber lantern"]
+    assert brief_payload["avoid"] == ["chosen-one plots"]
+    assert "visual_opportunity" not in outline_payload["scenes"][0]
+
+
+def test_brief_constraint_resolution_rechecks_only_the_complete_revised_script() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.workflow_policy_version = 39
+    engine.config = SimpleNamespace(
+        output_language=OutputLanguage.ENGLISH,
+        video_style=VideoStyle.REMOTION_EXPLAINER,
+    )
+    engine.brief = CreativeBrief(
+        idea_direction="A shy fox discovers a persistent lantern on a winter night."
+    )
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text=(
+                    "On the coldest night of winter, a shy fox discovered a tiny lantern "
+                    "that refused to go out."
+                ),
+                pause_after_seconds=0,
+            ),
+            ScriptScene(
+                scene_id="scene-002",
+                spoken_text="A shivering owl descended beside the fox.",
+                pause_after_seconds=0,
+            ),
+        ],
+    )
+    brief_finding = ReviewFinding(
+        finding_id="constraints:brief-idea-direction-001",
+        severity="blocking",
+        scene_id="scene-001",
+        evidence="The shy fox is missing.",
+        recommendation="Introduce the shy fox and the persistent lantern.",
+    )
+
+    brief_payload = engine._revision_finding_resolution_input(
+        finding=brief_finding,
+        original_spoken_text="A lantern appeared.",
+        revised_script=script,
+        scene_index=0,
+        allowed_factual_evidence=[],
+    )
+
+    assert brief_payload["resolution_scope"] == "complete-script-brief-constraint-v1"
+    assert "adjacent_context" not in brief_payload
+    assert "original_spoken_text" not in brief_payload
+    assert [
+        scene["scene_id"] for scene in brief_payload["revised_script"]["scenes"]
+    ] == ["scene-001", "scene-002"]
+
+    story_payload = engine._revision_finding_resolution_input(
+        finding=ReviewFinding(
+            finding_id="story:finding-001",
+            severity="minor",
+            scene_id="scene-001",
+            evidence="The transition is abrupt.",
+            recommendation="Smooth the transition.",
+        ),
+        original_spoken_text="A lantern appeared.",
+        revised_script=script,
+        scene_index=0,
+        allowed_factual_evidence=[],
+    )
+    assert story_payload["resolution_scope"] == "single-scene-finding-v1"
+    assert story_payload["adjacent_context"]["next_spoken_text"].startswith(
+        "A shivering owl"
+    )
+    assert "revised_script" not in story_payload
+
+
+def test_brief_constraint_repair_targets_a_feasible_explicit_replacement() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(video_style=VideoStyle.REMOTION_EXPLAINER)
+    engine.brief = CreativeBrief(
+        idea_direction=(
+            "On the coldest night of winter, a shy fox finds a tiny lantern that refuses "
+            "to go out"
+        )
+    )
+    finding = ReviewFinding(
+        finding_id="constraints:brief-idea-direction-001",
+        severity="blocking",
+        scene_id="scene-001",
+        evidence="The persistent light is missing.",
+        recommendation=(
+            "Revise scene-001 to: 'On the coldest night of winter, a shy fox found a tiny "
+            "amber lantern that refused to go out.'"
+        ),
+    )
+
+    assert engine._revision_finding_payload(finding)["brief_constraint"] == {
+        "kind": "idea-direction",
+        "constraint": engine.brief.idea_direction,
+    }
+    assert (
+        engine._revision_target_word_count(
+            findings=[finding],
+            scene_id="scene-001",
+            current_words=13,
+            minimum_words=8,
+            maximum_words=16,
+        )
+        == 16
+    )
+
+
+def test_subtractive_finding_does_not_expand_to_the_residual_maximum() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.brief = CreativeBrief(idea_direction="A fox finds a persistent lantern.")
+    finding = ReviewFinding(
+        finding_id="story:finding-001",
+        severity="major",
+        scene_id="scene-001",
+        evidence="The sentence repeats the same point.",
+        recommendation="Remove the repetition.",
+    )
+
+    assert (
+        engine._revision_target_word_count(
+            findings=[finding],
+            scene_id="scene-001",
+            current_words=13,
+            minimum_words=8,
+            maximum_words=16,
+        )
+        == 13
+    )
+
+
+def test_explicit_brief_replacement_parser_is_bounded_and_quote_tolerant() -> None:
+    curly = ReviewFinding(
+        finding_id="constraints:brief-idea-direction-001",
+        severity="blocking",
+        scene_id="scene-001",
+        evidence="The persistent light is missing.",
+        recommendation="Correction: revise scene-001 to: “The lantern stayed lit all night.”",
+    )
+    mismatched_scene = curly.model_copy(
+        update={"recommendation": "Revise scene-002 to: ‘The lantern stayed lit.’"}
+    )
+    ambiguous = curly.model_copy(
+        update={"recommendation": "Revise scene-001 to: 'One line' or 'another line'."}
+    )
+
+    assert (
+        WorkflowEngine._explicit_scene_replacement_word_count(
+            curly,
+            scene_id="scene-001",
+        )
+        == 6
+    )
+    assert (
+        WorkflowEngine._explicit_scene_replacement_word_count(
+            mismatched_scene,
+            scene_id="scene-001",
+        )
+        is None
+    )
+    assert (
+        WorkflowEngine._explicit_scene_replacement_word_count(
+            ambiguous,
+            scene_id="scene-001",
+        )
+        is None
+    )
 
 
 def test_host_requires_explicit_framing_when_fiction_brief_requests_it() -> None:

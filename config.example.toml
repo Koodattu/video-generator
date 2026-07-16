@@ -20,10 +20,25 @@ narration_pace = "standard" # slow, standard, or fast
 narration_delivery = ""
 audience = "family_safe_general"
 
+# still_image preserves the original generated-still workflow. remotion_explainer uses the fixed
+# eight-template, word-anchored Remotion renderer while keeping narration and models local.
+video_style = "still_image"
+
 # Built-in starting style. You may use another stable style ID and describe it below.
 style = "ms_paint_stick"
 style_description = ""
 motion_style = "static_cuts"
+
+# Remotion only: stock_preferred tries matching media-library files, Wikimedia Commons, then Pexels,
+# and falls back to the configured Image Backend. local_only never contacts stock asset providers.
+remotion_asset_policy = "stock_preferred"
+# CC BY-SA assets are excluded unless you explicitly accept the resulting ShareAlike obligations.
+remotion_allow_share_alike = false
+# Stop after retrieved/generated assets until a dashboard approval creates an immutable child Run.
+remotion_require_asset_approval = false
+# Evidence-page capture is disabled by default. Trust only exact parent hostnames you reviewed;
+# listed hosts also permit their subdomains. Example: ["wikipedia.org", "docs.python.org"]
+remotion_source_screenshot_hosts = []
 
 # Local inference may still use live search. Set this to true to forbid all network use.
 offline = false
@@ -45,6 +60,7 @@ visual_max_seconds = 25
 # scene_locked preserves one image per editorial Scene. cadenced creates a frame-aligned Shot plan
 # after narration and may generate several still images inside one Scene. A single cadenced plan is
 # currently capped at 72 generated Shots and oversized configurations are rejected before the Run.
+# remotion_explainer always resolves this to cadenced; the saved input remains explicit for stills.
 visual_shot_mode = "scene_locked"
 shot_target_seconds = 3
 shot_min_seconds = 2
@@ -75,6 +91,8 @@ elevenlabs_voice_id = ""
 # research = "local:llama-server"
 # script_draft = "openai:gpt-5.6-terra"
 # image_prompt_compile = "local:llama-server"
+# remotion_direction = "local:llama-server"          # One small creative decision per Shot.
+# remotion_asset_select = "local:llama-server"       # One supplied candidate_id only.
 # image_generate = "local:flux.2-klein-4b"
 # image_generate = "local:z-image-turbo"             # Native Windows T2I challenger.
 # image_generate = "local:ideogram-4-nf4"             # Gated noncommercial NF4 challenger.

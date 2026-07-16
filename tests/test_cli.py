@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from video_generator.cli import _earliest_frozen_impact, build_parser
+from video_generator.cli import _configure_console_output, _earliest_frozen_impact, build_parser
 from video_generator.prompting import build_frozen_assets
 
 
@@ -67,6 +67,14 @@ def test_backend_descriptor_set_order_does_not_invalidate_rerun(resolved_config)
     assert _earliest_frozen_impact(old, new, resolved_config) is None
 
 
+def test_remotion_runtime_change_invalidates_from_images(resolved_config) -> None:
+    old = {"runtime_snapshot": {"remotion": {"media_library_hash": "old"}}}
+    new = deepcopy(old)
+    new["runtime_snapshot"]["remotion"]["media_library_hash"] = "new"
+
+    assert _earliest_frozen_impact(old, new, resolved_config) == "images"
+
+
 def test_frozen_backend_descriptor_sets_are_sorted(resolved_config) -> None:
     assets = build_frozen_assets(resolved_config)
 
@@ -76,3 +84,18 @@ def test_frozen_backend_descriptor_sets_are_sorted(resolved_config) -> None:
         assert descriptor["allowed_usage_purposes"] == sorted(
             descriptor["allowed_usage_purposes"]
         )
+
+
+def test_cli_console_replaces_unencodable_output(monkeypatch) -> None:
+    calls: list[dict[str, str]] = []
+
+    class _Stream:
+        def reconfigure(self, **kwargs: str) -> None:
+            calls.append(kwargs)
+
+    monkeypatch.setattr("video_generator.cli.sys.stdout", _Stream())
+    monkeypatch.setattr("video_generator.cli.sys.stderr", _Stream())
+
+    _configure_console_output()
+
+    assert calls == [{"errors": "replace"}, {"errors": "replace"}]

@@ -157,6 +157,8 @@
               <label class="field"><span>Content mode</span><select id="content-mode"><option value="fiction">Fiction</option><option value="factual">Factual + evidence gate</option></select></label>
               <label class="field"><span>Editorial format</span><select id="content-format"><option value="narrative">Narrative</option><option value="explainer">Explainer</option><option value="mythbuster">Myth-buster</option></select></label>
               <label class="field"><span>Narration pace</span><select id="narration-pace"><option value="slow">Slow</option><option value="standard">Standard</option><option value="fast">Fast</option></select></label>
+              <label class="field"><span>Video renderer</span><select id="video-style"><option value="still_image">Still-image voiceover</option><option value="remotion_explainer">Remotion explainer</option></select></label>
+              <label class="field"><span>Remotion assets</span><select id="remotion-asset-policy"><option value="stock_preferred">Local → Commons/Pexels → generated</option><option value="local_only">Local library → generated</option></select></label>
               <label class="field"><span>Duration <small>seconds</small></span><input id="duration-seconds" class="numeric" type="number" min="10" max="3600" step="1"></label>
               <label class="field"><span>Cost ceiling <small>USD</small></span><input id="cost-ceiling" class="numeric" type="number" min="0" max="10000" step="0.01"></label>
               <label class="field"><span>Idea candidates</span><input id="idea-candidates" class="numeric" type="number" min="1" max="10" step="1"></label>
@@ -165,15 +167,18 @@
               <label class="field"><span>Image target <small>seconds</small></span><input id="shot-target" class="numeric" type="number" min="2" max="120" step="0.5"></label>
               <label class="field"><span>Research queries</span><input id="research-queries" class="numeric" type="number" min="0" max="20" step="1"></label>
               <label class="field"><span>Research sources</span><input id="research-sources" class="numeric" type="number" min="0" max="50" step="1"></label>
-              <label class="field"><span>Visual style ID</span><input id="style-id" maxlength="120" placeholder="editorial_doodle" required></label>
+              <label class="field"><span>Image style ID <small>still/fallback</small></span><input id="style-id" maxlength="120" placeholder="editorial_doodle" required></label>
               <label class="field field-wide"><span>Style direction</span><input id="style-description" maxlength="1000" placeholder="Minimal black ink doodles, white paper, one red accent, no text"></label>
+              <label class="field field-wide"><span>Trusted screenshot hosts <small>comma-separated</small></span><input id="remotion-screenshot-hosts" maxlength="4000" placeholder="wikipedia.org, docs.python.org"></label>
               <label class="field field-wide"><span>Narration direction</span><input id="narration-delivery" maxlength="500" placeholder="Authoritative and energetic, but never breathless or theatrical"></label>
             </div>
             <div class="toggle-grid">
               <label class="toggle-card"><input id="offline" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Offline only</strong><small>Reject all active cloud backends.</small></span></label>
               <label class="toggle-card"><input id="captions-enabled" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Captions</strong><small>Generate a selectable sidecar.</small></span></label>
-              <label class="toggle-card"><input id="animated-captions" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Animated captions</strong><small>Also render a styled burned version.</small></span></label>
+              <label class="toggle-card"><input id="animated-captions" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Animated captions</strong><small>Still-image Runs also render a styled burned version; Remotion uses kinetic word captions.</small></span></label>
               <label class="toggle-card"><input id="music-enabled" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Music bed</strong><small>Generate and fit instrumental music.</small></span></label>
+              <label class="toggle-card"><input id="remotion-share-alike" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Allow ShareAlike media</strong><small>Opt in to compatible Commons assets and obligations.</small></span></label>
+              <label class="toggle-card"><input id="remotion-asset-approval" type="checkbox"><span class="toggle-switch" aria-hidden="true"></span><span><strong>Require media approval</strong><small>Pause after assets; approval continues in an immutable child Run.</small></span></label>
             </div>
           </section>
 

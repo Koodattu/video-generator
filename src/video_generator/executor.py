@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,12 +45,194 @@ class StructuredExecution:
     schema_hash: str
 
 
+def _bounded_remotion_text(value: str, maximum: int) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= maximum:
+        return compact
+    prefix = compact[:maximum]
+    if " " in prefix:
+        prefix = prefix.rsplit(" ", 1)[0]
+    return prefix.rstrip(" ,;:-")
+
+
+def _is_contiguous_remotion_copy(value: str, narration_excerpt: str) -> bool:
+    candidate = re.findall(r"\w+", value.casefold(), flags=re.UNICODE)
+    source = re.findall(r"\w+", narration_excerpt.casefold(), flags=re.UNICODE)
+    if not candidate:
+        return True
+    width = len(candidate)
+    return any(
+        source[index : index + width] == candidate
+        for index in range(len(source) - width + 1)
+    )
+
+
+def _canonicalize_remotion_direction(
+    input_data: dict[str, Any],
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = copy.deepcopy(data)
+    templates = {
+        "kinetic_hook",
+        "headline_zoom",
+        "source_screenshot",
+        "code_reveal",
+        "diagram_flow",
+        "comparison_split",
+        "meme_cutaway",
+        "conclusion",
+    }
+    asset_kinds = {
+        "none",
+        "stock_image",
+        "stock_video",
+        "gif",
+        "meme",
+        "source_screenshot",
+        "generated_image",
+    }
+    template = normalized.get("template")
+    asset_kind = normalized.get("asset_kind")
+    headline = normalized.get("headline")
+    supporting_text = normalized.get("supporting_text")
+    body_lines = normalized.get("body_lines")
+    asset_query = normalized.get("asset_query")
+    if (
+        template not in templates
+        or asset_kind not in asset_kinds
+        or not isinstance(headline, str)
+        or not isinstance(supporting_text, str)
+        or not isinstance(body_lines, list)
+        or not all(isinstance(line, str) for line in body_lines)
+        or not isinstance(asset_query, str)
+    ):
+        return normalized
+
+    shot_position = input_data.get("shot_position")
+    shot_count = input_data.get("shot_count")
+    positioned = (
+        isinstance(shot_position, int)
+        and isinstance(shot_count, int)
+        and shot_count >= 2
+        and 1 <= shot_position <= shot_count
+    )
+    if positioned and shot_position == 1:
+        template = "kinetic_hook"
+    elif positioned and shot_position == shot_count:
+        template = "conclusion"
+    elif positioned and template in {"kinetic_hook", "conclusion"}:
+        template = "headline_zoom"
+
+    headline = _bounded_remotion_text(headline, 80)
+    supporting_text = _bounded_remotion_text(supporting_text, 160)
+    body_lines = [
+        bounded
+        for line in body_lines
+        if line.strip()
+        if (bounded := _bounded_remotion_text(line, 120))
+    ]
+    asset_query = _bounded_remotion_text(asset_query, 180)
+    narration_excerpt = str(input_data.get("narration_excerpt", ""))
+    if not headline:
+        headline = _bounded_remotion_text(narration_excerpt, 80)
+
+    def downgrade_to_headline() -> None:
+        nonlocal template, body_lines, asset_kind, asset_query
+        template = "headline_zoom"
+        body_lines = []
+        asset_kind = "none"
+        asset_query = ""
+
+    if template == "code_reveal":
+        if len(body_lines) < 2:
+            downgrade_to_headline()
+        else:
+            body_lines = [_bounded_remotion_text(line, 70) for line in body_lines[:8]]
+    elif template == "diagram_flow":
+        if len(body_lines) < 2:
+            downgrade_to_headline()
+        else:
+            body_lines = [_bounded_remotion_text(line, 32) for line in body_lines[:5]]
+    elif template == "comparison_split":
+        if len(body_lines) < 2:
+            downgrade_to_headline()
+        else:
+            body_lines = [_bounded_remotion_text(line, 60) for line in body_lines[:2]]
+    elif template == "source_screenshot":
+        if input_data.get("content_mode") != "factual" or not input_data.get("source_options"):
+            downgrade_to_headline()
+        else:
+            asset_kind = "source_screenshot"
+            asset_query = ""
+    elif template == "meme_cutaway":
+        if asset_kind not in {"meme", "gif", "stock_image"} or not asset_query:
+            downgrade_to_headline()
+
+    body_templates = {"code_reveal", "diagram_flow", "comparison_split"}
+    supporting_templates = {
+        "kinetic_hook",
+        "headline_zoom",
+        "diagram_flow",
+        "meme_cutaway",
+        "conclusion",
+    }
+    asset_templates = {
+        "kinetic_hook",
+        "headline_zoom",
+        "source_screenshot",
+        "meme_cutaway",
+    }
+    if template not in body_templates:
+        body_lines = []
+    if template not in supporting_templates:
+        supporting_text = ""
+    if template not in asset_templates:
+        asset_kind = "none"
+        asset_query = ""
+    elif asset_kind == "source_screenshot" and template != "source_screenshot":
+        asset_kind = "none"
+        asset_query = ""
+    elif asset_kind in {"none", "source_screenshot"}:
+        asset_query = ""
+    elif not asset_query:
+        if template == "meme_cutaway":
+            downgrade_to_headline()
+        else:
+            asset_kind = "none"
+
+    if input_data.get("content_mode") == "factual":
+        if not _is_contiguous_remotion_copy(headline, narration_excerpt):
+            headline = _bounded_remotion_text(narration_excerpt, 80)
+        if supporting_text and not _is_contiguous_remotion_copy(
+            supporting_text, narration_excerpt
+        ):
+            supporting_text = ""
+        if template in body_templates and any(
+            not _is_contiguous_remotion_copy(line, narration_excerpt)
+            for line in body_lines
+        ):
+            downgrade_to_headline()
+
+    normalized.update(
+        template=template,
+        headline=headline,
+        supporting_text=supporting_text,
+        body_lines=body_lines,
+        asset_kind=asset_kind,
+        asset_query=asset_query,
+    )
+    return normalized
+
+
 def _canonicalize_host_owned_fields(
     task_id: str,
     input_data: dict[str, Any],
     data: dict[str, Any],
 ) -> dict[str, Any]:
     normalized = copy.deepcopy(data)
+
+    if task_id == "remotion_direction":
+        normalized = _canonicalize_remotion_direction(input_data, normalized)
 
     if task_id == "ideate":
         candidates = normalized.get("candidates")
@@ -96,6 +279,7 @@ def _canonicalize_host_owned_fields(
         not in {
             "single-finding-resolution-v1",
             "single-brief-constraint-v1",
+            "single-remotion-plan-constraint-v1",
         }
     ):
         review_type = review_types[task_id]
@@ -577,6 +761,23 @@ class TaskExecutor:
                         "direction."
                         + word_count_guidance
                     )
+                repair_input_data = {
+                    "invalid_output": result.data,
+                    "validation_errors": errors,
+                }
+            elif (
+                set(request.output_schema.get("properties", {})) == {"spoken_text"}
+                and any(
+                    validation_error.get("type") == "spoken_text_host_field"
+                    for validation_error in errors
+                )
+            ):
+                repair_instructions = (
+                    "Repair only the supplied invalid spoken_text and return corrected JSON with "
+                    "exactly the single spoken_text field. Remove every host schema field label and "
+                    "its leaked value. Preserve all actual narration words, facts, events, intent, "
+                    "language, and order. Return only words that should be spoken aloud."
+                )
                 repair_input_data = {
                     "invalid_output": result.data,
                     "validation_errors": errors,

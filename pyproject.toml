@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "video-generator"
 version = "0.1.0"
-description = "Local-first CLI for narrated still-image video generation"
+description = "Local-first, AI-directed narrated video generation with still-image and Remotion renderers"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { file = "LICENSE" }
@@ -31,9 +31,17 @@ video-generator = "video_generator.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/video_generator"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"remotion/package.json" = "video_generator/remotion/package.json"
+"remotion/package-lock.json" = "video_generator/remotion/package-lock.json"
+"remotion/tsconfig.json" = "video_generator/remotion/tsconfig.json"
+"remotion/src" = "video_generator/remotion/src"
+"remotion/scripts" = "video_generator/remotion/scripts"
+
 [tool.hatch.build.targets.sdist]
 include = [
   "/src",
+  "/remotion",
   "/tests",
   "/README.md",
   "/LICENSE",

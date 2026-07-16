@@ -7,12 +7,15 @@ import shutil
 import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Sequence
+from urllib.parse import urlsplit
 
 from langdetect import DetectorFactory, LangDetectException, detect
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .contracts import (
     AlignmentRequest,
+    AnchoredWord,
+    AssetRights,
     BackendDescriptor,
     BriefConstraintAssessment,
     CaptionTrack,
@@ -42,8 +45,21 @@ from .contracts import (
     MusicRequest,
     NarrationScript,
     NarrationTimeline,
+    OutputLanguage,
     PUBLIC_STAGES,
     Quality,
+    RemotionAsset,
+    RemotionAssetBundle,
+    RemotionAssetChoice,
+    RemotionAssetKind,
+    RemotionAssetRequest,
+    RemotionAssetRequestSet,
+    RemotionEditPlan,
+    RemotionEditShot,
+    RemotionRenderPlan,
+    RemotionShotDirection,
+    RemotionTemplate,
+    RemotionTransitionPreset,
     RenderPlan,
     RenderScene,
     ResearchPack,
@@ -68,8 +84,10 @@ from .contracts import (
     VisualPlan,
     VisualReviewItem,
     VisualReviewReport,
+    VideoStyle,
     VisualShotMode,
     WordTiming,
+    validate_spoken_text_only,
 )
 from .errors import BackendError, ErrorKind, MediaError, VideoGeneratorError
 from .executor import StructuredExecution, TaskExecutor, result_usage
@@ -86,6 +104,7 @@ from .media import (
     delivery_manifest,
     duration_is_accepted,
     fit_music,
+    finalize_rendered_video,
     normalize_audio,
     normalize_image,
     qc_video,
@@ -98,6 +117,21 @@ from .prompting import PromptLibrary
 from .profiles import image_generation_dimensions
 from .provenance import verify_runtime_snapshot
 from .registry import BackendRegistry
+from .remotion_assets import (
+    AssetCandidate,
+    build_asset_record,
+    find_asset_candidates,
+    materialize_candidate,
+    normalize_asset_media,
+    write_asset_credits,
+)
+from .remotion_renderer import (
+    build_remotion_manifest,
+    capture_source_screenshot,
+    manifest_reference,
+    remotion_motion_for_template,
+    render_remotion_video,
+)
 from .run_store import RunStore
 from .schema import restricted_json_schema
 from .util import (
@@ -111,7 +145,7 @@ from .util import (
 
 
 INTERNAL_REVISION = "media-workflow-v9"
-MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v53"
+MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v63"
 
 HOST_LEXICAL_POLICY_PREFIX = "Host lexical support policy"
 HOST_SELF_CONTAINED_POLICY_PREFIX = "Host self-contained claim policy"
@@ -246,6 +280,7 @@ HOST_OWNED_NONFACTUAL_TRANSITIONS = frozenset(
 LEGACY_INTERNAL_REVISION = "media-workflow-v8"
 MAX_AUTHORED_SCENE_PAUSE_SECONDS = 0.75
 DELIVERY_RATE_FIT_MARGIN = 0.002
+NET_TEMPO_MAXIMUM_RATE_MARGIN = 0.01
 MINIMUM_NET_NARRATION_TEMPO = 0.75
 MAXIMUM_NET_NARRATION_TEMPO = 1.35
 DURATION_REPAIR_AGGREGATE_WORD_TOLERANCE = 1
@@ -301,10 +336,20 @@ class ExpandedSceneText(WorkflowModel):
     scene_id: str
     spoken_text: str = Field(min_length=1, max_length=10000)
 
+    @field_validator("spoken_text")
+    @classmethod
+    def validate_spoken_text(cls, value: str) -> str:
+        return validate_spoken_text_only(value)
+
 
 class ReplacementText(BaseModel):
     model_config = ConfigDict(extra="forbid")
     spoken_text: str = Field(min_length=1, max_length=10000)
+
+    @field_validator("spoken_text")
+    @classmethod
+    def validate_spoken_text(cls, value: str) -> str:
+        return validate_spoken_text_only(value)
 
 
 class FindingResolution(BaseModel):
@@ -487,9 +532,41 @@ class MusicBundle(WorkflowModel):
 
 
 class RenderBundle(WorkflowModel):
-    plan: RenderPlan
+    plan: RenderPlan | RemotionRenderPlan
     primary_video: MediaReference
     burned_video: MediaReference | None = None
+
+
+class RemotionCredits(WorkflowModel):
+    credits_json: MediaReference
+    credits_markdown: MediaReference
+
+
+class RemotionVisualReviewBundle(WorkflowModel):
+    reviewed: bool
+    assets: RemotionAssetBundle
+
+
+class RemotionAssetReviewDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    passed: bool
+    hard_failure: bool
+    failures: list[str] = Field(default_factory=list, max_length=8)
+    regeneration_instruction: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "RemotionAssetReviewDecision":
+        if self.passed and (
+            self.hard_failure or self.failures or self.regeneration_instruction.strip()
+        ):
+            raise ValueError("a passed Remotion review cannot contain failures or repair text")
+        if not self.passed and not self.failures:
+            raise ValueError("a failed Remotion review requires failures")
+        if not self.passed and not self.hard_failure and not self.regeneration_instruction.strip():
+            raise ValueError("a soft Remotion review failure requires a regeneration instruction")
+        if self.hard_failure and self.regeneration_instruction.strip():
+            raise ValueError("a hard Remotion review failure cannot request image regeneration")
+        return self
 
 
 def _usage_list(values: Iterable[UsageRecord | None]) -> list[UsageRecord]:
@@ -509,6 +586,7 @@ class WorkflowEngine:
         self.store = store
         self.config = store.config
         self.brief = store.brief
+        self.environment = dict(environment)
         verify_runtime_snapshot(self.config, store.frozen_assets)
         self.project_root = Path(self.config.project_root).resolve()
         self.stop_after = stop_after
@@ -557,6 +635,7 @@ class WorkflowEngine:
             if self._stop("research"):
                 return None
             authoring_research = self._authoring_research_payload(research)
+            editorial_brief = self._editorial_brief_payload()
             explainer_format = self.config.content_format is not ContentFormat.NARRATIVE
             candidate_model: type[CandidateSetLike] = (
                 ExplainerCandidateSet if explainer_format else CandidateSet
@@ -565,7 +644,7 @@ class WorkflowEngine:
                 "ideate",
                 "ideate",
                 {
-                    "brief": self.brief.model_dump(mode="json"),
+                    "brief": editorial_brief,
                     "research_pack": authoring_research,
                     "candidate_count": self.config.idea_candidates,
                     "duration_seconds": self.config.duration_seconds,
@@ -589,7 +668,7 @@ class WorkflowEngine:
             if self.workflow_policy_version >= 3:
                 selection_input.update(
                     {
-                        "brief": self.brief.model_dump(mode="json"),
+                        "brief": editorial_brief,
                         "research_pack": authoring_research,
                         "audience": self.config.audience,
                     }
@@ -611,7 +690,7 @@ class WorkflowEngine:
             )
             outline_model: type[OutlineLike] = ExplainerOutline if explainer_format else StoryOutline
             outline_input = {
-                "brief": self.brief.model_dump(mode="json"),
+                "brief": editorial_brief,
                 "story_concept": chosen.model_dump(mode="json"),
                 "selection": selection.model_dump(mode="json"),
                 "duration_seconds": self.config.duration_seconds,
@@ -637,7 +716,7 @@ class WorkflowEngine:
                 return None
             script_word_plan = self._script_word_plan(outline)
             draft_input = {
-                "brief": self.brief.model_dump(mode="json"),
+                "brief": editorial_brief,
                 "outline": outline.model_dump(mode="json"),
                 "output_language": self.config.output_language.value,
                 "duration_seconds": self.config.duration_seconds,
@@ -699,7 +778,7 @@ class WorkflowEngine:
                 return None
             reviews = [story_review, spoken_review, constraint_review]
             revision_input = {
-                "brief": self.brief.model_dump(mode="json"),
+                "brief": editorial_brief,
                 "outline": outline.model_dump(mode="json"),
                 "script": draft.model_dump(mode="json"),
                 "review_reports": [review.model_dump(mode="json") for review in reviews],
@@ -778,6 +857,19 @@ class WorkflowEngine:
                 and isinstance(research, FactualResearchPack)
                 else None
             )
+            if self.config.video_style is VideoStyle.REMOTION_EXPLAINER:
+                rendered = self._remotion_visual_pipeline(
+                    narration=narration,
+                    captions=captions,
+                    outline=outline,
+                    research=research,
+                    factual_grounding=factual_visual_grounding,
+                )
+                if rendered is None:
+                    return None
+                delivery = self._delivery(rendered, captions)
+                self.store.set_status("complete")
+                return delivery
             visual_plan_input = {
                 "script": narration.script.model_dump(mode="json"),
                 "timeline": narration.timeline.model_dump(mode="json"),
@@ -1085,14 +1177,25 @@ class WorkflowEngine:
         *,
         research: ResearchPack | FactualResearchPack,
     ) -> ReviewReport:
+        script_only_review = task_id in {"review_story", "review_spoken"}
         input_data = {
-            "brief": self.brief.model_dump(mode="json"),
-            "outline": outline.model_dump(mode="json"),
+            "brief": (
+                self._script_review_brief_payload()
+                if script_only_review
+                else self.brief.model_dump(mode="json")
+            ),
+            "outline": (
+                self._script_review_outline_payload(outline)
+                if script_only_review
+                else outline.model_dump(mode="json")
+            ),
             "script": script.model_dump(mode="json"),
             "duration_seconds": self.config.duration_seconds,
             "audience": self.config.audience,
             "output_language": self.config.output_language.value,
         }
+        if script_only_review:
+            input_data["review_scope"] = "spoken-script-only-v1"
         if self.config.content_mode is ContentMode.FACTUAL:
             input_data["research_pack"] = self._authoring_research_payload(research)
         if self.workflow_policy_version >= 34 and task_id == "review_constraints":
@@ -1195,7 +1298,7 @@ class WorkflowEngine:
         findings = list(general.findings)
         all_usage = list(usage)
         brief_constraints = [
-            ("idea-direction", 1, self.brief.idea_direction),
+            ("idea-direction", 1, self._script_idea_direction()),
             *(
                 ("must-include", index, value)
                 for index, value in enumerate(self.brief.must_include, start=1)
@@ -1224,6 +1327,10 @@ class WorkflowEngine:
         ]
         for kind, index, constraint in brief_constraints:
             if not constraint.strip():
+                continue
+            if kind in {"must-include", "avoid"} and self._is_visual_brief_constraint(
+                constraint
+            ):
                 continue
             item_id = f"brief-{kind}-{index:03d}"
 
@@ -1296,6 +1403,187 @@ class WorkflowEngine:
             usage=all_usage,
         )
         return ReviewReport.model_validate(promoted)
+
+    @staticmethod
+    def _is_visual_brief_constraint(constraint: str) -> bool:
+        return re.search(
+            r"\b(?:visual|image|picture|illustration|drawing|diagram|chart|meme|gif|"
+            r"screenshot|animation|camera|footage)\b"
+            r"|\b(?:camera|video|establishing|reaction|close-up|wide) shot\b"
+            r"|\bon[- ]screen\b|\bstock (?:image|video|footage)\b"
+            r"|\b(?:visuaalinen|kuvi(?:ssa|in|sta|en)|ruudulla|piirros|kaavio|"
+            r"meemi|kuvakaappaus|animaatio|kamera)\b",
+            constraint,
+            flags=re.IGNORECASE,
+        ) is not None
+
+    @classmethod
+    def _split_remotion_idea_direction(cls, value: str) -> tuple[str, str | None]:
+        match = re.fullmatch(
+            r"\s*(?P<narrative>.+?)"
+            r"(?:\s+(?:and|then|while|ja|sekä|sitten)\s+|\s*[.;]\s*)"
+            r"(?P<visual>(?:show|use|display|include|insert|add|cut\s+to|overlay|"
+            r"näytä|käytä|lisää|leikkaa)\b.+)\s*",
+            value,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match is None:
+            return value, None
+        narrative = match.group("narrative").strip()
+        visual = match.group("visual").strip()
+        if not narrative or not cls._is_visual_brief_constraint(visual):
+            return value, None
+        return narrative, visual
+
+    def _script_idea_direction(self) -> str:
+        if self.config.video_style is not VideoStyle.REMOTION_EXPLAINER:
+            return self.brief.idea_direction
+        narrative, _ = self._split_remotion_idea_direction(self.brief.idea_direction)
+        return narrative
+
+    def _remotion_visual_brief_constraints(self) -> list[tuple[str, int, str]]:
+        constraints: list[tuple[str, int, str]] = []
+        if self.config.video_style is not VideoStyle.REMOTION_EXPLAINER:
+            return constraints
+        _, visual_direction = self._split_remotion_idea_direction(
+            self.brief.idea_direction
+        )
+        if visual_direction:
+            constraints.append(("must-include", 0, visual_direction))
+        constraints.extend(
+            ("must-include", index, constraint)
+            for index, constraint in enumerate(self.brief.must_include, start=1)
+            if self._is_visual_brief_constraint(constraint)
+        )
+        constraints.extend(
+            ("avoid", index, constraint)
+            for index, constraint in enumerate(self.brief.avoid, start=1)
+            if self._is_visual_brief_constraint(constraint)
+        )
+        return constraints
+
+    def _script_brief_must_include(self) -> list[str]:
+        return [
+            constraint
+            for constraint in self.brief.must_include
+            if not self._is_visual_brief_constraint(constraint)
+        ]
+
+    def _script_brief_avoid(self) -> list[str]:
+        return [
+            constraint
+            for constraint in self.brief.avoid
+            if not self._is_visual_brief_constraint(constraint)
+        ]
+
+    def _editorial_brief_payload(self) -> dict[str, Any]:
+        payload = self.brief.model_dump(mode="json")
+        if self.config.video_style is VideoStyle.REMOTION_EXPLAINER:
+            payload["idea_direction"] = self._script_idea_direction()
+            payload["must_include"] = self._script_brief_must_include()
+            payload["avoid"] = self._script_brief_avoid()
+        return payload
+
+    def _script_review_brief_payload(self) -> dict[str, Any]:
+        payload = self.brief.model_dump(mode="json")
+        payload["idea_direction"] = self._script_idea_direction()
+        payload["must_include"] = self._script_brief_must_include()
+        payload["avoid"] = self._script_brief_avoid()
+        return payload
+
+    @staticmethod
+    def _script_review_outline_payload(outline: OutlineLike) -> dict[str, Any]:
+        payload = outline.model_dump(mode="json")
+        for scene in payload.get("scenes", []):
+            if isinstance(scene, dict):
+                scene.pop("visual_opportunity", None)
+        return payload
+
+    def _brief_constraint_for_finding(
+        self,
+        finding: ReviewFinding,
+    ) -> dict[str, str] | None:
+        prefix = "constraints:brief-"
+        if not finding.finding_id.startswith(prefix):
+            return None
+        suffix = finding.finding_id[len(prefix) :]
+        if suffix == "idea-direction-001":
+            return {
+                "kind": "idea-direction",
+                "constraint": self._script_idea_direction(),
+            }
+        match = re.fullmatch(r"(?P<kind>must-include|avoid)-(?P<index>\d{3})", suffix)
+        if match is None:
+            return None
+        values = (
+            self.brief.must_include
+            if match.group("kind") == "must-include"
+            else self.brief.avoid
+        )
+        index = int(match.group("index")) - 1
+        if not 0 <= index < len(values):
+            return None
+        return {
+            "kind": match.group("kind"),
+            "constraint": values[index],
+        }
+
+    def _revision_finding_payload(self, finding: ReviewFinding) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "severity": finding.severity,
+            "evidence": finding.evidence,
+            "recommendation": finding.recommendation,
+        }
+        brief_constraint = self._brief_constraint_for_finding(finding)
+        if brief_constraint is not None:
+            payload["brief_constraint"] = brief_constraint
+        return payload
+
+    @staticmethod
+    def _explicit_scene_replacement_word_count(
+        finding: ReviewFinding,
+        *,
+        scene_id: str,
+    ) -> int | None:
+        if not finding.finding_id.startswith("constraints:brief-"):
+            return None
+        match = re.fullmatch(
+            r"\s*.*?\b(?P<scene>scene-\d{3})\b.*?:\s*"
+            r"(?P<quoted>'[^']+'|\"[^\"]+\"|‘[^’]+’|“[^”]+”|«[^»]+»)\s*\.?\s*",
+            finding.recommendation,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match is None or match.group("scene") != scene_id:
+            return None
+        suggested_text = match.group("quoted")[1:-1].strip()
+        if not suggested_text:
+            return None
+        return len(suggested_text.split())
+
+    def _revision_target_word_count(
+        self,
+        *,
+        findings: Sequence[ReviewFinding],
+        scene_id: str,
+        current_words: int,
+        minimum_words: int,
+        maximum_words: int,
+    ) -> int:
+        target = min(max(current_words, minimum_words), maximum_words)
+        suggested_counts = [
+            count
+            for finding in findings
+            if (
+                count := self._explicit_scene_replacement_word_count(
+                    finding,
+                    scene_id=scene_id,
+                )
+            )
+            is not None
+        ]
+        if suggested_counts:
+            return min(max(max(suggested_counts), minimum_words), maximum_words)
+        return target
 
     def _has_brief_fiction_framing_finding(
         self,
@@ -3094,11 +3382,11 @@ class WorkflowEngine:
                     ),
                 },
                 "brief_constraints": {
-                    "idea_direction": self.brief.idea_direction,
+                    "idea_direction": self._script_idea_direction(),
                     "tone": self.brief.tone,
                     "themes": self.brief.themes,
-                    "must_include": self.brief.must_include,
-                    "avoid": self.brief.avoid,
+                    "must_include": self._script_brief_must_include(),
+                    "avoid": self._script_brief_avoid(),
                     "audience": self.config.audience,
                 },
                 "available_factual_evidence": available_scene_evidence,
@@ -4392,10 +4680,12 @@ class WorkflowEngine:
         max_output_tokens: int = 8000,
         instruction_suffix: str = "",
         target_image_backend: str | None = None,
+        media_inputs: list[Path] | None = None,
     ) -> tuple[Any, list[UsageRecord]]:
         cache_input = {
             "input_data": input_data,
             "instruction_suffix": instruction_suffix.strip(),
+            "media_sha256": [sha256_file(path) for path in media_inputs or []],
         }
         metadata = self._stage_metadata(
             stage=stage,
@@ -4421,6 +4711,7 @@ class WorkflowEngine:
             invariant=invariant,
             instruction_suffix=instruction_suffix,
             target_image_backend=target_image_backend,
+            media_inputs=media_inputs,
         )
         atomic_write_json(workspace.work_dir / "provider-response.json", execution.result.raw_response)
         usage = _usage_list([execution.result.usage])
@@ -5835,6 +6126,52 @@ class WorkflowEngine:
         )
         return FactualRevisedScript.model_validate(promoted)
 
+    def _revision_finding_resolution_input(
+        self,
+        *,
+        finding: ReviewFinding,
+        original_spoken_text: str,
+        revised_script: NarrationScript,
+        scene_index: int,
+        allowed_factual_evidence: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        finding_payload = self._revision_finding_payload(finding)
+        revised_spoken_text = revised_script.scenes[scene_index].spoken_text
+        if (
+            self.workflow_policy_version >= 38
+            and finding.finding_id.startswith("constraints:brief-")
+        ):
+            return {
+                "review_strategy": "single-finding-resolution-v1",
+                "resolution_scope": "complete-script-brief-constraint-v1",
+                "finding": finding_payload,
+                "revised_script": revised_script.model_dump(mode="json"),
+                "output_language": self.config.output_language.value,
+            }
+        payload = {
+            "review_strategy": "single-finding-resolution-v1",
+            "finding": finding_payload,
+            "original_spoken_text": original_spoken_text,
+            "revised_spoken_text": revised_spoken_text,
+            "adjacent_context": {
+                "previous_spoken_text": (
+                    revised_script.scenes[scene_index - 1].spoken_text
+                    if scene_index > 0
+                    else ""
+                ),
+                "next_spoken_text": (
+                    revised_script.scenes[scene_index + 1].spoken_text
+                    if scene_index + 1 < len(revised_script.scenes)
+                    else ""
+                ),
+            },
+            "allowed_factual_evidence": allowed_factual_evidence,
+            "output_language": self.config.output_language.value,
+        }
+        if self.workflow_policy_version >= 38:
+            payload["resolution_scope"] = "single-scene-finding-v1"
+        return payload
+
     def _scene_local_revision_stage(
         self,
         revision_input: dict[str, Any],
@@ -5867,7 +6204,11 @@ class WorkflowEngine:
                     if self.workflow_policy_version >= 30
                     else "single-scene-semantic-replacement-v3-protected-host-fit"
                 ),
-                "finding_resolution_strategy": "single-finding-resolution-v1",
+                "finding_resolution_strategy": (
+                    "scope-aware-finding-resolution-v2"
+                    if self.workflow_policy_version >= 38
+                    else "single-finding-resolution-v1"
+                ),
                 "factual_repair_strategy": (
                     "host-lexical-canonical-sentence-repair-v1"
                     if isinstance(research, FactualResearchPack)
@@ -6058,9 +6399,12 @@ class WorkflowEngine:
                 minimum_words <= maximum_words,
                 f"Script Revision calculated an empty word range for {scene.scene_id}",
             )
-            target_words = min(
-                max(current_scene_words, minimum_words),
-                maximum_words,
+            target_words = self._revision_target_word_count(
+                findings=findings,
+                scene_id=scene.scene_id,
+                current_words=current_scene_words,
+                minimum_words=minimum_words,
+                maximum_words=maximum_words,
             )
             item_input = {
                 "revision_strategy": "single-scene-replacement-v1",
@@ -6076,18 +6420,11 @@ class WorkflowEngine:
                     ),
                 },
                 "outline_scene": outline_scene.model_dump(mode="json"),
-                "findings": [
-                    {
-                        "severity": finding.severity,
-                        "evidence": finding.evidence,
-                        "recommendation": finding.recommendation,
-                    }
-                    for finding in findings
-                ],
+                "findings": [self._revision_finding_payload(finding) for finding in findings],
                 "brief_constraints": {
                     "tone": self.brief.tone,
-                    "must_include": self.brief.must_include,
-                    "avoid": self.brief.avoid,
+                    "must_include": self._script_brief_must_include(),
+                    "avoid": self._script_brief_avoid(),
                 },
                 "allowed_factual_evidence": allowed_evidence,
                 "output_language": self.config.output_language.value,
@@ -6205,30 +6542,13 @@ class WorkflowEngine:
                         if isinstance(research, FactualResearchPack)
                         else []
                     )
-                    resolution_input = {
-                        "review_strategy": "single-finding-resolution-v1",
-                        "finding": {
-                            "severity": finding.severity,
-                            "evidence": finding.evidence,
-                            "recommendation": finding.recommendation,
-                        },
-                        "original_spoken_text": original_text,
-                        "revised_spoken_text": revised_text,
-                        "adjacent_context": {
-                            "previous_spoken_text": (
-                                revised_script.scenes[scene_index - 1].spoken_text
-                                if scene_index > 0
-                                else ""
-                            ),
-                            "next_spoken_text": (
-                                revised_script.scenes[scene_index + 1].spoken_text
-                                if scene_index + 1 < len(revised_script.scenes)
-                                else ""
-                            ),
-                        },
-                        "allowed_factual_evidence": allowed_evidence,
-                        "output_language": self.config.output_language.value,
-                    }
+                    resolution_input = self._revision_finding_resolution_input(
+                        finding=finding,
+                        original_spoken_text=original_text,
+                        revised_script=revised_script,
+                        scene_index=scene_index,
+                        allowed_factual_evidence=allowed_evidence,
+                    )
                     resolution, resolution_usage = self._structured_item(
                         stage="script-revision",
                         item_id=f"finding-resolution-{finding_index:03d}",
@@ -6237,9 +6557,18 @@ class WorkflowEngine:
                         output_model=FindingResolution,
                         max_output_tokens=400,
                         instruction_suffix=(
-                            "Judge only whether the revised spoken_text resolves the supplied "
-                            "Finding. Return only resolved and explanation; do not edit text or "
-                            "return a Finding ID or Review Report."
+                            "Judge only whether the supplied Finding is resolved. For "
+                            "complete-script-brief-constraint-v1, assess the revised_script as a "
+                            "whole and do not introduce adjacent-scene or continuity requirements "
+                            "absent from that Finding. For single-scene-finding-v1, assess the "
+                            "revised_spoken_text with its supplied local context. Return only "
+                            "resolved and explanation; do not edit text or return host-owned fields."
+                            if self.workflow_policy_version >= 38
+                            else (
+                                "Judge only whether the revised spoken_text resolves the supplied "
+                                "Finding. Return only resolved and explanation; do not edit text or "
+                                "return a Finding ID or Review Report."
+                            )
                         ),
                     )
                     item_usage.extend(resolution_usage)
@@ -6277,30 +6606,9 @@ class WorkflowEngine:
         )
         for scene_id in unresolved_scene_ids:
             scene_index = revised_index_by_id[scene_id]
-            scene = revised_script.scenes[scene_index]
             scene_findings = [
                 finding for finding in all_findings if finding.scene_id == scene_id
             ]
-            unresolved_findings = [
-                finding
-                for finding in scene_findings
-                if dispositions_by_id[finding.finding_id].disposition != "applied"
-            ]
-            current_total = sum(
-                len(item.spoken_text.split()) for item in revised_script.scenes
-            )
-            current_scene_words = len(scene.spoken_text.split())
-            unchanged_total = current_total - current_scene_words
-            minimum_words = max(1, minimum_total - unchanged_total)
-            maximum_words = maximum_total - unchanged_total
-            self._require(
-                minimum_words <= maximum_words,
-                f"Finding repair calculated an empty word range for {scene_id}",
-            )
-            target_words = min(
-                max(current_scene_words, minimum_words),
-                maximum_words,
-            )
             outline_scene = outline_by_id[scene_id]
             scene_evidence_ids = set(
                 self._outline_scene_evidence_ids(outline_scene, research)
@@ -6314,126 +6622,94 @@ class WorkflowEngine:
                 if isinstance(research, FactualResearchPack)
                 else []
             )
+            prior_resolution_feedback: list[dict[str, str]] = []
+            maximum_finding_repairs = 2 if self.workflow_policy_version >= 36 else 1
+            for repair_attempt in range(1, maximum_finding_repairs + 1):
+                unresolved_findings = [
+                    finding
+                    for finding in scene_findings
+                    if dispositions_by_id[finding.finding_id].disposition != "applied"
+                ]
+                if not unresolved_findings:
+                    break
+                if repair_attempt > 1 and not any(
+                    finding.severity in {"major", "blocking"}
+                    for finding in unresolved_findings
+                ):
+                    break
 
-            def validate_finding_repair(
-                replacement: ReplacementText,
-                *,
-                minimum: int = minimum_words,
-                maximum: int = maximum_words,
-                target_count: int = target_words,
-            ) -> None:
-                NarrationScript.model_validate(
-                    {
-                        "schema_version": 1,
-                        "title": "Finding repair",
-                        "scenes": [
-                            {
-                                "scene_id": "scene-001",
-                                "spoken_text": replacement.spoken_text,
-                                "pause_after_seconds": 0,
-                            }
-                        ],
-                    }
+                scene = revised_script.scenes[scene_index]
+                current_total = sum(
+                    len(item.spoken_text.split()) for item in revised_script.scenes
                 )
-                actual = len(replacement.spoken_text.split())
-                if not minimum <= actual <= maximum:
-                    boundary = minimum if actual < minimum else maximum
-                    raise BackendError(
-                        (
-                            f"single-Scene Finding repair has {actual} words; required "
-                            f"inclusive range is {minimum}-{maximum}"
-                        ),
-                        kind=ErrorKind.INVALID_OUTPUT,
-                        details={
-                            "actual_word_count": actual,
-                            "minimum_word_count": minimum,
-                            "maximum_word_count": maximum,
-                            "target_word_count": target_count,
-                            "word_delta": boundary - actual,
-                            "count_method": "len(spoken_text.split())",
-                        },
+                current_scene_words = len(scene.spoken_text.split())
+                unchanged_total = current_total - current_scene_words
+                minimum_words = max(1, minimum_total - unchanged_total)
+                maximum_words = maximum_total - unchanged_total
+                self._require(
+                    minimum_words <= maximum_words,
+                    f"Finding repair calculated an empty word range for {scene_id}",
+                )
+                target_words = self._revision_target_word_count(
+                    findings=unresolved_findings,
+                    scene_id=scene_id,
+                    current_words=current_scene_words,
+                    minimum_words=minimum_words,
+                    maximum_words=maximum_words,
+                )
+
+                def validate_finding_repair(
+                    replacement: ReplacementText,
+                    *,
+                    minimum: int = minimum_words,
+                    maximum: int = maximum_words,
+                    target_count: int = target_words,
+                ) -> None:
+                    NarrationScript.model_validate(
+                        {
+                            "schema_version": 1,
+                            "title": "Finding repair",
+                            "scenes": [
+                                {
+                                    "scene_id": "scene-001",
+                                    "spoken_text": replacement.spoken_text,
+                                    "pause_after_seconds": 0,
+                                }
+                            ],
+                        }
                     )
+                    actual = len(replacement.spoken_text.split())
+                    if not minimum <= actual <= maximum:
+                        boundary = minimum if actual < minimum else maximum
+                        raise BackendError(
+                            (
+                                f"single-Scene Finding repair has {actual} words; required "
+                                f"inclusive range is {minimum}-{maximum}"
+                            ),
+                            kind=ErrorKind.INVALID_OUTPUT,
+                            details={
+                                "actual_word_count": actual,
+                                "minimum_word_count": minimum,
+                                "maximum_word_count": maximum,
+                                "target_word_count": target_count,
+                                "word_delta": boundary - actual,
+                                "count_method": "len(spoken_text.split())",
+                            },
+                        )
 
-            replacement, repair_usage = self._structured_item(
-                stage="script-revision",
-                item_id=f"finding-repair-{scene_id}",
-                task_id="script_revision",
-                input_data={
-                    "revision_strategy": "single-scene-finding-repair-v1",
-                    "spoken_text": scene.spoken_text,
-                    "adjacent_context": {
-                        "previous_spoken_text": (
-                            revised_script.scenes[scene_index - 1].spoken_text
-                            if scene_index > 0
-                            else ""
-                        ),
-                        "next_spoken_text": (
-                            revised_script.scenes[scene_index + 1].spoken_text
-                            if scene_index + 1 < len(revised_script.scenes)
-                            else ""
-                        ),
-                    },
-                    "all_scene_findings": [
-                        {
-                            "severity": finding.severity,
-                            "evidence": finding.evidence,
-                            "recommendation": finding.recommendation,
-                            "already_resolved": dispositions_by_id[
-                                finding.finding_id
-                            ].disposition
-                            == "applied",
-                        }
-                        for finding in scene_findings
-                    ],
-                    "unresolved_findings": [
-                        {
-                            "severity": finding.severity,
-                            "evidence": finding.evidence,
-                            "recommendation": finding.recommendation,
-                        }
-                        for finding in unresolved_findings
-                    ],
-                    "outline_scene": outline_scene.model_dump(mode="json"),
-                    "allowed_factual_evidence": allowed_evidence,
-                    "output_language": self.config.output_language.value,
-                    "content_mode": self.config.content_mode.value,
-                    "content_format": self.config.content_format.value,
-                    "minimum_word_count": minimum_words,
-                    "target_word_count": target_words,
-                    "maximum_word_count": maximum_words,
-                    "count_method": "len(spoken_text.split())",
-                },
-                output_model=ReplacementText,
-                invariant=validate_finding_repair,
-                max_output_tokens=800,
-                instruction_suffix=(
-                    "Return exactly one replacement spoken_text. Resolve every unresolved Finding "
-                    "while preserving every already-resolved Finding for this Scene. Use "
-                    f"{minimum_words}-{maximum_words} whitespace-separated words inclusive, aiming "
-                    f"near {target_words}. Do not return IDs, counts, explanations, or other fields."
-                ),
-            )
-            item_usage.extend(repair_usage)
-            revised_script.scenes[scene_index].spoken_text = replacement.spoken_text
-            revised_by_id[scene_id] = revised_script.scenes[scene_index]
-
-            for finding in scene_findings:
-                finding_index = finding_indexes[finding.finding_id]
-                resolution, resolution_usage = self._structured_item(
+                item_id = (
+                    f"finding-repair-{scene_id}"
+                    if repair_attempt == 1
+                    else f"finding-repair-{scene_id}-attempt-{repair_attempt}"
+                )
+                replacement, repair_usage = self._structured_item(
                     stage="script-revision",
-                    item_id=f"finding-resolution-recheck-{finding_index:03d}",
-                    task_id=finding_review_tasks[finding.finding_id],
+                    item_id=item_id,
+                    task_id="script_revision",
                     input_data={
-                        "review_strategy": "single-finding-resolution-v1",
-                        "finding": {
-                            "severity": finding.severity,
-                            "evidence": finding.evidence,
-                            "recommendation": finding.recommendation,
-                        },
-                        "original_spoken_text": draft_by_id[scene_id].spoken_text,
-                        "revised_spoken_text": revised_script.scenes[
-                            scene_index
-                        ].spoken_text,
+                        "revision_strategy": "single-scene-finding-repair-v1",
+                        "repair_attempt": repair_attempt,
+                        "spoken_text": scene.spoken_text,
                         "adjacent_context": {
                             "previous_spoken_text": (
                                 revised_script.scenes[scene_index - 1].spoken_text
@@ -6446,23 +6722,104 @@ class WorkflowEngine:
                                 else ""
                             ),
                         },
+                        "all_scene_findings": [
+                            {
+                                **self._revision_finding_payload(finding),
+                                "already_resolved": dispositions_by_id[
+                                    finding.finding_id
+                                ].disposition
+                                == "applied",
+                            }
+                            for finding in scene_findings
+                        ],
+                        "unresolved_findings": [
+                            self._revision_finding_payload(finding)
+                            for finding in unresolved_findings
+                        ],
+                        "prior_resolution_feedback": prior_resolution_feedback,
+                        "outline_scene": outline_scene.model_dump(mode="json"),
                         "allowed_factual_evidence": allowed_evidence,
                         "output_language": self.config.output_language.value,
+                        "content_mode": self.config.content_mode.value,
+                        "content_format": self.config.content_format.value,
+                        "minimum_word_count": minimum_words,
+                        "target_word_count": target_words,
+                        "maximum_word_count": maximum_words,
+                        "count_method": "len(spoken_text.split())",
                     },
-                    output_model=FindingResolution,
-                    max_output_tokens=400,
+                    output_model=ReplacementText,
+                    invariant=validate_finding_repair,
+                    max_output_tokens=800,
                     instruction_suffix=(
-                        "Judge only whether the revised spoken_text resolves the supplied Finding. "
-                        "Return only resolved and explanation; do not edit text or return host-owned "
-                        "fields."
+                        "Return exactly one replacement spoken_text. Resolve every unresolved Finding "
+                        "while preserving every already-resolved Finding for this Scene. Use "
+                        f"{minimum_words}-{maximum_words} whitespace-separated words inclusive, aiming "
+                        f"near {target_words}. Do not return IDs, counts, explanations, or other fields."
+                        + (
+                            " The prior repair was rejected. Use prior_resolution_feedback to make a "
+                            "substantive correction that directly addresses each recommendation; a "
+                            "cosmetic synonym or adjective change is invalid."
+                            if repair_attempt > 1
+                            else ""
+                        )
                     ),
                 )
-                item_usage.extend(resolution_usage)
-                dispositions_by_id[finding.finding_id] = RevisionDisposition(
-                    finding_id=finding.finding_id,
-                    disposition="applied" if resolution.resolved else "rejected",
-                    explanation=resolution.explanation,
-                )
+                item_usage.extend(repair_usage)
+                revised_script.scenes[scene_index].spoken_text = replacement.spoken_text
+                revised_by_id[scene_id] = revised_script.scenes[scene_index]
+
+                prior_resolution_feedback = []
+                for finding in scene_findings:
+                    finding_index = finding_indexes[finding.finding_id]
+                    recheck_item_id = (
+                        f"finding-resolution-recheck-{finding_index:03d}"
+                        if repair_attempt == 1
+                        else (
+                            f"finding-resolution-recheck-{finding_index:03d}-"
+                            f"attempt-{repair_attempt}"
+                        )
+                    )
+                    resolution, resolution_usage = self._structured_item(
+                        stage="script-revision",
+                        item_id=recheck_item_id,
+                        task_id=finding_review_tasks[finding.finding_id],
+                        input_data=self._revision_finding_resolution_input(
+                            finding=finding,
+                            original_spoken_text=draft_by_id[scene_id].spoken_text,
+                            revised_script=revised_script,
+                            scene_index=scene_index,
+                            allowed_factual_evidence=allowed_evidence,
+                        ),
+                        output_model=FindingResolution,
+                        max_output_tokens=400,
+                        instruction_suffix=(
+                            "Judge only whether the supplied Finding is resolved. For "
+                            "complete-script-brief-constraint-v1, assess the revised_script as a whole "
+                            "and do not introduce adjacent-scene or continuity requirements absent from "
+                            "that Finding. For single-scene-finding-v1, assess the revised_spoken_text "
+                            "with its supplied local context. Return only resolved and explanation; do "
+                            "not edit text or return host-owned fields."
+                            if self.workflow_policy_version >= 38
+                            else (
+                                "Judge only whether the revised spoken_text resolves the supplied "
+                                "Finding. Return only resolved and explanation; do not edit text or "
+                                "return host-owned fields."
+                            )
+                        ),
+                    )
+                    item_usage.extend(resolution_usage)
+                    dispositions_by_id[finding.finding_id] = RevisionDisposition(
+                        finding_id=finding.finding_id,
+                        disposition="applied" if resolution.resolved else "rejected",
+                        explanation=resolution.explanation,
+                    )
+                    if not resolution.resolved:
+                        prior_resolution_feedback.append(
+                            {
+                                "recommendation": finding.recommendation,
+                                "rejection_explanation": resolution.explanation,
+                            }
+                        )
 
         dispositions = [
             dispositions_by_id[finding.finding_id] for finding in all_findings
@@ -6590,14 +6947,17 @@ class WorkflowEngine:
         )
         return artifact_model.model_validate(promoted)
 
+    def _research_query_candidates(self) -> list[str]:
+        return self.brief.research_focus or [
+            self.brief.central_question
+            or self._script_idea_direction()
+            or "unusual family-safe story inspiration"
+        ]
+
     def _research(self) -> ResearchPack | FactualResearchPack:
         queries = []
         if not self.config.offline and self.config.research_query_limit:
-            candidates = self.brief.research_focus or [
-                self.brief.central_question
-                or self.brief.idea_direction
-                or "unusual family-safe story inspiration"
-            ]
+            candidates = self._research_query_candidates()
             for focus in candidates:
                 query = focus.strip()
                 if query and query not in queries:
@@ -6605,7 +6965,7 @@ class WorkflowEngine:
                 if len(queries) >= self.config.research_query_limit:
                     break
         input_seed = {
-            "brief": self.brief.model_dump(mode="json"),
+            "brief": self._editorial_brief_payload(),
             "queries": queries,
             "offline": self.config.offline,
             "query_limit": self.config.research_query_limit,
@@ -7648,7 +8008,7 @@ class WorkflowEngine:
             upper = min(
                 upper,
                 maximum_words_per_second
-                * (1 - DELIVERY_RATE_FIT_MARGIN)
+                * (1 - NET_TEMPO_MAXIMUM_RATE_MARGIN)
                 * speech_seconds
                 / word_count,
             )
@@ -9331,6 +9691,7 @@ class WorkflowEngine:
             "timeline": narration.timeline.model_dump(mode="json"),
             "enabled": self.config.captions_enabled,
             "animated": self.config.animated_captions,
+            "video_style": self.config.video_style.value,
             "visual_shot_mode": self.config.visual_shot_mode.value,
         }
         metadata = self._stage_metadata(stage="captions", task_id=None, input_data=input_data)
@@ -9433,7 +9794,11 @@ class WorkflowEngine:
                 sha256=sha256_file(srt_path),
                 mime_type="application/x-subrip",
             )
-        if self.config.captions_enabled and self.config.animated_captions:
+        if (
+            self.config.captions_enabled
+            and self.config.animated_captions
+            and self.config.video_style is not VideoStyle.REMOTION_EXPLAINER
+        ):
             ass_path = workspace.work_dir / f"captions.{self.config.output_language.value}.ass"
             write_ass(track, ass_path, width=self.config.delivery_width, height=self.config.delivery_height)
             ass_ref = MediaReference(
@@ -10436,6 +10801,1644 @@ class WorkflowEngine:
             self.store.add_warning(warning)
             return MusicBundle.model_validate(promoted)
 
+    def _remotion_visual_pipeline(
+        self,
+        *,
+        narration: NarrationBundle,
+        captions: CaptionBundle,
+        outline: OutlineLike,
+        research: ResearchPack | FactualResearchPack,
+        factual_grounding: dict[str, Any] | None,
+    ) -> RenderBundle | None:
+        edit_plan = self._remotion_edit_plan(
+            narration=narration,
+            captions=captions,
+            outline=outline,
+            research=research,
+            factual_grounding=factual_grounding,
+        )
+        if self._stop("visual-plan"):
+            return None
+        requests = self._remotion_asset_requests(
+            edit_plan,
+            research=research,
+            factual_grounding=factual_grounding,
+        )
+        if self._stop("image-prompt-compile"):
+            return None
+        prepared_music_brief = None
+        if self._should_prepare_music_brief():
+            prepared_music_brief = self._prepare_music_brief(narration)
+        assets = self._remotion_assets(requests, edit_plan=edit_plan, research=research)
+        if self._stop("images"):
+            return None
+        self._require_remotion_asset_approvals(assets)
+        reviewed = self._remotion_visual_review(
+            narration.timeline,
+            edit_plan,
+            requests,
+            assets,
+        )
+        if self._stop("visual-review"):
+            return None
+        self._require_remotion_asset_approvals(reviewed.assets)
+        music_brief = self._music_brief(narration, prepared=prepared_music_brief)
+        if self._stop("music-brief"):
+            return None
+        music = self._music(music_brief, narration.timeline)
+        if self._stop("music"):
+            return None
+        self.registry.release_local_workers()
+        rendered = self._render_remotion(
+            timeline=narration.timeline,
+            captions=captions,
+            edit_plan=edit_plan,
+            assets=reviewed.assets,
+            music=music,
+        )
+        if self._stop("render"):
+            return None
+        return rendered
+
+    def _require_remotion_asset_approvals(self, assets: RemotionAssetBundle) -> None:
+        if not self.config.remotion_require_asset_approval:
+            return
+        expected = [
+            {
+                "asset_id": asset.asset_id,
+                "shot_id": asset.shot_id,
+                "record_sha256": hash_value(asset.model_dump(mode="json")),
+            }
+            for asset in assets.assets
+        ]
+        approvals = self.store.frozen_assets.get("remotion_asset_approvals")
+        approved_records = {
+            (item.get("asset_id"), item.get("shot_id"), item.get("record_sha256"))
+            for item in approvals or []
+            if isinstance(item, dict)
+        }
+        expected_records = {
+            (item["asset_id"], item["shot_id"], item["record_sha256"])
+            for item in expected
+        }
+        if not expected_records.issubset(approved_records):
+            raise BackendError(
+                "Remotion media requires explicit approval before visual review and rendering",
+                kind=ErrorKind.NOT_READY,
+                action=(
+                    "Inspect every asset and its license in the dashboard, then choose "
+                    "Approve assets & continue to create an immutable child Run."
+                ),
+            )
+
+    def _source_screenshot_url_allowed(self, url: str) -> bool:
+        if getattr(self.config, "offline", False):
+            return False
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+                return False
+            host = (parsed.hostname or "").rstrip(".").casefold().encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            return False
+        return any(
+            host == allowed or host.endswith("." + allowed)
+            for allowed in self.config.remotion_source_screenshot_hosts
+        )
+
+    def _remotion_bundle_runtime_hash(self) -> str:
+        runtime_snapshot = self.store.frozen_assets.get("runtime_snapshot")
+        remotion_snapshot = (
+            runtime_snapshot.get("remotion")
+            if isinstance(runtime_snapshot, dict)
+            else None
+        )
+        value = (
+            remotion_snapshot.get("bundle_runtime_hash")
+            if isinstance(remotion_snapshot, dict)
+            else None
+        )
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise BackendError(
+                "the frozen Remotion runtime is missing its bundle identity",
+                kind=ErrorKind.NOT_READY,
+                action="Run Setup and create a new Run Bundle.",
+            )
+        return value
+
+    def _source_options(self, research: ResearchPack | FactualResearchPack) -> list[dict[str, str]]:
+        return [
+            {
+                "source_id": source.source_id,
+                "title": source.title,
+                "publisher": source.publisher,
+            }
+            for source in research.sources
+            if self._source_screenshot_url_allowed(source.url)
+        ][:8]
+
+    @staticmethod
+    def _scene_grounded_source_ids(
+        research: ResearchPack | FactualResearchPack,
+        grounding: dict[str, Any] | None,
+        scene_id: str,
+    ) -> list[str]:
+        if not isinstance(research, FactualResearchPack):
+            return []
+        scene_grounding = WorkflowEngine._factual_visual_grounding_for_scene(
+            grounding,
+            scene_id,
+        )
+        evidence_ids = {
+            evidence_id
+            for claim in scene_grounding.get("supported_claims", [])
+            for evidence_id in claim.get("evidence_ids", [])
+        }
+        evidence_sources = {
+            source_id
+            for evidence in research.evidence
+            if evidence.evidence_id in evidence_ids
+            for source_id in evidence.source_ids
+        }
+        return [
+            source.source_id
+            for source in research.sources
+            if source.source_id in evidence_sources
+        ]
+
+    def _anchored_words(
+        self,
+        timeline: NarrationTimeline,
+        captions: CaptionBundle,
+    ) -> list[AnchoredWord]:
+        result = []
+        for scene in timeline.scenes:
+            words = captions.scene_words.get(scene.scene_id) or scene.words
+            for word in words:
+                text = word.text.strip()
+                if not text:
+                    continue
+                result.append(
+                    AnchoredWord(
+                        word_id=f"word-{len(result) + 1:06d}",
+                        scene_id=scene.scene_id,
+                        text=text,
+                        start_seconds=round(scene.start_seconds + word.start_seconds, 6),
+                        end_seconds=round(scene.start_seconds + word.end_seconds, 6),
+                    )
+                )
+        if not result:
+            raise BackendError(
+                "Remotion editing requires aligned narration words",
+                kind=ErrorKind.INVALID_OUTPUT,
+                action="Use a speech Backend with word timing or enable the alignment Backend.",
+            )
+        return result
+
+    @staticmethod
+    def _shot_word_span(
+        schedule_item: dict[str, Any],
+        words: list[AnchoredWord],
+    ) -> tuple[AnchoredWord, AnchoredWord]:
+        scene_words = [
+            word for word in words if word.scene_id == schedule_item["scene_id"]
+        ]
+        if not scene_words:
+            raise BackendError(
+                f"{schedule_item['scene_id']} has no aligned word anchors",
+                kind=ErrorKind.INVALID_OUTPUT,
+            )
+        start = float(schedule_item["start_seconds"])
+        end = float(schedule_item["end_seconds"])
+        selected = [
+            word
+            for word in scene_words
+            if start <= (word.start_seconds + word.end_seconds) / 2 < end
+        ]
+        if not selected:
+            midpoint = (start + end) / 2
+            selected = [
+                min(
+                    scene_words,
+                    key=lambda word: abs(
+                        (word.start_seconds + word.end_seconds) / 2 - midpoint
+                    ),
+                )
+            ]
+        return selected[0], selected[-1]
+
+    @staticmethod
+    def _is_contiguous_spoken_word_span(value: str, narration_excerpt: str) -> bool:
+        candidate = re.findall(r"\w+", value.casefold(), flags=re.UNICODE)
+        source = re.findall(r"\w+", narration_excerpt.casefold(), flags=re.UNICODE)
+        if not candidate:
+            return not value.strip()
+        width = len(candidate)
+        return any(
+            source[index : index + width] == candidate
+            for index in range(len(source) - width + 1)
+        )
+
+    def _review_remotion_visual_constraints(
+        self,
+        plan: RemotionEditPlan,
+        constraints: Sequence[tuple[str, int, str]],
+    ) -> list[UsageRecord]:
+        usage: list[UsageRecord] = []
+        if not constraints:
+            return usage
+        scene_ids = {shot.scene_id for shot in plan.shots}
+        compact_plan = {
+            "title": plan.title,
+            "shots": [
+                {
+                    "shot_id": shot.shot_id,
+                    "scene_id": shot.scene_id,
+                    "template": shot.template.value,
+                    "headline": shot.headline,
+                    "supporting_text": shot.supporting_text,
+                    "body_lines": shot.body_lines,
+                    "asset_kind": shot.asset_kind.value,
+                    "asset_query": shot.asset_query,
+                    "sfx": shot.sfx.value,
+                }
+                for shot in plan.shots
+            ],
+        }
+        for kind, index, constraint in constraints:
+            source = "idea-direction" if index == 0 else kind
+            item_id = f"visual-{source}-{max(index, 1):03d}"
+
+            def validate_assessment(
+                value: BriefConstraintAssessment,
+                *,
+                current_item_id: str = item_id,
+            ) -> None:
+                if not value.satisfied:
+                    self._require(
+                        value.scene_id in scene_ids,
+                        f"{current_item_id} must choose one supplied Scene ID for repair",
+                    )
+
+            assessment, item_usage = self._structured_item(
+                stage="visual-plan",
+                item_id=item_id,
+                task_id="review_constraints",
+                input_data={
+                    "review_strategy": "single-remotion-plan-constraint-v1",
+                    "constraint_kind": kind,
+                    "constraint": constraint,
+                    "edit_plan": compact_plan,
+                    "output_language": self.config.output_language.value,
+                },
+                output_model=BriefConstraintAssessment,
+                invariant=validate_assessment,
+                max_output_tokens=400,
+                instruction_suffix=(
+                    "Assess exactly the one supplied visual brief constraint against the complete "
+                    "Remotion edit plan. For avoid, satisfied means the prohibited visual choice is "
+                    "absent. For must-include, satisfied means the requested visual idea is clearly "
+                    "represented by visible copy, template, asset intent, or sound effect. If "
+                    "unsatisfied, choose the supplied Scene where a minimal visual edit belongs. "
+                    "Do not assess narration quality or rewrite the plan."
+                ),
+            )
+            usage.extend(item_usage)
+            if not assessment.satisfied:
+                raise BackendError(
+                    f"Remotion visual plan does not satisfy {kind} constraint {constraint!r}: "
+                    f"{assessment.evidence}",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                    action=(
+                        "Make the visual requirement more explicit and rerun from visual-plan: "
+                        + assessment.recommendation
+                    ),
+                )
+        return usage
+
+    def _remotion_edit_plan(
+        self,
+        *,
+        narration: NarrationBundle,
+        captions: CaptionBundle,
+        outline: OutlineLike,
+        research: ResearchPack | FactualResearchPack,
+        factual_grounding: dict[str, Any] | None,
+    ) -> RemotionEditPlan:
+        schedule = self._build_shot_schedule(narration, captions)
+        if len(schedule) < 2:
+            raise BackendError(
+                "the Remotion explainer needs at least two editorial Shots",
+                kind=ErrorKind.INVALID_OUTPUT,
+                action="Reduce shot_target_seconds or shot_max_seconds so the hook and conclusion are distinct.",
+            )
+        words = self._anchored_words(narration.timeline, captions)
+        source_options = self._source_options(research)
+        override_payload = self.store.frozen_assets.get("remotion_edit_plan_override")
+        visual_constraints = self._remotion_visual_brief_constraints()
+        constraint_reviewer_metadata = self._stage_metadata(
+            stage="visual-plan",
+            task_id="review_constraints",
+            input_data={
+                "review_strategy": "single-remotion-plan-constraint-v1",
+                "constraints": visual_constraints,
+            },
+        )
+        input_data = {
+            "script": narration.script.model_dump(mode="json"),
+            "outline": outline.model_dump(mode="json"),
+            "canonical_shot_schedule": schedule,
+            "word_anchors": [word.model_dump(mode="json") for word in words],
+            "source_options": source_options,
+            "content_mode": self.config.content_mode.value,
+            "content_format": self.config.content_format.value,
+            "output_language": self.config.output_language.value,
+            "brief_constraints": {
+                "tone": self.brief.tone,
+                "must_include": [
+                    constraint
+                    for kind, _, constraint in visual_constraints
+                    if kind == "must-include"
+                ],
+                "avoid": [
+                    constraint
+                    for kind, _, constraint in visual_constraints
+                    if kind == "avoid"
+                ],
+                "audience": self.config.audience,
+            },
+            "visual_constraint_review": {
+                "strategy": "single-remotion-plan-constraint-v1",
+                "backend_id": constraint_reviewer_metadata["backend_id"],
+                "backend_revision": constraint_reviewer_metadata["backend_revision"],
+                "prompt_version": constraint_reviewer_metadata["prompt_version"],
+                "assessment_schema_hash": hash_value(
+                    restricted_json_schema(
+                        BriefConstraintAssessment.model_json_schema(mode="validation")
+                    )
+                ),
+            },
+            "edit_plan_override": override_payload,
+        }
+        metadata = self._stage_metadata(
+            stage="visual-plan",
+            task_id=None if override_payload is not None else "remotion_direction",
+            input_data=input_data,
+        )
+        if override_payload is not None:
+            metadata.update(
+                backend_id="internal:remotion-editor",
+                backend_revision="remotion-editor-v1",
+            )
+        metadata["schema_hash"] = hash_value(
+            {
+                "item": restricted_json_schema(
+                    RemotionShotDirection.model_json_schema(mode="validation")
+                ),
+                "visual_constraint": restricted_json_schema(
+                    BriefConstraintAssessment.model_json_schema(mode="validation")
+                ),
+                "aggregate": restricted_json_schema(
+                    RemotionEditPlan.model_json_schema(mode="validation")
+                ),
+            }
+        )
+        reusable = self.store.reusable_record("visual-plan", **metadata)
+        if reusable:
+            return self.store.load_artifact(reusable, RemotionEditPlan)
+        self.store.begin_stage(
+            "visual-plan", attempt=self.store.next_attempt("visual-plan"), **metadata
+        )
+        if override_payload is not None:
+            plan = RemotionEditPlan.model_validate(override_payload)
+            self._validate_remotion_edit_override(
+                plan,
+                narration=narration,
+                schedule=schedule,
+                words=words,
+                research=research,
+                factual_grounding=factual_grounding,
+            )
+            usage = self._review_remotion_visual_constraints(plan, visual_constraints)
+            promoted = self.store.complete_fanout_stage(
+                "visual-plan", plan, usage=usage
+            )
+            return RemotionEditPlan.model_validate(promoted)
+        edit_shots = []
+        usage: list[UsageRecord] = []
+        previous_direction: RemotionShotDirection | None = None
+        for index, schedule_item in enumerate(schedule):
+            first_word, last_word = self._shot_word_span(schedule_item, words)
+            grounded_source_ids = set(
+                self._scene_grounded_source_ids(
+                    research,
+                    factual_grounding,
+                    schedule_item["scene_id"],
+                )
+            )
+            shot_source_options = [
+                option
+                for option in source_options
+                if option["source_id"] in grounded_source_ids
+            ]
+            item_input = {
+                "direction_strategy": "single-remotion-shot-v1",
+                "shot_position": index + 1,
+                "shot_count": len(schedule),
+                "narration_excerpt": schedule_item["narration_excerpt"],
+                "shot_duration_seconds": round(
+                    float(schedule_item["end_seconds"])
+                    - float(schedule_item["start_seconds"]),
+                    6,
+                ),
+                "word_span": {
+                    "start_word_id": first_word.word_id,
+                    "end_word_id": last_word.word_id,
+                },
+                "previous_direction": (
+                    previous_direction.model_dump(mode="json")
+                    if previous_direction is not None
+                    else None
+                ),
+                "next_narration_excerpt": (
+                    schedule[index + 1]["narration_excerpt"]
+                    if index + 1 < len(schedule)
+                    else ""
+                ),
+                "source_options": shot_source_options,
+                "content_mode": self.config.content_mode.value,
+                "content_format": self.config.content_format.value,
+                "output_language": self.config.output_language.value,
+                "brief_constraints": input_data["brief_constraints"],
+            }
+
+            def validate_direction(
+                direction: RemotionShotDirection,
+                *,
+                position: int = index,
+            ) -> None:
+                if position == 0 and direction.template.value != "kinetic_hook":
+                    raise BackendError(
+                        "the first Remotion Shot must use kinetic_hook",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                if position == len(schedule) - 1 and direction.template.value != "conclusion":
+                    raise BackendError(
+                        "the final Remotion Shot must use conclusion",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                if position not in {0, len(schedule) - 1} and direction.template.value in {
+                    "kinetic_hook",
+                    "conclusion",
+                }:
+                    raise BackendError(
+                        "kinetic_hook and conclusion are reserved for the first and final Shots",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                if (
+                    direction.asset_kind is RemotionAssetKind.SOURCE_SCREENSHOT
+                    and (
+                        self.config.content_mode is not ContentMode.FACTUAL
+                        or not shot_source_options
+                    )
+                ):
+                    raise BackendError(
+                        "source screenshots require supplied factual sources",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                if self.config.content_mode is ContentMode.FACTUAL:
+                    visible_copy = [
+                        direction.headline,
+                        direction.supporting_text,
+                        *direction.body_lines,
+                    ]
+                    for value in visible_copy:
+                        if value.strip() and not self._is_contiguous_spoken_word_span(
+                            value,
+                            schedule_item["narration_excerpt"],
+                        ):
+                            raise BackendError(
+                                "factual Remotion on-screen text must be a contiguous phrase from "
+                                "the current audited narration excerpt",
+                                kind=ErrorKind.INVALID_OUTPUT,
+                            )
+
+            direction, item_usage = self._structured_item(
+                stage="visual-plan",
+                item_id=schedule_item["shot_id"],
+                task_id="remotion_direction",
+                input_data=item_input,
+                output_model=RemotionShotDirection,
+                invariant=validate_direction,
+                max_output_tokens=900,
+                instruction_suffix=(
+                    "Return only the bounded creative fields for this one Shot. Do not return IDs, "
+                    "word anchors, times, frames, URLs, paths, rights, renderer code, or settings. "
+                    "Honor the supplied brief_constraints through the creative fields where they "
+                    "fit the current narration beat; use visual action, asset intent, or SFX rather "
+                    "than forcing a visual-only requirement into visible copy."
+                    + (
+                        " In factual mode, headline, supporting_text, and every body_lines entry "
+                        "must each be one exact contiguous phrase from narration_excerpt; use "
+                        "punctuation or capitalization changes only. This prevents new unaudited "
+                        "on-screen claims."
+                        if self.config.content_mode is ContentMode.FACTUAL
+                        else ""
+                    )
+                ),
+            )
+            start_frame = round(float(schedule_item["start_seconds"]) * self.config.fps)
+            end_frame = round(float(schedule_item["end_seconds"]) * self.config.fps)
+            edit_shots.append(
+                RemotionEditShot(
+                    **direction.model_dump(mode="python"),
+                    purpose=(
+                        "Kuvita nykyinen kerronnan rytmi kiinteällä mallipohjalla."
+                        if self.config.output_language is OutputLanguage.FINNISH
+                        else "Illustrate the current narration beat with a fixed template."
+                    ),
+                    motion=remotion_motion_for_template(direction.template),
+                    transition_in=(
+                        RemotionTransitionPreset.SECTION_WIPE
+                        if index == len(schedule) - 1
+                        else RemotionTransitionPreset.HARD_CUT
+                    ),
+                    shot_id=schedule_item["shot_id"],
+                    scene_id=schedule_item["scene_id"],
+                    narration_excerpt=schedule_item["narration_excerpt"],
+                    start_word_id=first_word.word_id,
+                    end_word_id=last_word.word_id,
+                    start_seconds=schedule_item["start_seconds"],
+                    end_seconds=schedule_item["end_seconds"],
+                    start_frame=start_frame,
+                    end_frame=end_frame,
+                    source_screenshot_source_ids=[
+                        option["source_id"] for option in shot_source_options
+                    ],
+                )
+            )
+            previous_direction = direction
+            usage.extend(item_usage)
+        frame_duration = float(schedule[-1]["end_seconds"])
+        plan = RemotionEditPlan(
+            title=narration.script.title,
+            width=self.config.delivery_width,
+            height=self.config.delivery_height,
+            fps=self.config.fps,
+            duration_seconds=frame_duration,
+            duration_frames=round(frame_duration * self.config.fps),
+            words=words,
+            shots=edit_shots,
+        )
+        usage.extend(self._review_remotion_visual_constraints(plan, visual_constraints))
+        promoted = self.store.complete_fanout_stage("visual-plan", plan, usage=usage)
+        return RemotionEditPlan.model_validate(promoted)
+
+    def _validate_remotion_edit_override(
+        self,
+        plan: RemotionEditPlan,
+        *,
+        narration: NarrationBundle,
+        schedule: list[dict[str, Any]],
+        words: list[AnchoredWord],
+        research: ResearchPack | FactualResearchPack,
+        factual_grounding: dict[str, Any] | None,
+    ) -> None:
+        self._require(plan.title == narration.script.title, "edited plan cannot change the title")
+        self._require(
+            (plan.width, plan.height, plan.fps)
+            == (self.config.delivery_width, self.config.delivery_height, self.config.fps),
+            "edited plan cannot change renderer dimensions or FPS",
+        )
+        self._require(plan.words == words, "edited plan cannot change canonical word timing")
+        self._require(
+            len(plan.shots) == len(schedule),
+            "edited plan cannot add or remove canonical Shots",
+        )
+        purpose = (
+            "Kuvita nykyinen kerronnan rytmi kiinteällä mallipohjalla."
+            if self.config.output_language is OutputLanguage.FINNISH
+            else "Illustrate the current narration beat with a fixed template."
+        )
+        allowed_source_ids = {
+            option["source_id"] for option in self._source_options(research)
+        }
+        for index, (shot, schedule_item) in enumerate(zip(plan.shots, schedule, strict=True)):
+            self._require(
+                index != 0 or shot.template is RemotionTemplate.KINETIC_HOOK,
+                "the opening edited Shot must remain kinetic_hook",
+            )
+            self._require(
+                index != len(schedule) - 1 or shot.template is RemotionTemplate.CONCLUSION,
+                "the final edited Shot must remain conclusion",
+            )
+            self._require(
+                index in {0, len(schedule) - 1}
+                or shot.template
+                not in {RemotionTemplate.KINETIC_HOOK, RemotionTemplate.CONCLUSION},
+                "opening and conclusion templates are reserved for timeline endpoints",
+            )
+            first_word, last_word = self._shot_word_span(schedule_item, words)
+            grounded_source_ids = self._scene_grounded_source_ids(
+                research,
+                factual_grounding,
+                schedule_item["scene_id"],
+            )
+            expected = {
+                "shot_id": schedule_item["shot_id"],
+                "scene_id": schedule_item["scene_id"],
+                "narration_excerpt": schedule_item["narration_excerpt"],
+                "start_word_id": first_word.word_id,
+                "end_word_id": last_word.word_id,
+                "start_seconds": schedule_item["start_seconds"],
+                "end_seconds": schedule_item["end_seconds"],
+                "start_frame": round(float(schedule_item["start_seconds"]) * self.config.fps),
+                "end_frame": round(float(schedule_item["end_seconds"]) * self.config.fps),
+                "purpose": purpose,
+                "source_screenshot_source_ids": [
+                    source_id
+                    for source_id in grounded_source_ids
+                    if source_id in allowed_source_ids
+                ],
+                "transition_in": (
+                    RemotionTransitionPreset.SECTION_WIPE
+                    if index == len(schedule) - 1
+                    else RemotionTransitionPreset.HARD_CUT
+                ),
+            }
+            for field_name, expected_value in expected.items():
+                self._require(
+                    getattr(shot, field_name) == expected_value,
+                    f"edited plan cannot change host-owned field {field_name}",
+                )
+            self._require(
+                shot.motion is remotion_motion_for_template(shot.template),
+                "edited plan motion must be derived from its template",
+            )
+            if self.config.content_mode is ContentMode.FACTUAL:
+                for value in [shot.headline, shot.supporting_text, *shot.body_lines]:
+                    self._require(
+                        not value.strip()
+                        or self._is_contiguous_spoken_word_span(
+                            value,
+                            shot.narration_excerpt,
+                        ),
+                        "factual edited on-screen text must remain a contiguous audited phrase",
+                    )
+
+    def _remotion_asset_requests(
+        self,
+        edit_plan: RemotionEditPlan,
+        *,
+        research: ResearchPack | FactualResearchPack,
+        factual_grounding: dict[str, Any] | None,
+    ) -> RemotionAssetRequestSet:
+        input_data = {
+            "edit_plan": edit_plan.model_dump(mode="json"),
+            "source_ids": [source.source_id for source in research.sources],
+            "factual_grounding": factual_grounding,
+            "image_backend": self.config.task_bindings["image_generate"],
+        }
+        metadata = self._stage_metadata(
+            stage="image-prompt-compile", task_id=None, input_data=input_data
+        )
+        metadata.update(
+            backend_id="internal:remotion-asset-compiler",
+            backend_revision="remotion-asset-compiler-v1",
+            schema_hash=hash_value(
+                restricted_json_schema(
+                    RemotionAssetRequestSet.model_json_schema(mode="validation")
+                )
+            ),
+        )
+        reusable = self.store.reusable_record("image-prompt-compile", **metadata)
+        if reusable:
+            return self.store.load_artifact(reusable, RemotionAssetRequestSet)
+        workspace = self.store.workspace("image-prompt-compile")
+        self.store.begin_stage(
+            "image-prompt-compile", attempt=workspace.attempt, **metadata
+        )
+        source_by_id = {source.source_id: source for source in research.sources}
+        requests = []
+        for shot in edit_plan.shots:
+            if shot.asset_kind is RemotionAssetKind.NONE:
+                continue
+            source_id = ""
+            if shot.asset_kind is RemotionAssetKind.SOURCE_SCREENSHOT:
+                grounded_sources = self._scene_grounded_source_ids(
+                    research,
+                    factual_grounding,
+                    shot.scene_id,
+                )
+                grounded_sources = [
+                    source_id
+                    for source_id in grounded_sources
+                    if source_id in source_by_id
+                    and self._source_screenshot_url_allowed(source_by_id[source_id].url)
+                ]
+                if shot.source_screenshot_source_ids:
+                    eligible_source_ids = set(shot.source_screenshot_source_ids)
+                    grounded_sources = [
+                        source_id
+                        for source_id in grounded_sources
+                        if source_id in eligible_source_ids
+                    ]
+                source_id = grounded_sources[0] if grounded_sources else ""
+                if not source_id:
+                    raise BackendError(
+                        f"{shot.shot_id} requested a source screenshot without scene-grounded evidence on an approved host",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                        action=(
+                            "Use another template, or add the trusted evidence hostname to "
+                            "remotion_source_screenshot_hosts and rerun from visual-plan."
+                        ),
+                    )
+            generated_prompt = (
+                "Editorial 16:9 visual for a fast narrated explainer. "
+                + (f"Requested subject: {shot.asset_query}. " if shot.asset_query else "")
+                + "One immediate focal subject, high contrast, clean composition, no written text, "
+                "no logos, no watermark, no interface chrome."
+            )
+            requests.append(
+                RemotionAssetRequest(
+                    asset_id=f"asset-{len(requests) + 1:03d}",
+                    shot_id=shot.shot_id,
+                    kind=shot.asset_kind,
+                    query=shot.asset_query,
+                    source_id=source_id,
+                    generated_prompt=generated_prompt,
+                )
+            )
+        bundle = RemotionAssetRequestSet(requests=requests)
+        promoted = self.store.promote_stage(workspace, bundle)
+        return RemotionAssetRequestSet.model_validate(promoted)
+
+    def _generated_remotion_asset(
+        self,
+        request: RemotionAssetRequest,
+        *,
+        edit_plan: RemotionEditPlan,
+        work_dir: Path,
+        warnings: list[str] | None = None,
+    ) -> tuple[RemotionAsset, list[UsageRecord]]:
+        shot = request.shot_id
+        scene_id = next(
+            edit_shot.scene_id
+            for edit_shot in edit_plan.shots
+            if edit_shot.shot_id == shot
+        )
+        backend_id = self.config.task_bindings["image_generate"]
+        descriptor = self.registry.descriptor(backend_id)
+        generation_width, generation_height = image_generation_dimensions(
+            backend_id,
+            delivery_width=self.config.delivery_width,
+            delivery_height=self.config.delivery_height,
+        )
+        image_request = ImageRequest(
+            scene_id=scene_id,
+            target_backend_id=backend_id,
+            prompt=request.generated_prompt,
+            negative_prompt="text, logo, watermark, illegible subject, unsafe content",
+            width=generation_width,
+            height=generation_height,
+            quality="low" if self.config.quality is Quality.DRAFT else "high",
+        )
+        image_request = self._canonical_image_request(
+            image_request,
+            scene_id=scene_id,
+            target_backend_id=backend_id,
+            width=generation_width,
+            height=generation_height,
+            quality=image_request.quality,
+            reference_paths=[],
+        )
+        raw_path = work_dir / ("generated" + _raw_image_extension(backend_id))
+        result = self.executor.image(image_request, raw_path)
+        original = self.project_root / result.asset.image.path
+        normalized = work_dir / "normalized.png"
+        normalize_image(
+            self.tools,
+            original,
+            normalized,
+            width=self.config.delivery_width,
+            height=self.config.delivery_height,
+        )
+        candidate = AssetCandidate(
+            candidate_id="candidate-001",
+            provider="generated",
+            provider_asset_id=result.asset.provider_request_id,
+            media_kind="image",
+            mime_type=result.asset.image.mime_type,
+            title=request.query or "Generated fallback",
+            description="Generated by the configured Image Backend.",
+            source_page_url="",
+            download_url="",
+            creator_name=descriptor.model_id,
+            creator_url="",
+            width=self.config.delivery_width,
+            height=self.config.delivery_height,
+            duration_seconds=0,
+            rights=AssetRights(
+                license_id="generated-output",
+                license_name=descriptor.license_name,
+                attribution_required=False,
+                review_status="approved",
+                review_reason=(
+                    "Generated by the configured Image Backend under its frozen model license."
+                ),
+            ),
+            raw_metadata={
+                "backend_id": backend_id,
+                "model_id": descriptor.model_id,
+                "revision": descriptor.revision,
+            },
+        )
+        return (
+            build_asset_record(
+                request,
+                candidate,
+                original=original,
+                original_mime_type=result.asset.image.mime_type,
+                normalized=normalized,
+                media_kind="image",
+                width=self.config.delivery_width,
+                height=self.config.delivery_height,
+                duration_seconds=0,
+                transform=(
+                    f"image generation followed by FFmpeg scale/crop to "
+                    f"{self.config.delivery_width}x{self.config.delivery_height} PNG"
+                ),
+                project_root=self.project_root,
+                warnings=warnings,
+            ),
+            _usage_list([result.usage]),
+        )
+
+    def _resolve_remotion_asset(
+        self,
+        request: RemotionAssetRequest,
+        *,
+        edit_plan: RemotionEditPlan,
+        work_dir: Path,
+        source_by_id: dict[str, ResearchSource],
+    ) -> tuple[RemotionAsset, list[UsageRecord], list[str]]:
+        warnings: list[str] = []
+        if request.kind is RemotionAssetKind.SOURCE_SCREENSHOT:
+            if getattr(self.config, "offline", False):
+                raise BackendError(
+                    "source screenshots are disabled for offline Runs",
+                    kind=ErrorKind.UNSUPPORTED,
+                    action="Use a local or generated asset, or create an online Run.",
+                )
+            source = source_by_id.get(request.source_id)
+            if source is None:
+                raise BackendError(
+                    f"unknown source screenshot ID: {request.source_id}",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                )
+            if not self._source_screenshot_url_allowed(source.url):
+                raise BackendError(
+                    f"source screenshot host is not explicitly approved: {source.url}",
+                    kind=ErrorKind.UNSUPPORTED,
+                    action=(
+                        "Add the trusted hostname to remotion_source_screenshot_hosts and rerun from "
+                        "visual-plan, or choose another asset kind."
+                    ),
+                )
+            warnings.append(
+                f"{request.shot_id} uses an editorial screenshot of {source.url}; review quotation "
+                "context and jurisdiction-specific reuse rights before publication"
+            )
+            original = work_dir / "source-screenshot.png"
+            capture_source_screenshot(
+                self.project_root,
+                url=source.url,
+                output_path=original,
+                width=self.config.delivery_width,
+                height=self.config.delivery_height,
+                allowed_hosts=self.config.remotion_source_screenshot_hosts,
+            )
+            normalized = work_dir / "normalized.png"
+            normalize_image(
+                self.tools,
+                original,
+                normalized,
+                width=self.config.delivery_width,
+                height=self.config.delivery_height,
+            )
+            candidate = AssetCandidate(
+                candidate_id="candidate-001",
+                provider="source_screenshot",
+                provider_asset_id=source.source_id,
+                media_kind="image",
+                mime_type="image/png",
+                title=source.title,
+                description="Editorial screenshot of a cited research source.",
+                source_page_url=source.url,
+                download_url="",
+                creator_name=source.publisher,
+                creator_url="",
+                width=self.config.delivery_width,
+                height=self.config.delivery_height,
+                duration_seconds=0,
+                rights=AssetRights(
+                    license_id="editorial-source-screenshot",
+                    license_name="Editorial source quotation; verify before broader reuse",
+                    terms_url=source.url,
+                    attribution_required=True,
+                    attribution_text=f"{source.title} — {source.publisher}".strip(" —"),
+                    review_status="editorial_context",
+                    review_reason=(
+                        "The screenshot is used to identify and quote a cited source. Copyright and "
+                        "quotation exceptions vary by jurisdiction; review before commercial reuse."
+                    ),
+                ),
+                raw_metadata={"source_id": source.source_id, "retrieved_at": str(source.retrieved_at)},
+            )
+            asset = build_asset_record(
+                request,
+                candidate,
+                original=original,
+                original_mime_type="image/png",
+                normalized=normalized,
+                media_kind="image",
+                width=self.config.delivery_width,
+                height=self.config.delivery_height,
+                duration_seconds=0,
+                transform="Headless local Chromium screenshot followed by exact 16:9 PNG normalization",
+                project_root=self.project_root,
+            )
+            return asset, [], warnings
+        if request.kind is RemotionAssetKind.GENERATED_IMAGE:
+            asset, usage = self._generated_remotion_asset(
+                request, edit_plan=edit_plan, work_dir=work_dir
+            )
+            return asset, usage, warnings
+        try:
+            candidates = find_asset_candidates(
+                request,
+                project_root=self.project_root,
+                policy=self.config.remotion_asset_policy,
+                language=self.config.output_language,
+                allow_share_alike=self.config.remotion_allow_share_alike,
+                environment=self.environment,
+            )
+        except BackendError as exc:
+            candidates = []
+            warnings.append(
+                f"stock lookup failed for {request.shot_id}; used the configured Image Backend: {exc.message}"
+            )
+        if not candidates:
+            if not warnings:
+                warnings.append(
+                    f"no approved stock candidate for {request.shot_id}; used the configured Image Backend"
+                )
+            asset, usage = self._generated_remotion_asset(
+                request,
+                edit_plan=edit_plan,
+                work_dir=work_dir,
+                warnings=warnings,
+            )
+            return asset, usage, warnings
+        atomic_write_json(
+            work_dir / "candidates.json",
+            {
+                "schema_version": 1,
+                "request": request.model_dump(mode="json"),
+                "candidates": [candidate.selection_payload() for candidate in candidates],
+            },
+        )
+        atomic_write_json(
+            work_dir / "provider-metadata.json",
+            {
+                candidate.candidate_id: candidate.raw_metadata for candidate in candidates
+            },
+        )
+        usage: list[UsageRecord] = []
+        selected = candidates[0]
+        if len(candidates) > 1:
+            execution = self.executor.structured(
+                "remotion_asset_select",
+                {
+                    "selection_strategy": "single-remotion-asset-v1",
+                    "asset_request": request.model_dump(mode="json"),
+                    "candidates": [candidate.selection_payload() for candidate in candidates],
+                },
+                RemotionAssetChoice,
+                max_output_tokens=256,
+                invariant=lambda choice: self._require(
+                    any(
+                        candidate.candidate_id == choice.candidate_id
+                        for candidate in candidates
+                    ),
+                    "Remotion asset selector returned an unknown candidate ID",
+                ),
+                instruction_suffix=(
+                    "Return only one supplied candidate_id. Do not return a URL, provider, path, "
+                    "license, explanation, or edit."
+                ),
+            )
+            choice = RemotionAssetChoice.model_validate(execution.artifact)
+            selected = next(
+                candidate
+                for candidate in candidates
+                if candidate.candidate_id == choice.candidate_id
+            )
+            atomic_write_json(work_dir / "selection-response.json", execution.result.raw_response)
+            usage.extend(_usage_list([execution.result.usage]))
+        ordered_candidates = [
+            selected,
+            *(candidate for candidate in candidates if candidate is not selected),
+        ]
+        for candidate in ordered_candidates:
+            candidate_dir = work_dir / candidate.candidate_id
+            try:
+                original, original_mime_type = materialize_candidate(
+                    candidate,
+                    destination_stem=candidate_dir / "original",
+                )
+                normalized, media_kind, width, height, duration, transform = (
+                    normalize_asset_media(
+                        self.tools,
+                        original,
+                        candidate_dir,
+                        width=self.config.delivery_width,
+                        height=self.config.delivery_height,
+                        fps=self.config.fps,
+                    )
+                )
+            except (VideoGeneratorError, OSError) as exc:
+                detail = exc.message if isinstance(exc, VideoGeneratorError) else str(exc)
+                warnings.append(
+                    f"candidate {candidate.candidate_id} failed materialization; tried the next "
+                    f"approved candidate: {detail}"
+                )
+                continue
+            asset = build_asset_record(
+                request,
+                candidate,
+                original=original,
+                original_mime_type=original_mime_type,
+                normalized=normalized,
+                media_kind=media_kind,
+                width=width,
+                height=height,
+                duration_seconds=duration,
+                transform=transform,
+                project_root=self.project_root,
+                warnings=warnings,
+            )
+            if candidate.rights.review_status == "editorial_context":
+                warning = (
+                    f"{request.shot_id} selected {candidate.provider} media requiring editorial "
+                    f"context review: {candidate.rights.review_reason}"
+                )
+                if warning not in warnings:
+                    warnings.append(warning)
+                    asset = asset.model_copy(update={"warnings": list(warnings)})
+            return asset, usage, warnings
+        warnings.append(
+            f"all approved candidates failed for {request.shot_id}; used the configured Image Backend"
+        )
+        asset, generated_usage = self._generated_remotion_asset(
+            request,
+            edit_plan=edit_plan,
+            work_dir=work_dir / "generated-fallback",
+            warnings=warnings,
+        )
+        return asset, [*usage, *generated_usage], warnings
+
+    def _remotion_assets(
+        self,
+        requests: RemotionAssetRequestSet,
+        *,
+        edit_plan: RemotionEditPlan,
+        research: ResearchPack | FactualResearchPack,
+    ) -> RemotionAssetBundle:
+        input_data = {
+            "requests": requests.model_dump(mode="json"),
+            "sources": [source.model_dump(mode="json") for source in research.sources],
+            "policy": self.config.remotion_asset_policy.value,
+            "allow_share_alike": self.config.remotion_allow_share_alike,
+            "provider_availability": {
+                "local_library": (self.project_root / "media-library").is_dir(),
+                "wikimedia": bool(self.environment.get("WIKIMEDIA_USER_AGENT", "")),
+                "pexels": bool(self.environment.get("PEXELS_API_KEY", "")),
+            },
+        }
+        metadata = self._stage_metadata(stage="images", task_id=None, input_data=input_data)
+        metadata.update(
+            backend_id="internal:remotion-assets",
+            backend_revision="remotion-assets-v1",
+            schema_hash=hash_value(
+                restricted_json_schema(
+                    RemotionAssetBundle.model_json_schema(mode="validation")
+                )
+            ),
+        )
+        reusable = self.store.reusable_record("images", **metadata)
+        if reusable:
+            return self.store.load_artifact(reusable, RemotionAssetBundle)
+        self.store.begin_stage("images", attempt=self.store.next_attempt("images"), **metadata)
+        source_by_id = {source.source_id: source for source in research.sources}
+        assets = []
+        usage: list[UsageRecord] = []
+        warnings: list[str] = []
+        for request in requests.requests:
+            item_input = {
+                "request": request.model_dump(mode="json"),
+                "policy": self.config.remotion_asset_policy.value,
+                "allow_share_alike": self.config.remotion_allow_share_alike,
+                "source": (
+                    source_by_id[request.source_id].model_dump(mode="json")
+                    if request.source_id in source_by_id
+                    else None
+                ),
+            }
+            item_metadata = {
+                "input_hash": hash_run_input(item_input),
+                "config_hash": hash_value(
+                    {
+                        "width": self.config.delivery_width,
+                        "height": self.config.delivery_height,
+                        "fps": self.config.fps,
+                        "image_backend": self.config.task_bindings["image_generate"],
+                        "wikimedia_configured": bool(
+                            self.environment.get("WIKIMEDIA_USER_AGENT", "")
+                        ),
+                        "pexels_configured": bool(self.environment.get("PEXELS_API_KEY", "")),
+                    }
+                ),
+                "backend_id": "internal:remotion-assets",
+                "backend_revision": "remotion-assets-v1",
+                "prompt_version": "",
+                "schema_hash": hash_value(
+                    restricted_json_schema(
+                        RemotionAsset.model_json_schema(mode="validation")
+                    )
+                ),
+            }
+            reusable_item = self.store.reusable_item(
+                "images", request.asset_id, **item_metadata
+            )
+            if reusable_item:
+                asset = self.store.load_item_artifact(reusable_item, RemotionAsset)
+                usage.extend(reusable_item.usage)
+                warnings.extend(reusable_item.warnings)
+            else:
+                workspace = self.store.workspace("images", item_id=request.asset_id)
+                asset, item_usage, item_warnings = self._resolve_remotion_asset(
+                    request,
+                    edit_plan=edit_plan,
+                    work_dir=workspace.work_dir,
+                    source_by_id=source_by_id,
+                )
+                promoted = self.store.promote_item(
+                    workspace,
+                    asset,
+                    usage=item_usage,
+                    warnings=item_warnings,
+                    **item_metadata,
+                )
+                asset = RemotionAsset.model_validate(promoted)
+                usage.extend(item_usage)
+                warnings.extend(item_warnings)
+            assets.append(asset)
+        credits_workspace = self.store.workspace("images", item_id="credits")
+        credits_input_hash = hash_run_input(
+            [asset.model_dump(mode="json") for asset in assets]
+        )
+        credits_metadata = {
+            "input_hash": credits_input_hash,
+            "config_hash": hash_value({"format": "credits-v1"}),
+            "backend_id": "internal:credits",
+            "backend_revision": "credits-v1",
+            "prompt_version": "",
+            "schema_hash": hash_value(
+                restricted_json_schema(
+                    RemotionCredits.model_json_schema(mode="validation")
+                )
+            ),
+        }
+        reusable_credits = self.store.reusable_item(
+            "images", "credits", **credits_metadata
+        )
+        if reusable_credits:
+            credits = self.store.load_item_artifact(reusable_credits, RemotionCredits)
+        else:
+            credits_json, credits_markdown = write_asset_credits(
+                assets,
+                output_dir=credits_workspace.work_dir,
+                project_root=self.project_root,
+            )
+            promoted_credits = self.store.promote_item(
+                credits_workspace,
+                RemotionCredits(
+                    credits_json=credits_json,
+                    credits_markdown=credits_markdown,
+                ),
+                **credits_metadata,
+            )
+            credits = RemotionCredits.model_validate(promoted_credits)
+        bundle = RemotionAssetBundle(
+            assets=assets,
+            credits_json=credits.credits_json,
+            credits_markdown=credits.credits_markdown,
+        )
+        promoted = self.store.complete_fanout_stage(
+            "images", bundle, usage=usage, warnings=list(dict.fromkeys(warnings))
+        )
+        for warning in dict.fromkeys(warnings):
+            self.store.add_warning(warning)
+        return RemotionAssetBundle.model_validate(promoted)
+
+    @staticmethod
+    def _first_hard_remotion_review_failure(
+        failed: Sequence[tuple[RemotionEditShot, RemotionAssetReviewDecision]],
+    ) -> tuple[RemotionEditShot, RemotionAssetReviewDecision] | None:
+        return next(
+            ((shot, decision) for shot, decision in failed if decision.hard_failure),
+            None,
+        )
+
+    def _remotion_visual_review(
+        self,
+        timeline: NarrationTimeline,
+        edit_plan: RemotionEditPlan,
+        requests: RemotionAssetRequestSet,
+        assets: RemotionAssetBundle,
+    ) -> RemotionVisualReviewBundle:
+        input_data = {
+            "narration_audio": timeline.narration_audio.model_dump(mode="json"),
+            "edit_plan": edit_plan.model_dump(mode="json"),
+            "requests": requests.model_dump(mode="json"),
+            "assets": assets.model_dump(mode="json"),
+            "quality": self.config.quality.value,
+        }
+        metadata = self._stage_metadata(
+            stage="visual-review", task_id=None, input_data=input_data
+        )
+        if self.config.quality is Quality.FINAL:
+            backend_id = self.config.task_bindings["visual_review"]
+            metadata.update(
+                backend_id=backend_id,
+                backend_revision=self.registry.descriptor(backend_id).revision,
+                schema_hash=hash_value(
+                    restricted_json_schema(
+                        RemotionVisualReviewBundle.model_json_schema(mode="validation")
+                    )
+                ),
+            )
+        reusable = self.store.reusable_record("visual-review", **metadata)
+        if reusable:
+            return self.store.load_artifact(reusable, RemotionVisualReviewBundle)
+        workspace = self.store.workspace("visual-review")
+        self.store.begin_stage("visual-review", attempt=workspace.attempt, **metadata)
+        if self.config.quality is Quality.DRAFT:
+            bundle = RemotionVisualReviewBundle(reviewed=False, assets=assets)
+            promoted = self.store.promote_stage(workspace, bundle)
+            return RemotionVisualReviewBundle.model_validate(promoted)
+        asset_by_shot = {asset.shot_id: asset for asset in assets.assets}
+        request_by_shot = {request.shot_id: request for request in requests.requests}
+
+        def render_proxy(bundle: RemotionAssetBundle, name: str) -> Path:
+            manifest = build_remotion_manifest(
+                project_root=self.project_root,
+                work_dir=workspace.work_dir / f"{name}-input",
+                edit_plan=edit_plan,
+                assets=bundle,
+                narration_path=self.project_root / timeline.narration_audio.path,
+                output_language=self.config.output_language,
+                music_path=None,
+                captions_enabled=self.config.captions_enabled,
+            )
+            output = workspace.work_dir / f"{name}.mp4"
+            verify_runtime_snapshot(self.config, self.store.frozen_assets)
+            render_remotion_video(
+                self.project_root,
+                manifest_path=manifest,
+                output_path=output,
+                bundle_runtime_hash=self._remotion_bundle_runtime_hash(),
+                proxy=True,
+            )
+            return output
+
+        def proxy_frames(
+            proxy: Path,
+            shot: RemotionEditShot,
+            pass_number: int,
+        ) -> list[Path]:
+            outputs = []
+            for label, fraction in (("start", 0.15), ("middle", 0.5), ("end", 0.85)):
+                output = (
+                    workspace.work_dir
+                    / f"{shot.shot_id}-review-{pass_number}-{label}.png"
+                )
+                timestamp = shot.start_seconds + (
+                    shot.end_seconds - shot.start_seconds
+                ) * fraction
+                self.tools.run(
+                    [
+                        self.tools.ffmpeg,
+                        "-y",
+                        "-v",
+                        "error",
+                        "-ss",
+                        f"{timestamp:.6f}",
+                        "-i",
+                        str(proxy),
+                        "-frames:v",
+                        "1",
+                        "-c:v",
+                        "png",
+                        str(output),
+                    ],
+                    timeout=120,
+                )
+                outputs.append(output)
+            return outputs
+
+        def review_shot(
+            shot: RemotionEditShot,
+            *,
+            proxy: Path,
+            bundle: RemotionAssetBundle,
+            pass_number: int,
+        ) -> tuple[RemotionAssetReviewDecision, list[UsageRecord]]:
+            current_asset = {asset.shot_id: asset for asset in bundle.assets}.get(
+                shot.shot_id
+            )
+            frames = proxy_frames(proxy, shot, pass_number)
+            return self._structured_item(
+                stage="visual-review",
+                item_id=f"{shot.shot_id}-review-{pass_number}",
+                task_id="visual_review",
+                input_data={
+                    "review_strategy": "single-remotion-shot-v1",
+                    "pass_number": pass_number,
+                    "shot": shot.model_dump(mode="json"),
+                    "asset": (
+                        current_asset.model_dump(mode="json")
+                        if current_asset is not None
+                        else None
+                    ),
+                    "rule": (
+                        "The three media inputs are start, middle, and end samples from the actual "
+                        "fixed-template Remotion composition, not raw assets. Judge the composed "
+                        "Shot across all three samples."
+                    ),
+                },
+                output_model=RemotionAssetReviewDecision,
+                media_inputs=frames,
+                max_output_tokens=500,
+                instruction_suffix=(
+                    "Return only passed, hard_failure, failures, and regeneration_instruction. Set "
+                    "hard_failure=true for copy, layout, template, or source-presentation defects "
+                    "that an image replacement cannot fix, and leave regeneration_instruction empty. "
+                    "Use hard_failure=false for asset-content defects only; if failed, write the image "
+                    "regeneration_instruction in English. Do not return IDs, paths, URLs, rights, "
+                    "scores, replacement fields, or renderer code."
+                ),
+            )
+
+        usage: list[UsageRecord] = []
+        first_proxy = render_proxy(assets, "proxy-pass-1")
+        failed: list[tuple[RemotionEditShot, RemotionAssetReviewDecision]] = []
+        for shot in edit_plan.shots:
+            decision, item_usage = review_shot(
+                shot,
+                proxy=first_proxy,
+                bundle=assets,
+                pass_number=1,
+            )
+            usage.extend(item_usage)
+            if not decision.passed:
+                failed.append((shot, decision))
+
+        final_assets = assets
+        if failed:
+            hard_failure = self._first_hard_remotion_review_failure(failed)
+            if hard_failure is not None:
+                shot, decision = hard_failure
+                raise BackendError(
+                    f"Remotion Shot {shot.shot_id} failed composed-frame review: "
+                    + "; ".join(decision.failures),
+                    kind=ErrorKind.INVALID_OUTPUT,
+                    action=(
+                        "Rerun from visual-plan or use the dashboard editor to shorten copy or "
+                        "choose a different fixed template."
+                    ),
+                )
+            replacements: dict[str, RemotionAsset] = {}
+            for shot, decision in failed:
+                request = request_by_shot.get(shot.shot_id)
+                current_asset = asset_by_shot.get(shot.shot_id)
+                if (
+                    request is None
+                    or current_asset is None
+                    or request.kind is RemotionAssetKind.SOURCE_SCREENSHOT
+                ):
+                    raise BackendError(
+                        f"Remotion Shot {shot.shot_id} failed composed-frame review: "
+                        + "; ".join(decision.failures),
+                        kind=ErrorKind.INVALID_OUTPUT,
+                        action="Rerun from visual-plan with a shorter headline or a different template.",
+                    )
+                corrected = request.model_copy(
+                    update={
+                        "generated_prompt": (
+                            request.generated_prompt
+                            + " Targeted correction: "
+                            + decision.regeneration_instruction.strip()
+                        )
+                    }
+                )
+                replacement, item_usage = self._generated_remotion_asset(
+                    corrected,
+                    edit_plan=edit_plan,
+                    work_dir=workspace.work_dir / f"{request.asset_id}-regeneration",
+                    warnings=[
+                        "The first composed-frame review failed; this asset was regenerated once."
+                    ],
+                )
+                replacements[shot.shot_id] = replacement
+                usage.extend(item_usage)
+            replaced_assets = [
+                replacements.get(asset.shot_id, asset) for asset in assets.assets
+            ]
+            credits_json, credits_markdown = write_asset_credits(
+                replaced_assets,
+                output_dir=workspace.work_dir / "regenerated-credits",
+                project_root=self.project_root,
+            )
+            final_assets = RemotionAssetBundle(
+                assets=replaced_assets,
+                credits_json=credits_json,
+                credits_markdown=credits_markdown,
+            )
+            second_proxy = render_proxy(final_assets, "proxy-pass-2")
+            for shot, _ in failed:
+                decision, item_usage = review_shot(
+                    shot,
+                    proxy=second_proxy,
+                    bundle=final_assets,
+                    pass_number=2,
+                )
+                usage.extend(item_usage)
+                if not decision.passed:
+                    raise BackendError(
+                        f"regenerated Remotion Shot {shot.shot_id} failed final review: "
+                        + "; ".join(decision.failures),
+                        kind=ErrorKind.INVALID_OUTPUT,
+                        action="Inspect the proxy and rerun from visual-plan or images.",
+                    )
+        bundle = RemotionVisualReviewBundle(reviewed=True, assets=final_assets)
+        promoted = self.store.promote_stage(workspace, bundle, usage=usage)
+        return RemotionVisualReviewBundle.model_validate(promoted)
+
+    def _render_remotion(
+        self,
+        *,
+        timeline: NarrationTimeline,
+        captions: CaptionBundle,
+        edit_plan: RemotionEditPlan,
+        assets: RemotionAssetBundle,
+        music: MusicBundle,
+    ) -> RenderBundle:
+        input_data = {
+            "timeline": timeline.model_dump(mode="json"),
+            "captions": captions.model_dump(mode="json"),
+            "edit_plan": edit_plan.model_dump(mode="json"),
+            "assets": assets.model_dump(mode="json"),
+            "music": music.model_dump(mode="json"),
+        }
+        metadata = self._stage_metadata(stage="render", task_id=None, input_data=input_data)
+        metadata.update(
+            backend_id="internal:remotion",
+            backend_revision="remotion-4.0.489-templates-v1",
+            schema_hash=hash_value(
+                restricted_json_schema(
+                    RemotionRenderPlan.model_json_schema(mode="validation")
+                )
+            ),
+        )
+        reusable = self.store.reusable_record("render", **metadata)
+        if reusable:
+            return self.store.load_artifact(reusable, RenderBundle)
+        workspace = self.store.workspace("render")
+        self.store.begin_stage("render", attempt=workspace.attempt, **metadata)
+        manifest_path = build_remotion_manifest(
+            project_root=self.project_root,
+            work_dir=workspace.work_dir / "remotion-input",
+            edit_plan=edit_plan,
+            assets=assets,
+            narration_path=self.project_root / timeline.narration_audio.path,
+            output_language=self.config.output_language,
+            music_path=(
+                self.project_root / music.fitted_audio.path
+                if music.enabled and music.fitted_audio
+                else None
+            ),
+            captions_enabled=self.config.captions_enabled,
+        )
+        base = workspace.work_dir / "base-remotion.mp4"
+        verify_runtime_snapshot(self.config, self.store.frozen_assets)
+        render_remotion_video(
+            self.project_root,
+            manifest_path=manifest_path,
+            output_path=base,
+            bundle_runtime_hash=self._remotion_bundle_runtime_hash(),
+        )
+        primary = workspace.work_dir / "video.mp4"
+        burned = None
+        caption_mode = "selectable_and_composited" if captions.enabled else "none"
+        plan = RemotionRenderPlan(
+            edit_plan=edit_plan,
+            assets=assets.assets,
+            credits_json=assets.credits_json,
+            credits_markdown=assets.credits_markdown,
+            render_manifest=manifest_reference(manifest_path, self.project_root),
+            narration_path=timeline.narration_audio.path,
+            music_path=music.fitted_audio.path if music.enabled and music.fitted_audio else None,
+            caption_srt_path=captions.srt.path if captions.enabled and captions.srt else None,
+            caption_ass_path=None,
+            caption_language=self.config.output_language if captions.enabled else None,
+            width=self.config.delivery_width,
+            height=self.config.delivery_height,
+            fps=self.config.fps,
+            duration_seconds=edit_plan.duration_seconds,
+            caption_mode=caption_mode,
+        )
+        outputs = finalize_rendered_video(
+            self.tools,
+            base_path=base,
+            output_path=primary,
+            workspace_root=self.project_root,
+            caption_srt_path=plan.caption_srt_path,
+            caption_ass_path=None,
+            caption_language=plan.caption_language,
+            burned_output_path=burned,
+        )
+        primary_checks = qc_video(
+            self.tools,
+            primary,
+            width=self.config.delivery_width,
+            height=self.config.delivery_height,
+            fps=self.config.fps,
+            expected_duration=plan.duration_seconds,
+            budget=self.config.duration_seconds,
+            captions_expected=captions.enabled,
+        )
+        if not all(check.passed for check in primary_checks):
+            failures = "; ".join(
+                f"{check.name}: {check.detail}"
+                for check in primary_checks
+                if not check.passed
+            )
+            raise MediaError(
+                f"Remotion media QC failed: {failures}", kind=ErrorKind.INVALID_OUTPUT
+            )
+        if burned and burned in outputs:
+            burned_checks = qc_video(
+                self.tools,
+                burned,
+                width=self.config.delivery_width,
+                height=self.config.delivery_height,
+                fps=self.config.fps,
+                expected_duration=plan.duration_seconds,
+                budget=self.config.duration_seconds,
+                captions_expected=False,
+            )
+            if not all(check.passed for check in burned_checks):
+                failures = "; ".join(
+                    f"{check.name}: {check.detail}"
+                    for check in burned_checks
+                    if not check.passed
+                )
+                raise MediaError(
+                    f"Remotion burned-caption QC failed: {failures}",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                )
+        bundle = RenderBundle(
+            plan=plan,
+            primary_video=MediaReference(
+                path=relative_path(primary, self.project_root),
+                sha256=sha256_file(primary),
+                mime_type="video/mp4",
+            ),
+            burned_video=(
+                MediaReference(
+                    path=relative_path(burned, self.project_root),
+                    sha256=sha256_file(burned),
+                    mime_type="video/mp4",
+                )
+                if burned and burned in outputs
+                else None
+            ),
+        )
+        promoted = self.store.promote_stage(workspace, bundle)
+        return RenderBundle.model_validate(promoted)
+
     def _render(
         self,
         timeline: NarrationTimeline,
@@ -10636,6 +12639,20 @@ class WorkflowEngine:
             srt = outputs_dir / "captions.srt"
             copy_atomic(self.project_root / captions.srt.path, srt)
             output_files.append(("caption_sidecar", srt, "application/x-subrip"))
+        if isinstance(rendered.plan, RemotionRenderPlan):
+            credits_json = outputs_dir / "media-credits.json"
+            credits_markdown = outputs_dir / "media-credits.md"
+            copy_atomic(self.project_root / rendered.plan.credits_json.path, credits_json)
+            copy_atomic(
+                self.project_root / rendered.plan.credits_markdown.path,
+                credits_markdown,
+            )
+            output_files.extend(
+                [
+                    ("media_credits_json", credits_json, "application/json"),
+                    ("media_credits_markdown", credits_markdown, "text/markdown"),
+                ]
+            )
         manifest = delivery_manifest(
             run_id=self.store.manifest.run_id,
             output_files=output_files,

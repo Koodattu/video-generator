@@ -1,0 +1,27 @@
+{
+  "name": "video-generator-remotion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "node --test scripts/*.test.mjs",
+    "studio": "remotion studio src/index.tsx",
+    "ensure-browser": "node scripts/ensure-browser.mjs"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.489",
+    "@remotion/media": "4.0.489",
+    "@remotion/renderer": "4.0.489",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "remotion": "4.0.489",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.4.0",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "typescript": "5.9.3"
+  }
+}

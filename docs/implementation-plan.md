@@ -3,6 +3,28 @@
 The code milestones below are implemented. Several native-Windows component smokes now pass, but the
 full bilingual profile and 60–90-second quality acceptance criteria remain deliberately open.
 
+## Remotion V1/V2 extension status — July 2026
+
+The selectable `remotion_explainer` branch is implemented without changing the default
+`still_image` behavior:
+
+- V1: eight fixed audited components, host-owned word/frame timing, hard cuts plus one deterministic
+  section wipe, code/headline/diagram/comparison/meme/source templates, kinetic word captions, local
+  Remotion rendering, FFmpeg mux/QC, and deterministic SFX;
+- V2: owned media-library lookup, evidence-linked browser screenshots, allowlisted Commons/Pexels
+  retrieval, normalized GIF/video assets, license/attribution records and credits, composed proxy
+  inspection, one targeted generated-image repair, a proportional Dashboard timeline, immutable
+  per-Shot edits, and an optional hash-bound manual asset-approval child Run;
+- LLM scope: one strict direction response per Shot and, only when useful, one single-ID candidate
+  selection response. Python owns IDs, timing, frames, paths, downloads, rights policy, transitions,
+  motion, generated-image requests, and rendering.
+
+Deliberately deferred are arbitrary model-generated React/components, OTIO interchange, portrait or
+square compositions, selector/highlight authoring for evidence screenshots, a general nonlinear editor,
+and generative video clips. GIPHY is excluded because its ordinary API usage is a poor fit for durable
+local Run assets; the discontinued Tenor API is also excluded. Owned local GIF/video files and eligible
+Commons animation provide the supported animated-media paths.
+
 ## Delivery strategy
 
 All four curated profiles and both languages are v0 scope. “Support them from the start” means their contracts, capability descriptors, configuration shape, fixtures, and acceptance matrix are designed before provider code. It should not mean implementing every unstable SDK and CUDA stack simultaneously before any end-to-end path works.
@@ -17,9 +39,10 @@ The v0 release is complete only when:
 - `local`, `cloud-openai`, `cloud-gemini`, and `hybrid-local-first` have explicit, inspectable mappings and pass their applicable conformance tests;
 - 30-second smoke Runs and 60–90-second English and Finnish Runs complete for every profile;
 - a successful output uses 90–100% of its Duration Budget and never exceeds the configured hard limit after frame-grid quantization;
-- every planned visual Scene or Shot has one generated image, measured timing, and stable provenance;
+- every planned visual Scene or Shot has one resolved asset (generated or rights-tracked media), measured timing, and stable provenance;
 - captions are enabled by default and produce SRT plus an embedded selectable track;
-- optional burned ASS captions produce a separate file from the same Caption Track;
+- optional burned ASS captions produce a separate still-renderer file from the same Caption Track;
+  Remotion instead composites kinetic word captions in its primary visual stream;
 - optional instrumental music works in each profile or fails according to its declared Failure Policy;
 - cloud cost guarding prevents a call that would cross the frozen ceiling;
 - local models run one at a time and VRAM returns near the measured baseline after runner termination;
@@ -258,6 +281,8 @@ The same contracts should scale. A new workflow abstraction is justified only by
 | Contract | every Backend obeys its protocol and typed failures | adapter changes |
 | Mocked integration | stage order, retries, frozen resume, parent-linked rerun, failure policy | every change |
 | Deterministic media E2E | actual FFmpeg output and ffprobe QC | media changes and CI where available |
+| Remotion contract/security | eight templates, small LLM schemas, rights filtering, redirect/request blocking, immutable edit/approval forks | Remotion or asset changes |
+| Remotion local E2E | exact npm/Chrome runtime, composed proxy, captions, transitions, H.264 delivery | Remotion/Node changes and Windows CI where available |
 | Live cloud smoke | access, current API shape, small paid request | opt-in with credentials |
 | Live local smoke | runtime/model/platform/VRAM lifecycle | GPU machine |
 | Quality suite | English/Finnish output and profile comparisons | explicit evaluation runs |

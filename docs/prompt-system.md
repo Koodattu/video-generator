@@ -24,6 +24,8 @@ prompts/
   claim-inventory/v1/
   duration-repair/v1/
   visual-plan/v1/
+  remotion-direction/v1/
+  remotion-asset-select/v1/
   image-prompt-compile/
     gpt-image-2/v1/
     gemini-3.1-flash-image/v1/
@@ -51,7 +53,8 @@ All creative tasks follow these rules unless their narrower task overrides one:
 - Work directly in the selected Output Language; do not draft in English and translate into Finnish.
 - Treat research as inspiration in fiction mode. Do not reuse distinctive source phrasing, characters, or plot structures.
 - Return only the requested structured fields. Do not include hidden reasoning or a chain-of-thought narrative.
-- Preserve stable IDs and quote exact Scene IDs in findings.
+- Preserve supplied stable IDs only when the task schema contains an ID field. Never invent operational
+  IDs, timings, frame numbers, URLs, paths, licenses, or renderer settings.
 - Make uncertainty explicit in structured fields rather than inventing evidence.
 - Stay inside the Audience Profile and Creative Brief.
 - Prefer specific sensory or behavioral detail over abstract claims about emotion.
@@ -141,17 +144,45 @@ Three review tasks inspect the same draft independently:
 | Spoken language | listenability, sentence load, rhythm, pronunciation, repetition, language naturalness | change story facts without flagging them |
 | Constraints/safety/continuity | duration risk, brief/audience violations, Scene identity drift, factual claims, missing setup/payoff | silently waive a hard rule |
 
-Each finding has severity, Scene ID, evidence from the draft, and a concrete recommendation. One revision task consolidates conflicts by priority: hard safety/evidence constraints, causal coherence, spoken clarity, duration, then stylistic preference. It returns a complete revised Narration Script and a disposition for every material finding.
+Each finding has severity, Scene ID, evidence from the draft, and a concrete recommendation. The host
+groups findings by Scene and asks for one complete replacement `spoken_text` only where an edit is
+needed. It preserves the title, Scene ID, order, pause, unchanged Scenes, and finding disposition
+bookkeeping itself. The model is never asked to rebuild the complete Script JSON for a local edit.
+Each changed Scene is independently rechecked against its original findings. Ordinary story/spoken
+findings receive the current Scene plus bounded adjacent context. A brief-constraint finding instead
+receives the original trusted brief constraint, exact finding, and complete revised Script, with no
+adjacent-context field, because the constraint may span Scenes and the judge must not invent an
+unrelated continuity requirement. When that finding includes one explicit full-Scene replacement, the
+host uses its word count only to aim at the largest feasible compressed repair inside the residual
+Script envelope; the quoted model text is never promoted directly. If a
+check rejects the first bounded repair, one final micro-call receives only the current Scene, unresolved
+recommendations, and the rechecker's concrete explanation; a second recheck is terminal.
 
-Deterministic checks then validate Scene IDs/order, nonempty spoken text, forbidden markup, configured limits, and required fields. One schema/constraint repair may address hard failures; it is not another creative revision cycle.
+Story and spoken-language reviewers receive a spoken-script-only view of the Brief and Outline. The host
+removes visual-only `must_include`/`avoid` entries and `visual_opportunity` fields before those calls;
+renderer requirements remain available to visual planning and Remotion direction instead of becoming
+unnecessary narration edits.
+
+Initial drafting follows the same boundary: one strict call per Outline Scene returns only
+`spoken_text`, and the host assembles the Script. Deterministic checks validate IDs/order, nonempty
+spoken text, forbidden markup, configured limits, and required fields. They also reject a trailing
+serialization-like host fragment such as `pause_after_seconds 0.35` when a model accidentally appends
+it to narration, while allowing identifiers inside a genuine technical explanation. That specific
+failure receives a small correction call containing only the invalid text and validation error; it
+does not resend or ask the model to reconstruct the Script contract.
 
 ### Duration Repair
 
-After TTS, the repair task receives measured Scene durations, the acceptable remaining delta, and only the Scenes selected by a deterministic allocator. It lengthens or shortens those passages while preserving their purpose, facts, continuity, and Scene IDs. The response includes replaced text and an estimated delta. Only those clips are resynthesized.
+After TTS, a deterministic allocator selects only the Scenes that can close the measured duration
+delta. Each repair call receives one Scene, bounded adjacent context, a feasible host-calculated word
+range, and allowed factual evidence when applicable. It returns only one replacement `spoken_text`;
+the host retains IDs, pauses, timing measurements, counts, and estimates. Only changed clips are
+resynthesized.
 
 ## Visual prompt architecture
 
-The image model never receives the Narration Script and a vague request to “make a matching image.” The visual pipeline has four layers:
+In the `still_image` branch, the image model never receives the Narration Script and a vague request to
+“make a matching image.” The visual pipeline has four layers:
 
 1. `VisualBrief`: what this Scene or timed Shot means and depicts;
 2. `StyleProfile`: how every image should look;
@@ -214,9 +245,65 @@ Compilers must not invent story content. If a Visual Brief lacks a required deta
 
 For important recurring characters, final-quality profiles may create or select a reference image before the Scene batch when the Backend supports references. This is an optimization for recognizable traits, not a promise of pixel-perfect continuity.
 
+### Remotion direction and asset selection
+
+The `remotion_explainer` branch does not ask a model for an edit-decision list, timeline JSON, React,
+download instructions, or rights metadata. The host first allocates a frame-aligned Shot from canonical
+word timings and supplies one narration excerpt plus a bounded menu of templates, asset kinds, and SFX.
+One `remotion_direction` request returns exactly:
+
+```text
+template
+headline
+supporting_text
+body_lines
+asset_kind
+asset_query
+sfx
+```
+
+Every field has a small enum or length bound. The portable structured-output schema intentionally stays
+flat because the common local/cloud schema subset cannot express every template-dependent relationship.
+Before strict contract validation, the host therefore resolves the opening/final template, discards
+fields the selected fixed component cannot render, caps layout text at word boundaries, and downgrades a
+body/media-dependent template when its required creative input is absent. It never invents missing body
+copy or an asset query. The raw provider response remains recorded beside the canonical aggregate, so
+the transformation is auditable and does not require another LLM repair call.
+
+The host also derives the Shot's purpose, motion preset, hard-cut/section-wipe placement,
+generated-image prompt, IDs, timing, frames, and paths. Visible factual copy must come verbatim from the
+current narration excerpt; a non-contiguous headline is replaced with a bounded exact excerpt, optional
+copy is cleared, and an incompatible body template is downgraded. This ensures factual on-screen claims
+cannot bypass the completed evidence gate. The model may express an asset search query in English
+because the configured media services and image models perform better with English retrieval/prompting;
+Finnish narration and captions remain canonical.
+
+Explicit visual-only `must_include` and `avoid` rules are reviewed once more against the complete
+assembled edit plan before it is promoted, including dashboard-authored overrides. A trailing explicit
+production clause such as “and show a reaction GIF” is split from `idea_direction` only for the Remotion
+renderer: its narrative prefix remains in research, ideation, selection, outline, drafting, and review,
+while the visual suffix enters only Remotion direction and this plan-level gate. Ambiguous wording stays
+in the narrative constraint rather than being silently dropped.
+
+Composed-frame review distinguishes replaceable asset-content failures from hard copy, layout,
+template, and source-presentation failures. Only the former may trigger one image regeneration; hard
+failures stop with an edit-plan correction instead of replacing unrelated art.
+
+The asset resolver owns provider calls and filters results by source, media type, dimensions, license,
+attribution completeness, and local policy. Only when multiple eligible records remain does
+`remotion_asset_select` run. Its schema contains one `candidate_id`, and validation requires that exact ID
+to exist in the supplied candidate list. It cannot return a URL, filename, license, score, explanation,
+or alternate candidate. A zero-candidate result falls through programmatically to the next provider or
+the configured Image Backend.
+
+Dashboard text/template/asset-intent edits do not invoke an LLM. The server applies the requested fields
+to the complete stored plan, reruns all domain validation, and freezes that full override in an immutable
+child Run. Operational fields remain host-owned.
+
 ## Visual Review
 
-Visual Review receives the generated image, its Visual Brief, resolved Style Profile, and relevant Character Identities. It emits bounded scores and explicit failures for:
+Still-image Visual Review receives the generated image, its Visual Brief, resolved Style Profile, and
+relevant Character Identities. It emits bounded scores and explicit failures for:
 
 - subject/action fulfillment;
 - style match;
@@ -228,6 +315,13 @@ Visual Review receives the generated image, its Visual Brief, resolved Style Pro
 The review cannot request aesthetic churn merely because another image might be prettier. A regeneration is justified by a failed requirement or a configured score threshold. Its targeted instruction states what to preserve and what to correct. All failures are regenerated in one batch, once. Every replacement is reviewed again; that second result cannot request another regeneration. A remaining hard failure stops a strict final-quality Run or follows an explicitly declared non-strict policy.
 
 Draft profiles may skip Visual Review. Final profiles require a conforming vision Backend; they may not silently claim review when the local LLM is configured text-only.
+
+For a final-quality Remotion Run, review instead receives three extracted frames—start, middle, and end—
+from each low-resolution composed Shot. Each Shot is a separate bounded call, so the reviewer sees actual
+text layout, animation state, and source presentation without returning a large multi-Shot JSON report.
+It may request one generated-image correction. The host performs the replacement, rerenders the complete
+proxy, and runs one terminal re-review; source-screenshot or layout failures stop rather than being
+papered over with unrelated generated media.
 
 ## Music prompt
 

@@ -1,9 +1,11 @@
 # Video Generator
 
-A local-first Python CLI that turns one creative brief into a narrated still-image video. The typed
+A local-first Python CLI that turns one creative brief into a narrated video. The typed
 workflow supports fiction and evidence-gated factual content, narrative/explainer/myth-buster formats,
 measured narration delivery, and either one image per editorial Scene or a faster timed Shot sequence.
-It optionally creates instrumental music and renders MP4 delivery files with FFmpeg.
+It preserves the original generated-still renderer and adds an AI-directed, fixed-template Remotion
+explainer renderer. Both use the same explicitly configured narration/image Backends and local FFmpeg
+media processing; the `local` profile keeps model inference on the machine.
 
 The default `generate` command runs end to end. Every public stage and expensive per-visual item is
 checkpointed in an immutable Run Bundle, so `resume` does not silently repeat valid paid or local
@@ -17,9 +19,11 @@ changing the workflow.
   Claim Inventory, and an independent pre-TTS Factual Review. Offline factual Runs are rejected.
 - Narrative, explainer, and factual myth-buster editorial formats; slow, standard, and fast measured
   narration presets with an optional custom delivery direction.
-- Static 16:9 images with hard cuts; default output is 1280x720 draft or 1920x1080 final at 30 fps.
-- Selectable SRT captions, plus optional ASS captions with the active spoken word highlighted in a
-  second, burned-in MP4.
+- `still_image` preserves static/cadenced generated-image videos. `remotion_explainer` uses eight
+  controlled kinetic-text, screenshot, code, diagram, comparison, meme, and conclusion templates.
+- Default output is 1280x720 draft or 1920x1080 final at 30 fps.
+- SRT plus selectable captions by default. The still renderer can emit a second ASS-burned MP4; the
+  Remotion renderer composites active-word kinetic captions into its primary visual stream.
 - Optional ambient instrumental music mixed below narration.
 - Built-in `ms_paint_stick` image style and arbitrary additional style IDs described in config.
   Production profiles render every style through their configured generative image model; the
@@ -34,6 +38,8 @@ changing the workflow.
 - [`uv`](https://docs.astral.sh/uv/) for locked environments.
 - FFmpeg and ffprobe on `PATH`, with libx264 and AAC; libass is additionally required for animated
   captions.
+- Node.js and npm on `PATH` only for `video_style = "remotion_explainer"`. Remotion, React, TypeScript,
+  and Chrome Headless Shell are exact-lock local runtime dependencies; WSL2 and Docker are not needed.
 - For local CUDA Backends: a current NVIDIA driver and substantial free disk space. Setup selects
   CUDA-compatible PyTorch wheels for Torch workers; faster-whisper uses its isolated CTranslate2
   runtime instead. Only one model worker owns the GPU at a time.
@@ -73,6 +79,16 @@ The 90-second example is the intended first useful target. For the first mechani
 `duration_seconds = 30`. The configured duration is both the goal and hard ceiling; accepted measured
 narration must occupy 85-100% of it.
 
+For a Remotion Run, set `video_style = "remotion_explainer"` before Setup. Config-aware Setup runs
+`npm ci`, TypeScript and cache-integrity tests, and Remotion's pinned browser installer. Generate never
+installs or updates Node packages or Chromium unexpectedly.
+
+```powershell
+video-generator setup --config config.toml --llm-profile local-llm.toml
+video-generator preflight --config config.toml
+video-generator generate --config config.toml --brief brief.toml
+```
+
 ## Fastest first Run: cloud
 
 Choose `cloud-openai`, `cloud-gemini`, or `cloud-openai-gemini` in `config.toml`, set the corresponding
@@ -110,9 +126,16 @@ cloud budgets are not oversubscribed. Progress is streamed from the authoritativ
 closing the browser does not stop the worker. Stop interrupts the complete worker process tree and
 leaves the Run resumable.
 
-Each Run view joins the 19-stage timeline, script Scenes, timed visual Shots, narration clips, Visual Briefs, compiled
-image prompts, generated images, Visual Reviews, delivery media, costs, logs, and every file below
-the Run directory. Files with recorded stage hashes are distinguished from internal or untracked files.
+Each Run view joins the 19-stage timeline, script Scenes, timed visual Shots, narration clips, Visual Briefs,
+compiled image prompts, generated/resolved media, Visual Reviews, delivery media, costs, logs, and every
+file below the Run directory. Remotion Runs also show a proportional Shot timeline and a constrained
+per-Shot template/copy/asset-intent editor. Saving creates a fully validated immutable child Run; the
+parent is never modified. When manual asset approval is enabled, the same view can approve the exact
+hash-bound asset records into another child Run before visual review continues. Files with recorded stage
+hashes are distinguished from internal or untracked files.
+
+Approval is Dashboard-only. If final visual review regenerates an asset, the changed record hash pauses
+the child again for a second explicit approval before music/render.
 The server binds only to `127.0.0.1`; it is not an authenticated multi-user service and should not be
 published through a reverse proxy.
 
@@ -329,9 +352,75 @@ Every override is validated against its protocol, language, usage purpose, Offli
 capabilities before a Run is created. English and Finnish use the same workflow contracts; separate
 orchestration code is not duplicated by language.
 
+## Choose the video renderer
+
+`video_style` is independent from the image `style`/`style_description` fields:
+
+```toml
+# Original workflow: one generated still per Scene or cadenced Shot.
+video_style = "still_image"
+
+# Or: word-anchored, fixed-template internet-native explainer.
+video_style = "remotion_explainer"
+remotion_asset_policy = "stock_preferred" # or local_only
+remotion_allow_share_alike = false
+remotion_require_asset_approval = false # true pauses after asset resolution for Dashboard approval
+remotion_source_screenshot_hosts = [] # explicit trusted parent hosts; empty disables page capture
+```
+
+The Remotion renderer uses a deterministic eight-template library: `kinetic_hook`, `headline_zoom`,
+`source_screenshot`, `code_reveal`, `diagram_flow`, `comparison_split`, `meme_cutaway`, and
+`conclusion`. The local LLM directs one Shot at a time through a strict small schema. Python—not the
+model—owns Shot/Scene IDs, word anchors, time/frame conversion, asset IDs, URLs, downloads, paths,
+license interpretation, renderer settings, and final assembly. A second small call may choose only one
+supplied `candidate_id`; it cannot invent a URL or license. This is intentionally not model-generated
+React or a giant timeline JSON response.
+
+Remotion asset resolution is policy-driven and ordered:
+
+1. a filename-matched owned/authorized file under `media-library/`;
+2. allowlisted public-domain/CC0/CC BY Wikimedia Commons media;
+3. Pexels photo/video when `PEXELS_API_KEY` is configured; and
+4. the configured image-generation Backend as a fallback (local in the `local` profile).
+
+`offline = true` forces `local_only`, rejects a nonempty source-screenshot host allowlist, and disables
+page capture, so no asset service or browser navigation is contacted. Commons requests require a
+descriptive `WIKIMEDIA_USER_AGENT`; ShareAlike assets remain excluded unless explicitly enabled.
+Provider redirects stay on HTTPS, discard credential-bearing headers, and are host-revalidated. Source
+screenshot filtering rejects known private-network requests. GIF/video assets are normalized to short
+silent H.264 clips, and every asset retains its validated response MIME, source, creator, license, hash,
+retrieval time, and transformation provenance. GIPHY is intentionally absent because its normal
+API terms do not fit durable local caching, and the discontinued Tenor API is not used.
+
+Final-quality Runs render a low-resolution Remotion proxy, inspect start/middle/end composed frames for
+every Shot, and allow at most one targeted regeneration through the configured Image Backend followed by
+one re-review. This checks for blank media, clipped text, unreadable layouts, and misleading source
+presentation rather than reviewing a raw downloaded asset. The delivered `outputs/` directory includes
+`media-credits.json` and `media-credits.md`; editorial source screenshots also add an explicit review
+warning.
+
+Remotion rendering itself is local. Optional Commons/Pexels calls retrieve media, not model output, but
+their LLM-authored English search queries and the media requests leave the machine. Use `offline = true`
+for a network-isolated Run; it forces `local_only` and requires local model Backends. Browser filtering
+mitigates common SSRF paths but is not a complete network sandbox.
+Source screenshots are restricted to factual Scenes with linked evidence. Capture currently records one
+unauthenticated viewport; it does not select/highlight a DOM element, reuse a login, or bypass bot checks.
+To reduce DNS-rebinding/TOCTOU exposure, arbitrary evidence hosts are disabled: a source is eligible only
+when its exact hostname or parent domain is listed in `remotion_source_screenshot_hosts`. This is a trust
+allowlist applied to the initial page, redirects, frames, and subresources; pages using an unlisted CDN
+may render incompletely until that CDN is explicitly trusted too. DNS is still resolved separately by
+Chromium after validation, so this is not a complete browser sandbox; leave the list empty on sensitive
+networks.
+The Dashboard exposes a source-screenshot edit only when that exact Shot has persisted, scene-grounded
+evidence on an allowed host; the server enforces the same rule before creating the child Run.
+Remotion's license is separate from this repository's license: individuals and teams of up to three
+may use it under its free terms, while larger organizations using programmatic rendering should review
+the current [Remotion license](https://www.remotion.dev/license). Also review each media provider's
+current terms before publishing commercially.
+
 ## Editorial format, visual cadence, and pacing
 
-The default remains the original behavior: `content_mode = "fiction"`,
+The default remains the original behavior: `video_style = "still_image"`, `content_mode = "fiction"`,
 `content_format = "narrative"`, `narration_pace = "standard"`, and
 `visual_shot_mode = "scene_locked"`. These axes are independent, so a factual narrative can remain
 measured while a fictional explainer can use a fast timed-image sequence.
@@ -428,6 +517,7 @@ video-generator evaluate --suite quality --config config.toml
 - [Model matrix and pins](docs/model-matrix.md)
 - [Architecture decisions](docs/adr/)
 
-The implementation favors a fixed inspectable workflow over open-ended agent loops: one structured
-repair per LLM result, one measured narration Duration Repair, one final-quality image regeneration
+The implementation favors a fixed inspectable workflow over open-ended agent loops: bounded
+structured-output correction (one retry for ordinary cloud tasks, at most two for local or
+length-sensitive text), one measured narration Duration Repair, one final-quality image regeneration
 batch, and no hidden fallbacks. That keeps cost, provenance, resumption, and failure behavior legible.

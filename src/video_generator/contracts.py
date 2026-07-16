@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import ipaddress
 import math
+import re
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, PositiveInt, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 
 def utc_now() -> datetime:
@@ -53,7 +56,69 @@ class VisualShotMode(StrEnum):
     CADENCED = "cadenced"
 
 
+class VideoStyle(StrEnum):
+    STILL_IMAGE = "still_image"
+    REMOTION_EXPLAINER = "remotion_explainer"
+
+
+class RemotionAssetPolicy(StrEnum):
+    LOCAL_ONLY = "local_only"
+    STOCK_PREFERRED = "stock_preferred"
+
+
 MAX_CADENCED_SHOTS = 72
+
+
+_SPOKEN_TEXT_HOST_FIELD_PATTERN = re.compile(
+    r"""
+    (?:^|[.!?]\s+)
+    [\"']?
+    (?P<field>
+        pause_after_seconds
+        | schema_version
+        | scene_id
+        | spoken_text
+        | minimum_word_count
+        | target_word_count
+        | maximum_word_count
+        | count_method
+        | draft_strategy
+        | revision_strategy
+        | repair_strategy
+    )
+    [\"']?
+    (?:\s*[:=]\s*|\s+)
+    (?:
+        [-+]?(?:\d+(?:\.\d+)?|\.\d+)\b
+        | true\b
+        | false\b
+        | null\b
+        | none\b
+        | scene-\d+\b
+        | single-scene[\w-]*\b
+        | len\([^\r\n]{1,200}\)
+        | [\"'][^\"'\r\n]{0,200}[\"']
+        | \{[^\r\n]{0,200}\}
+        | \[[^\r\n]{0,200}\]
+    )
+    \s*[,;.]?\s*$
+    """,
+    flags=re.IGNORECASE | re.VERBOSE,
+)
+
+
+def validate_spoken_text_only(value: str) -> str:
+    match = _SPOKEN_TEXT_HOST_FIELD_PATTERN.search(value)
+    if match is not None:
+        raise PydanticCustomError(
+            "spoken_text_host_field",
+            (
+                "spoken_text ends with the host schema field fragment '{field}'; "
+                "return only words intended for narration"
+            ),
+            {"field": match.group("field")},
+        )
+    return value
 
 
 def estimated_cadenced_shot_count(
@@ -99,6 +164,8 @@ TASK_IDS: tuple[str, ...] = (
     "duration_repair",
     "caption_alignment",
     "visual_plan",
+    "remotion_direction",
+    "remotion_asset_select",
     "image_prompt_compile",
     "image_generate",
     "visual_review",
@@ -147,6 +214,8 @@ TASK_PROTOCOL: dict[str, ProtocolName] = {
     "duration_repair": ProtocolName.STRUCTURED_TEXT,
     "caption_alignment": ProtocolName.ALIGNMENT,
     "visual_plan": ProtocolName.STRUCTURED_TEXT,
+    "remotion_direction": ProtocolName.STRUCTURED_TEXT,
+    "remotion_asset_select": ProtocolName.STRUCTURED_TEXT,
     "image_prompt_compile": ProtocolName.STRUCTURED_TEXT,
     "image_generate": ProtocolName.IMAGE,
     "visual_review": ProtocolName.STRUCTURED_TEXT,
@@ -201,9 +270,16 @@ class RawRunConfig(VersionedContract):
     narration_pace: NarrationPace = NarrationPace.STANDARD
     narration_delivery: Annotated[str, Field(max_length=500)] = ""
     audience: Literal["family_safe_general"] = "family_safe_general"
+    video_style: VideoStyle = VideoStyle.STILL_IMAGE
     style: Annotated[str, Field(min_length=1, max_length=120)] = "ms_paint_stick"
     style_description: Annotated[str, Field(max_length=1000)] = ""
     motion_style: Literal["static_cuts"] = "static_cuts"
+    remotion_asset_policy: RemotionAssetPolicy = RemotionAssetPolicy.STOCK_PREFERRED
+    remotion_allow_share_alike: bool = False
+    remotion_require_asset_approval: bool = False
+    remotion_source_screenshot_hosts: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=253)]], Field(max_length=50)
+    ] = Field(default_factory=list)
     offline: bool = False
     cost_ceiling_usd: Annotated[FiniteFloat, Field(ge=0, le=10000)] = 10.0
     failure_policy: FailurePolicy = FailurePolicy.STRICT
@@ -224,8 +300,40 @@ class RawRunConfig(VersionedContract):
     voice: VoiceSettings
     task_overrides: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("remotion_source_screenshot_hosts")
+    @classmethod
+    def validate_remotion_source_screenshot_hosts(cls, values: list[str]) -> list[str]:
+        normalized = []
+        for value in values:
+            host = value.strip().rstrip(".").casefold()
+            if "://" in host or "/" in host or ":" in host or "." not in host:
+                raise ValueError("source screenshot hosts must be DNS hostnames such as wikipedia.org")
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("source screenshot hosts must not be IP addresses")
+            try:
+                host = host.encode("idna").decode("ascii")
+            except UnicodeError as exc:
+                raise ValueError("source screenshot host is not a valid IDNA hostname") from exc
+            labels = host.split(".")
+            if len(host) > 253 or any(
+                re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
+                for label in labels
+            ):
+                raise ValueError("source screenshot host is not a valid DNS hostname")
+            if host not in normalized:
+                normalized.append(host)
+        return normalized
+
     @model_validator(mode="after")
     def validate_combinations(self) -> "RawRunConfig":
+        if self.offline and self.remotion_source_screenshot_hosts:
+            raise ValueError(
+                "offline mode cannot configure remotion_source_screenshot_hosts"
+            )
         if self.content_format is ContentFormat.MYTHBUSTER and self.content_mode is not ContentMode.FACTUAL:
             raise ValueError("mythbuster format requires content_mode = 'factual'")
         if self.content_mode is ContentMode.FACTUAL and (
@@ -242,7 +350,10 @@ class RawRunConfig(VersionedContract):
             raise ValueError("shot_min_seconds must not exceed shot_target_seconds")
         if self.shot_target_seconds > self.shot_max_seconds:
             raise ValueError("shot_target_seconds must not exceed shot_max_seconds")
-        if self.visual_shot_mode is VisualShotMode.CADENCED:
+        if (
+            self.visual_shot_mode is VisualShotMode.CADENCED
+            or self.video_style is VideoStyle.REMOTION_EXPLAINER
+        ):
             estimated_shots = estimated_cadenced_shot_count(
                 float(self.duration_seconds),
                 float(self.visual_target_seconds),
@@ -309,9 +420,14 @@ class ResolvedRunConfig(VersionedContract):
     narration_delivery: str = ""
     narration_delivery_spec: NarrationDeliverySpec | None = None
     audience: str
+    video_style: VideoStyle = VideoStyle.STILL_IMAGE
     style: str
     style_description: str
     motion_style: str
+    remotion_asset_policy: RemotionAssetPolicy = RemotionAssetPolicy.STOCK_PREFERRED
+    remotion_allow_share_alike: bool = False
+    remotion_require_asset_approval: bool = False
+    remotion_source_screenshot_hosts: list[str] = Field(default_factory=list)
     offline: bool
     cost_ceiling_usd: FiniteFloat
     failure_policy: FailurePolicy
@@ -642,6 +758,11 @@ class ScriptScene(ContractModel):
     scene_id: str
     spoken_text: Annotated[str, Field(min_length=1, max_length=10000)]
     pause_after_seconds: Annotated[FiniteFloat, Field(ge=0, le=3.25)] = 0.15
+
+    @field_validator("spoken_text")
+    @classmethod
+    def validate_spoken_text(cls, value: str) -> str:
+        return validate_spoken_text_only(value)
 
 
 class NarrationScript(VersionedContract):
@@ -980,6 +1101,319 @@ class TimedVisualPlan(VersionedContract):
         return self
 
 
+class RemotionTemplate(StrEnum):
+    KINETIC_HOOK = "kinetic_hook"
+    HEADLINE_ZOOM = "headline_zoom"
+    SOURCE_SCREENSHOT = "source_screenshot"
+    CODE_REVEAL = "code_reveal"
+    DIAGRAM_FLOW = "diagram_flow"
+    COMPARISON_SPLIT = "comparison_split"
+    MEME_CUTAWAY = "meme_cutaway"
+    CONCLUSION = "conclusion"
+
+
+class RemotionAssetKind(StrEnum):
+    NONE = "none"
+    STOCK_IMAGE = "stock_image"
+    STOCK_VIDEO = "stock_video"
+    GIF = "gif"
+    MEME = "meme"
+    SOURCE_SCREENSHOT = "source_screenshot"
+    GENERATED_IMAGE = "generated_image"
+
+
+class RemotionMotionPreset(StrEnum):
+    PUNCH_IN = "punch_in"
+    SLIDE_UP = "slide_up"
+    PAN = "pan"
+    TYPE_ON = "type_on"
+    BUILD = "build"
+    HOLD = "hold"
+
+
+class RemotionSfxPreset(StrEnum):
+    NONE = "none"
+    CLICK = "click"
+    POP = "pop"
+    WHOOSH = "whoosh"
+
+
+class RemotionTransitionPreset(StrEnum):
+    HARD_CUT = "hard_cut"
+    SECTION_WIPE = "section_wipe"
+
+
+class RemotionShotDirection(ContractModel):
+    template: RemotionTemplate
+    headline: Annotated[str, Field(min_length=1, max_length=120)]
+    supporting_text: Annotated[str, Field(max_length=240)] = ""
+    body_lines: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=120)]],
+        Field(max_length=8),
+    ] = Field(default_factory=list)
+    asset_kind: RemotionAssetKind = RemotionAssetKind.NONE
+    asset_query: Annotated[str, Field(max_length=180)] = ""
+    sfx: RemotionSfxPreset = RemotionSfxPreset.NONE
+
+    @model_validator(mode="after")
+    def validate_template_content(self) -> "RemotionShotDirection":
+        if len(self.headline) > 80 or len(self.supporting_text) > 160:
+            raise ValueError("Remotion headline/supporting text exceeds the fixed layout budget")
+        if self.template in {RemotionTemplate.CODE_REVEAL, RemotionTemplate.DIAGRAM_FLOW} and len(
+            self.body_lines
+        ) < 2:
+            raise ValueError(f"{self.template.value} requires at least two body lines")
+        if self.template is RemotionTemplate.COMPARISON_SPLIT and len(self.body_lines) != 2:
+            raise ValueError("comparison_split requires exactly two body lines")
+        if self.template is RemotionTemplate.DIAGRAM_FLOW and (
+            len(self.body_lines) > 5 or any(len(line) > 32 for line in self.body_lines)
+        ):
+            raise ValueError("diagram_flow supports two to five labels of at most 32 characters")
+        if self.template is RemotionTemplate.CODE_REVEAL and any(
+            len(line) > 70 for line in self.body_lines
+        ):
+            raise ValueError("code_reveal lines may contain at most 70 characters")
+        if self.template is RemotionTemplate.COMPARISON_SPLIT and any(
+            len(line) > 60 for line in self.body_lines
+        ):
+            raise ValueError("comparison_split statements may contain at most 60 characters")
+        if self.template not in {
+            RemotionTemplate.CODE_REVEAL,
+            RemotionTemplate.DIAGRAM_FLOW,
+            RemotionTemplate.COMPARISON_SPLIT,
+        } and self.body_lines:
+            raise ValueError(f"{self.template.value} does not render body_lines")
+        if self.template is RemotionTemplate.SOURCE_SCREENSHOT and (
+            self.asset_kind is not RemotionAssetKind.SOURCE_SCREENSHOT
+        ):
+            raise ValueError("source_screenshot requires a source_screenshot asset")
+        if self.asset_kind is RemotionAssetKind.SOURCE_SCREENSHOT and (
+            self.template is not RemotionTemplate.SOURCE_SCREENSHOT
+        ):
+            raise ValueError("source_screenshot assets require the source_screenshot template")
+        if self.template is RemotionTemplate.MEME_CUTAWAY and self.asset_kind not in {
+            RemotionAssetKind.MEME,
+            RemotionAssetKind.GIF,
+            RemotionAssetKind.STOCK_IMAGE,
+        }:
+            raise ValueError("meme_cutaway requires a meme, GIF, or stock image")
+        if self.template not in {
+            RemotionTemplate.KINETIC_HOOK,
+            RemotionTemplate.HEADLINE_ZOOM,
+            RemotionTemplate.SOURCE_SCREENSHOT,
+            RemotionTemplate.MEME_CUTAWAY,
+        } and self.asset_kind is not RemotionAssetKind.NONE:
+            raise ValueError(f"{self.template.value} does not render an external asset")
+        searched_kinds = {
+            RemotionAssetKind.STOCK_IMAGE,
+            RemotionAssetKind.STOCK_VIDEO,
+            RemotionAssetKind.GIF,
+            RemotionAssetKind.MEME,
+            RemotionAssetKind.GENERATED_IMAGE,
+        }
+        if self.asset_kind in searched_kinds and not self.asset_query.strip():
+            raise ValueError(f"{self.asset_kind.value} requires an English asset query")
+        if self.asset_kind in {RemotionAssetKind.NONE, RemotionAssetKind.SOURCE_SCREENSHOT} and (
+            self.asset_query.strip()
+        ):
+            raise ValueError(f"{self.asset_kind.value} must not include an asset query")
+        return self
+
+
+class RemotionAssetChoice(ContractModel):
+    candidate_id: Annotated[str, Field(pattern=r"^candidate-\d{3,}$")]
+
+
+class AnchoredWord(ContractModel):
+    word_id: Annotated[str, Field(pattern=r"^word-\d{6,}$")]
+    scene_id: Annotated[str, Field(pattern=r"^scene-\d{3,}$")]
+    text: Annotated[str, Field(min_length=1, max_length=200)]
+    start_seconds: Annotated[FiniteFloat, Field(ge=0)]
+    end_seconds: Annotated[FiniteFloat, Field(ge=0)]
+
+    @model_validator(mode="after")
+    def validate_span(self) -> "AnchoredWord":
+        if self.end_seconds < self.start_seconds:
+            raise ValueError("anchored word end must not precede its start")
+        return self
+
+
+class RemotionEditShot(RemotionShotDirection):
+    purpose: Annotated[str, Field(min_length=1, max_length=240)]
+    motion: RemotionMotionPreset
+    transition_in: RemotionTransitionPreset = RemotionTransitionPreset.HARD_CUT
+    shot_id: Annotated[str, Field(pattern=r"^shot-\d{3,}$")]
+    scene_id: Annotated[str, Field(pattern=r"^scene-\d{3,}$")]
+    narration_excerpt: Annotated[str, Field(min_length=1, max_length=4000)]
+    start_word_id: Annotated[str, Field(pattern=r"^word-\d{6,}$")]
+    end_word_id: Annotated[str, Field(pattern=r"^word-\d{6,}$")]
+    start_seconds: Annotated[FiniteFloat, Field(ge=0)]
+    end_seconds: Annotated[FiniteFloat, Field(gt=0)]
+    start_frame: Annotated[int, Field(ge=0)]
+    end_frame: PositiveInt
+    source_screenshot_source_ids: Annotated[
+        list[Annotated[str, Field(pattern=r"^source-\d{3,}$")]], Field(max_length=8)
+    ] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_span(self) -> "RemotionEditShot":
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("Remotion edit Shot end must follow its start")
+        if self.end_frame <= self.start_frame:
+            raise ValueError("Remotion edit Shot must contain at least one frame")
+        if self.template is RemotionTemplate.CODE_REVEAL and (
+            self.motion is not RemotionMotionPreset.TYPE_ON
+        ):
+            raise ValueError("code_reveal requires the type_on motion preset")
+        if self.template is RemotionTemplate.DIAGRAM_FLOW and (
+            self.motion is not RemotionMotionPreset.BUILD
+        ):
+            raise ValueError("diagram_flow requires the build motion preset")
+        return self
+
+
+class RemotionEditPlan(VersionedContract):
+    renderer: Literal["remotion"] = "remotion"
+    title: Annotated[str, Field(min_length=1, max_length=200)]
+    width: PositiveInt
+    height: PositiveInt
+    fps: PositiveInt
+    duration_seconds: Annotated[FiniteFloat, Field(gt=0)]
+    duration_frames: PositiveInt
+    words: list[AnchoredWord]
+    shots: list[RemotionEditShot]
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> "RemotionEditPlan":
+        if not self.words or not self.shots:
+            raise ValueError("Remotion Edit Plan requires words and Shots")
+        expected_words = [f"word-{index:06d}" for index in range(1, len(self.words) + 1)]
+        if [word.word_id for word in self.words] != expected_words:
+            raise ValueError("Remotion word IDs must be contiguous and ordered")
+        expected_shots = [f"shot-{index:03d}" for index in range(1, len(self.shots) + 1)]
+        if [shot.shot_id for shot in self.shots] != expected_shots:
+            raise ValueError("Remotion Shot IDs must be contiguous and ordered")
+        word_positions = {word.word_id: index for index, word in enumerate(self.words)}
+        previous_frame = 0
+        previous_seconds = 0.0
+        previous_end_word = -1
+        section_transitions = 0
+        for index, shot in enumerate(self.shots):
+            if shot.start_frame != previous_frame:
+                raise ValueError("Remotion Shots must be frame-contiguous and start at zero")
+            if abs(shot.start_seconds - previous_seconds) > 0.002:
+                raise ValueError("Remotion Shot times must be contiguous and start at zero")
+            if shot.start_word_id not in word_positions or shot.end_word_id not in word_positions:
+                raise ValueError("Remotion Shot references an unknown word anchor")
+            start_word = word_positions[shot.start_word_id]
+            end_word = word_positions[shot.end_word_id]
+            if start_word > end_word or start_word < previous_end_word:
+                raise ValueError("Remotion Shot word anchors are not monotonic")
+            previous_end_word = end_word
+            if shot.transition_in is RemotionTransitionPreset.SECTION_WIPE:
+                if index == 0:
+                    raise ValueError("the first Remotion Shot cannot have a section transition")
+                section_transitions += 1
+            previous_frame = shot.end_frame
+            previous_seconds = shot.end_seconds
+        if previous_frame != self.duration_frames:
+            raise ValueError("Remotion duration must equal the final Shot frame")
+        if abs(previous_seconds - self.duration_seconds) > 0.002:
+            raise ValueError("Remotion duration must equal the final Shot time")
+        if abs(self.duration_frames / self.fps - self.duration_seconds) > 1 / self.fps + 0.002:
+            raise ValueError("Remotion frame and second durations disagree")
+        if len(self.shots) > 1 and section_transitions != 1:
+            raise ValueError("Remotion plans require exactly one section_wipe transition")
+        return self
+
+
+class RemotionAssetRequest(ContractModel):
+    asset_id: Annotated[str, Field(pattern=r"^asset-\d{3,}$")]
+    shot_id: Annotated[str, Field(pattern=r"^shot-\d{3,}$")]
+    kind: RemotionAssetKind
+    query: Annotated[str, Field(max_length=180)] = ""
+    source_id: Annotated[str, Field(max_length=120)] = ""
+    generated_prompt: Annotated[str, Field(max_length=2000)] = ""
+
+    @model_validator(mode="after")
+    def validate_request(self) -> "RemotionAssetRequest":
+        if self.kind in {RemotionAssetKind.NONE, RemotionAssetKind.SOURCE_SCREENSHOT}:
+            if self.kind is RemotionAssetKind.SOURCE_SCREENSHOT and not self.source_id:
+                raise ValueError("source screenshot requires a host-owned source ID")
+        elif not self.query.strip():
+            raise ValueError("searched or generated asset requires a query")
+        if self.kind is RemotionAssetKind.GENERATED_IMAGE and not self.generated_prompt.strip():
+            raise ValueError("generated image requires a host-compiled prompt")
+        return self
+
+
+class RemotionAssetRequestSet(VersionedContract):
+    requests: list[RemotionAssetRequest]
+
+    @model_validator(mode="after")
+    def validate_requests(self) -> "RemotionAssetRequestSet":
+        asset_ids = [request.asset_id for request in self.requests]
+        shot_ids = [request.shot_id for request in self.requests]
+        if len(asset_ids) != len(set(asset_ids)) or len(shot_ids) != len(set(shot_ids)):
+            raise ValueError("Remotion asset requests must have unique asset and Shot IDs")
+        return self
+
+
+class AssetRights(ContractModel):
+    license_id: Annotated[str, Field(min_length=1, max_length=120)]
+    license_name: Annotated[str, Field(min_length=1, max_length=240)]
+    license_url: Annotated[str, Field(max_length=1000)] = ""
+    terms_url: Annotated[str, Field(max_length=1000)] = ""
+    attribution_required: bool = False
+    attribution_text: Annotated[str, Field(max_length=1000)] = ""
+    share_alike: bool = False
+    review_status: Literal["approved", "editorial_context"]
+    review_reason: Annotated[str, Field(min_length=1, max_length=1000)]
+
+    @model_validator(mode="after")
+    def validate_attribution(self) -> "AssetRights":
+        if self.attribution_required and not self.attribution_text.strip():
+            raise ValueError("rights requiring attribution must include attribution_text")
+        return self
+
+
+class RemotionAsset(VersionedContract):
+    asset_id: Annotated[str, Field(pattern=r"^asset-\d{3,}$")]
+    shot_id: Annotated[str, Field(pattern=r"^shot-\d{3,}$")]
+    provider: Literal["local", "wikimedia", "pexels", "source_screenshot", "generated"]
+    provider_asset_id: Annotated[str, Field(max_length=240)] = ""
+    media_kind: Literal["image", "video"]
+    search_query: Annotated[str, Field(max_length=180)] = ""
+    source_page_url: Annotated[str, Field(max_length=2000)] = ""
+    creator_name: Annotated[str, Field(max_length=300)] = ""
+    creator_url: Annotated[str, Field(max_length=1000)] = ""
+    rights: AssetRights
+    original: MediaReference
+    normalized: MediaReference
+    width: PositiveInt
+    height: PositiveInt
+    duration_seconds: Annotated[FiniteFloat, Field(ge=0)] = 0
+    transform: Annotated[str, Field(min_length=1, max_length=2000)]
+    retrieved_at: datetime
+    warnings: list[Annotated[str, Field(min_length=1, max_length=1000)]] = Field(
+        default_factory=list
+    )
+
+
+class RemotionAssetBundle(VersionedContract):
+    assets: list[RemotionAsset]
+    credits_json: MediaReference
+    credits_markdown: MediaReference
+
+    @model_validator(mode="after")
+    def validate_assets(self) -> "RemotionAssetBundle":
+        asset_ids = [asset.asset_id for asset in self.assets]
+        shot_ids = [asset.shot_id for asset in self.assets]
+        if len(asset_ids) != len(set(asset_ids)) or len(shot_ids) != len(set(shot_ids)):
+            raise ValueError("resolved Remotion assets must have unique asset and Shot IDs")
+        return self
+
+
 class ImageGenerationSettings(ContractModel):
     inference_steps: Annotated[int, Field(ge=1, le=100)] | None = None
     guidance_scale: Annotated[FiniteFloat, Field(ge=0, le=30)] | None = None
@@ -1171,6 +1605,50 @@ class RenderPlan(VersionedContract):
             raise ValueError("Render Plan cannot mix Scene and Shot visual identities")
         if abs(previous - self.duration_seconds) > 0.002:
             raise ValueError("Render Plan duration must equal its final Scene end")
+        if self.caption_mode == "none" and (self.caption_srt_path or self.caption_ass_path):
+            raise ValueError("caption paths require a caption mode")
+        if self.caption_mode != "none" and not self.caption_srt_path:
+            raise ValueError("selectable captions require an SRT path")
+        if self.caption_mode != "none" and self.caption_language is None:
+            raise ValueError("selectable captions require a caption language")
+        if self.caption_mode == "none" and self.caption_language is not None:
+            raise ValueError("caption language requires a caption mode")
+        if self.caption_mode == "selectable_and_burned" and not self.caption_ass_path:
+            raise ValueError("burned captions require an ASS path")
+        return self
+
+
+class RemotionRenderPlan(VersionedContract):
+    renderer: Literal["remotion"] = "remotion"
+    edit_plan: RemotionEditPlan
+    assets: list[RemotionAsset]
+    credits_json: MediaReference
+    credits_markdown: MediaReference
+    render_manifest: MediaReference
+    narration_path: str
+    music_path: str | None = None
+    caption_srt_path: str | None = None
+    caption_ass_path: str | None = None
+    caption_language: OutputLanguage | None = None
+    width: PositiveInt
+    height: PositiveInt
+    fps: PositiveInt
+    duration_seconds: Annotated[FiniteFloat, Field(gt=0)]
+    caption_mode: Literal[
+        "none",
+        "selectable",
+        "selectable_and_burned",
+        "selectable_and_composited",
+    ] = "none"
+
+    @model_validator(mode="after")
+    def validate_plan(self) -> "RemotionRenderPlan":
+        if self.width != self.edit_plan.width or self.height != self.edit_plan.height:
+            raise ValueError("Remotion render dimensions must match the Edit Plan")
+        if self.fps != self.edit_plan.fps:
+            raise ValueError("Remotion render FPS must match the Edit Plan")
+        if abs(self.duration_seconds - self.edit_plan.duration_seconds) > 0.002:
+            raise ValueError("Remotion render duration must match the Edit Plan")
         if self.caption_mode == "none" and (self.caption_srt_path or self.caption_ass_path):
             raise ValueError("caption paths require a caption mode")
         if self.caption_mode != "none" and not self.caption_srt_path:

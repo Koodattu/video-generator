@@ -49,6 +49,7 @@ coverage.xml
 *.py.cover
 .hypothesis/
 .pytest_cache/
+.pytest-tmp-*/
 cover/
 
 # Translations
@@ -225,3 +226,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 /.tmp
+# Local JavaScript dependencies and generated Remotion bundles.
+node_modules/
+remotion/.cache/
+/media-library/*
+!/media-library/README.md

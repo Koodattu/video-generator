@@ -285,7 +285,10 @@ function definitionList(entries) {
   const list = element("dl", "definition-list");
   for (const [label, value] of entries) {
     const row = element("div", "definition-row");
-    row.append(element("dt", null, label), element("dd", null, value === undefined || value === null || value === "" ? "—" : value));
+    const description = element("dd");
+    if (value instanceof Node) description.append(value);
+    else description.textContent = value === undefined || value === null || value === "" ? "—" : String(value);
+    row.append(element("dt", null, label), description);
     list.append(row);
   }
   return list;
@@ -342,7 +345,9 @@ function renderOverview() {
     ["Quality", titleCase(detail.config.quality)],
     ["Content", `${titleCase(detail.config.content_mode)} · ${titleCase(detail.config.content_format)}`],
     ["Narration", titleCase(detail.config.narration_pace)],
+    ["Video renderer", titleCase(detail.config.video_style)],
     ["Visual cadence", titleCase(detail.config.visual_shot_mode)],
+    ["Asset policy", titleCase(detail.config.remotion_asset_policy)],
     ["Cost ceiling", formatMoney(detail.config.cost_ceiling_usd, 2)],
     ["Created", formatDate(summary.created_at)],
   ]));
@@ -376,19 +381,244 @@ function sceneFact(label, value) {
   return fact;
 }
 
+function externalAssetLink(url) {
+  if (!url) return "—";
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) return String(url);
+    const link = element("a", "asset-rights-link", parsed.href);
+    link.href = parsed.href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    return link;
+  } catch (_error) {
+    return String(url);
+  }
+}
+
+function assetRightsPanel(asset) {
+  const rights = asset?.rights || {};
+  const wrapper = element("section", "asset-rights-panel");
+  wrapper.append(
+    element("h3", null, "Source & usage record"),
+    definitionList([
+      ["Source page", externalAssetLink(asset?.source_page_url)],
+      ["Creator", asset?.creator_name || "—"],
+      ["Creator URL", externalAssetLink(asset?.creator_url)],
+      ["License", rights.license_name || rights.license_id],
+      ["License URL", externalAssetLink(rights.license_url)],
+      ["Provider terms", externalAssetLink(rights.terms_url)],
+      ["Attribution", rights.attribution_text || (rights.attribution_required ? "Required but missing" : "Not required")],
+      ["ShareAlike", rights.share_alike ? "Required" : "No"],
+      ["Rights review", titleCase(rights.review_status)],
+      ["Review reason", rights.review_reason],
+    ]),
+  );
+  return wrapper;
+}
+
+function editorField(labelText, control, hint = "") {
+  const label = element("label", "shot-editor-field");
+  label.append(element("span", null, labelText), control);
+  if (hint) label.append(element("small", null, hint));
+  return label;
+}
+
+function editorSelect(value, values) {
+  const select = document.createElement("select");
+  for (const optionValue of values) {
+    const option = document.createElement("option");
+    option.value = optionValue;
+    option.textContent = titleCase(optionValue);
+    option.selected = optionValue === value;
+    select.append(option);
+  }
+  return select;
+}
+
+function remotionShotEditor(scene, position, total) {
+  const shot = scene.visual_brief;
+  const details = element("details", "shot-editor");
+  details.append(element("summary", null, "Edit this shot"));
+  const intro = element("p", "shot-editor-intro", "Changes are validated and rendered in a new child Run. The parent remains untouched.");
+  const grid = element("div", "shot-editor-grid");
+  const sourceScreenshotEligible = state.detail.config.content_mode === "factual"
+    && position > 0
+    && position < total - 1
+    && !state.detail.config.offline
+    && (state.detail.config.remotion_source_screenshot_hosts || []).length > 0
+    && (shot.source_screenshot_source_ids || []).length > 0;
+  const middleTemplates = ["headline_zoom", "code_reveal", "diagram_flow", "comparison_split", "meme_cutaway"];
+  if (sourceScreenshotEligible) middleTemplates.splice(1, 0, "source_screenshot");
+  const templateValues = position === 0
+    ? ["kinetic_hook"]
+    : position === total - 1
+      ? ["conclusion"]
+      : middleTemplates;
+  if (!templateValues.includes(shot.template)) templateValues.push(shot.template);
+  const template = editorSelect(shot.template, templateValues);
+  const headline = document.createElement("input");
+  headline.maxLength = 80;
+  headline.value = shot.headline || "";
+  const supporting = document.createElement("input");
+  supporting.maxLength = 160;
+  supporting.value = shot.supporting_text || "";
+  const bodyLines = document.createElement("textarea");
+  bodyLines.rows = 4;
+  bodyLines.maxLength = 700;
+  bodyLines.value = (shot.body_lines || []).join("\n");
+  const assetKinds = ["none", "stock_image", "stock_video", "gif", "meme", "generated_image"];
+  if (sourceScreenshotEligible) assetKinds.splice(5, 0, "source_screenshot");
+  if (shot.asset_kind && !assetKinds.includes(shot.asset_kind)) assetKinds.push(shot.asset_kind);
+  const assetKind = editorSelect(shot.asset_kind || "none", assetKinds);
+  const assetQuery = document.createElement("input");
+  assetQuery.maxLength = 180;
+  assetQuery.value = shot.asset_query || "";
+  assetQuery.placeholder = "Concise English search phrase";
+  const sfx = editorSelect(shot.sfx || "none", ["none", "click", "pop", "whoosh"]);
+  grid.append(
+    editorField("Template", template),
+    editorField("Sound cue", sfx),
+    editorField("Headline", headline, state.detail.config.content_mode === "factual" ? "Use one contiguous phrase from the spoken excerpt." : "80 characters maximum."),
+    editorField("Supporting text", supporting),
+    editorField("Asset type", assetKind),
+    editorField("Asset query", assetQuery, "Queries are English and may be sent to enabled stock providers."),
+    editorField("Template lines", bodyLines, "One line per code, diagram, or comparison item."),
+  );
+  const applyTemplateRules = () => {
+    const selected = template.value;
+    const bodyTemplate = ["code_reveal", "diagram_flow", "comparison_split"].includes(selected);
+    bodyLines.disabled = !bodyTemplate;
+    if (!bodyTemplate) bodyLines.value = "";
+    if (selected === "source_screenshot") {
+      assetKind.value = "source_screenshot";
+      assetQuery.value = "";
+    } else if (selected === "meme_cutaway") {
+      if (!["meme", "gif", "stock_image"].includes(assetKind.value)) assetKind.value = "meme";
+    } else if (!["kinetic_hook", "headline_zoom"].includes(selected)) {
+      assetKind.value = "none";
+      assetQuery.value = "";
+    }
+    const queryNeeded = !["none", "source_screenshot"].includes(assetKind.value);
+    assetQuery.disabled = !queryNeeded;
+    if (!queryNeeded) assetQuery.value = "";
+  };
+  template.addEventListener("change", applyTemplateRules);
+  assetKind.addEventListener("change", applyTemplateRules);
+  applyTemplateRules();
+  const actions = element("div", "shot-editor-actions");
+  const button = element("button", "button button-primary", "Create edited child Run");
+  button.type = "button";
+  button.disabled = ["queued", "running", "stopping", "running_external"].includes(state.detail.summary.status);
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    button.textContent = "Validating…";
+    try {
+      const payload = {
+        template: template.value,
+        headline: headline.value.trim(),
+        supporting_text: supporting.value.trim(),
+        body_lines: bodyLines.disabled ? [] : bodyLines.value.split("\n").map((line) => line.trim()).filter(Boolean),
+        asset_kind: assetKind.value,
+        asset_query: assetQuery.value.trim(),
+        sfx: sfx.value,
+      };
+      const created = await api(`/api/runs/${encodeURIComponent(state.selectedRunId)}/shots/${encodeURIComponent(scene.shot_id)}/fork`, {method: "POST", body: JSON.stringify(payload)});
+      toast("Edited child Run created and queued.");
+      await refreshRuns();
+      await selectRun(created.run_id);
+    } catch (error) {
+      toast(apiErrorMessage(error), true);
+      button.disabled = false;
+    } finally {
+      button.textContent = "Create edited child Run";
+    }
+  });
+  actions.append(button);
+  details.append(intro, grid, actions);
+  return details;
+}
+
+async function approveSelectedAssets(button) {
+  button.disabled = true;
+  button.textContent = "Creating approved Run…";
+  try {
+    const created = await api(`/api/runs/${encodeURIComponent(state.selectedRunId)}/approve-assets`, {method: "POST", body: "{}"});
+    toast("Approved child Run created and queued.");
+    await refreshRuns();
+    await selectRun(created.run_id);
+  } catch (error) {
+    toast(apiErrorMessage(error), true);
+    button.disabled = false;
+  } finally {
+    button.textContent = "Approve assets & continue";
+  }
+}
+
 function renderScenes() {
   if (!state.detail.scenes.length) return emptyPanel("No visual artifacts yet", "Briefs, prompts, images, timing, and reviews will join here by stable Scene or Shot ID as the run advances.");
+  const workspace = element("div", "visual-workspace");
+  const remotionScenes = state.detail.scenes.filter((scene) => Boolean(scene.visual_brief?.template));
+  if (remotionScenes.length) {
+    const timeline = element("div", "shot-timeline");
+    timeline.setAttribute("aria-label", "Word-anchored shot timeline");
+    for (const scene of remotionScenes) {
+      const segment = element("button", `shot-segment template-${scene.visual_brief.template}`);
+      segment.type = "button";
+      const duration = Math.max(0.1, Number(scene.timing?.end_seconds || 0) - Number(scene.timing?.start_seconds || 0));
+      segment.classList.add(`duration-${Math.min(12, Math.max(1, Math.round(duration)))}`);
+      segment.title = `${scene.shot_id}: ${scene.visual_brief.headline}`;
+      segment.append(element("strong", "numeric", scene.shot_id), element("span", null, scene.visual_brief.headline));
+      segment.addEventListener("click", () => document.getElementById(`visual-${scene.shot_id}`)?.scrollIntoView({behavior: "smooth", block: "center"}));
+      timeline.append(segment);
+    }
+    workspace.append(timeline);
+  }
+  const approval = state.detail.asset_approval;
+  if (approval?.required && approval.asset_count) {
+    const bar = element("section", `asset-approval${approval.approved ? " is-approved" : ""}`);
+    const copy = element("div");
+    copy.append(
+      element("strong", null, approval.approved ? "Current assets approved" : "Media approval required"),
+      element("p", null, approval.approved ? "This child Run contains approval hashes for every current asset." : "Review every visual, source page, license, and warning below before continuing."),
+    );
+    bar.append(copy);
+    if (!approval.approved) {
+      const confirm = element("label", "approval-confirm");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      confirm.append(checkbox, element("span", null, "I reviewed all current assets and usage terms."));
+      const button = element("button", "button button-primary", "Approve assets & continue");
+      button.type = "button";
+      button.disabled = true;
+      checkbox.addEventListener("change", () => { button.disabled = !checkbox.checked; });
+      button.addEventListener("click", () => approveSelectedAssets(button));
+      bar.append(confirm, button);
+    }
+    workspace.append(bar);
+  }
   const grid = element("div", "scene-grid");
-  for (const scene of state.detail.scenes) {
+  for (const [position, scene] of state.detail.scenes.entries()) {
     const visualId = scene.shot_id || scene.scene_id;
     const card = element("article", "scene-card");
+    card.id = `visual-${visualId}`;
     const imageWrap = element("div", "scene-image-wrap");
     if (scene.image_url) {
-      const image = document.createElement("img");
-      image.src = scene.image_url;
-      image.alt = `Generated image for ${visualId}`;
-      image.loading = "lazy";
-      imageWrap.append(image);
+      if (scene.media_kind === "video") {
+        const video = document.createElement("video");
+        video.src = scene.image_url;
+        video.controls = true;
+        video.loop = true;
+        video.muted = true;
+        video.preload = "metadata";
+        imageWrap.append(video);
+      } else {
+        const image = document.createElement("img");
+        image.src = scene.image_url;
+        image.alt = `Visual asset for ${visualId}`;
+        image.loading = "lazy";
+        imageWrap.append(image);
+      }
     } else {
       imageWrap.append(element("div", "scene-image-placeholder", "Image not generated yet"));
     }
@@ -404,14 +634,22 @@ function renderScenes() {
     if (scene.script?.spoken_text) body.append(element("p", "scene-script", scene.script.spoken_text));
 
     const facts = element("div", "scene-facts");
+    const isRemotion = Boolean(scene.visual_brief?.template);
     facts.append(
-      sceneFact("Visible action", scene.visual_brief?.action),
-      sceneFact("Story moment", scene.visual_brief?.story_moment),
+      sceneFact(isRemotion ? "Template" : "Visible action", scene.visual_brief?.template || scene.visual_brief?.action),
+      sceneFact(isRemotion ? "Visual purpose" : "Story moment", scene.visual_brief?.purpose || scene.visual_brief?.story_moment),
       sceneFact("Parent section", scene.shot_id ? scene.scene_id : null),
-      sceneFact("Incoming continuity", listText(scene.visual_brief?.continuity_from_previous)),
-      sceneFact("State after", listText(scene.visual_brief?.state_after_scene)),
+      sceneFact(isRemotion ? "Asset provider" : "Incoming continuity", scene.asset?.provider || listText(scene.visual_brief?.continuity_from_previous)),
+      sceneFact(isRemotion ? "License" : "State after", scene.asset?.rights?.license_name || listText(scene.visual_brief?.state_after_scene)),
     );
+    if (isRemotion) facts.append(sceneFact("Rights review", titleCase(scene.asset?.rights?.review_status)));
     body.append(facts);
+    if (isRemotion && scene.asset?.warnings?.length) {
+      const warnings = element("ul", "warning-list");
+      for (const warning of scene.asset.warnings) warnings.append(element("li", "warning-item", warning));
+      body.append(warnings);
+    }
+    if (isRemotion && scene.asset) body.append(assetRightsPanel(scene.asset));
     if (scene.audio_url) {
       const audio = document.createElement("audio");
       audio.controls = true;
@@ -429,10 +667,12 @@ function renderScenes() {
     }
     if (scene.visual_brief) body.append(jsonDetails("Visual brief", scene.visual_brief));
     if (scene.image_request) body.append(jsonDetails("Compiled image request", scene.image_request));
+    if (isRemotion) body.append(remotionShotEditor(scene, position, state.detail.scenes.length));
     card.append(imageWrap, body);
     grid.append(card);
   }
-  return grid;
+  workspace.append(grid);
+  return workspace;
 }
 
 function renderOutputs() {
@@ -657,8 +897,13 @@ function formPayload() {
       content_format: byId("content-format").value,
       narration_pace: byId("narration-pace").value,
       narration_delivery: byId("narration-delivery").value.trim(),
+      video_style: byId("video-style").value,
       style: byId("style-id").value.trim(),
       style_description: byId("style-description").value.trim(),
+      remotion_asset_policy: byId("remotion-asset-policy").value,
+      remotion_allow_share_alike: byId("remotion-share-alike").checked,
+      remotion_require_asset_approval: byId("remotion-asset-approval").checked,
+      remotion_source_screenshot_hosts: splitList(byId("remotion-screenshot-hosts").value),
       offline: byId("offline").checked,
       cost_ceiling_usd: Number(byId("cost-ceiling").value),
       idea_candidates: Number(byId("idea-candidates").value),
@@ -705,7 +950,13 @@ function syncActiveTasks() {
   const quality = byId("quality").value;
   const music = byId("music-enabled").checked;
   const captions = byId("captions-enabled").checked;
-  const cadencedVisuals = byId("visual-shot-mode").value === "cadenced";
+  const remotion = byId("video-style").value === "remotion_explainer";
+  if (remotion) byId("visual-shot-mode").value = "cadenced";
+  byId("visual-shot-mode").disabled = remotion;
+  byId("remotion-asset-policy").disabled = !remotion;
+  byId("remotion-share-alike").disabled = !remotion;
+  byId("remotion-asset-approval").disabled = !remotion;
+  const cadencedVisuals = remotion || byId("visual-shot-mode").value === "cadenced";
   const factual = byId("content-mode").value === "factual";
   const offline = byId("offline").checked;
   const research = Number(byId("research-queries").value || 0) > 0;
@@ -715,6 +966,8 @@ function syncActiveTasks() {
       || (task === "visual_review" && quality !== "final")
       || (["music_brief", "music_generate"].includes(task) && !music)
       || (task === "caption_alignment" && !captions && !cadencedVisuals)
+      || (["remotion_direction", "remotion_asset_select"].includes(task) && !remotion)
+      || (["visual_plan", "image_prompt_compile"].includes(task) && remotion)
       || (task === "search" && (offline || !research));
     row.classList.toggle("is-inactive", inactive);
   });
@@ -770,6 +1023,8 @@ function applyDefaults() {
   byId("content-format").value = defaults.content_format;
   byId("narration-pace").value = defaults.narration_pace;
   byId("narration-delivery").value = defaults.narration_delivery || "";
+  byId("video-style").value = defaults.video_style || "still_image";
+  byId("remotion-asset-policy").value = defaults.remotion_asset_policy || "stock_preferred";
   byId("duration-seconds").value = defaults.duration_seconds;
   byId("cost-ceiling").value = defaults.cost_ceiling_usd;
   byId("idea-candidates").value = defaults.idea_candidates;
@@ -783,11 +1038,14 @@ function applyDefaults() {
   byId("research-queries").value = defaults.research_query_limit;
   byId("research-sources").value = defaults.research_source_limit;
   byId("style-description").value = defaults.style_description || "";
+  byId("remotion-screenshot-hosts").value = (defaults.remotion_source_screenshot_hosts || []).join(", ");
   byId("style-id").value = defaults.style;
   byId("offline").checked = Boolean(defaults.offline);
   byId("captions-enabled").checked = Boolean(defaults.captions_enabled);
   byId("animated-captions").checked = Boolean(defaults.animated_captions);
   byId("music-enabled").checked = Boolean(defaults.music_enabled);
+  byId("remotion-share-alike").checked = Boolean(defaults.remotion_allow_share_alike);
+  byId("remotion-asset-approval").checked = Boolean(defaults.remotion_require_asset_approval);
   renderModelGrid();
   applyModelBindings(state.bootstrap.default_task_bindings || {});
 }

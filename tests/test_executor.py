@@ -6,10 +6,15 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel, field_validator
 
-from video_generator.contracts import OutputLanguage, RevisedScript, StructuredTextResult
+from video_generator.contracts import (
+    OutputLanguage,
+    RemotionShotDirection,
+    RevisedScript,
+    StructuredTextResult,
+)
 from video_generator.errors import BackendError, ErrorKind
 from video_generator.executor import TaskExecutor, _canonicalize_host_owned_fields
-from video_generator.workflow import WorkflowEngine
+from video_generator.workflow import ExpandedSceneText, ReplacementText, WorkflowEngine
 
 
 class _Output(BaseModel):
@@ -165,6 +170,59 @@ def test_structured_assigns_outline_scene_ids_without_a_repair_call() -> None:
     ]
     assert len(requests) == 1
     assert execution.result.data["scenes"][0]["scene_id"] == "scene_001"
+
+
+def test_structured_normalizes_unrendered_remotion_fields_without_a_repair_call() -> None:
+    requests = []
+    raw_direction = {
+        "template": "kinetic_hook",
+        "headline": "Cold enough to kill",
+        "supporting_text": "Your thermostat would not save you",
+        "body_lines": ["This template never renders this line"],
+        "asset_kind": "none",
+        "asset_query": "unused query",
+        "sfx": "whoosh",
+    }
+
+    class Backend:
+        def complete(self, request):
+            requests.append(request)
+            return StructuredTextResult(data=raw_direction)
+
+    backend = Backend()
+    registry = SimpleNamespace(
+        get=lambda backend_id: backend,
+        descriptor=lambda backend_id: SimpleNamespace(reservation_usd=0.0),
+    )
+    store = SimpleNamespace(
+        config=SimpleNamespace(
+            task_bindings={"remotion_direction": "local:fixture"},
+            output_language=OutputLanguage.ENGLISH,
+        ),
+        reserve_cost=lambda *args, **kwargs: None,
+    )
+    prompts = SimpleNamespace(
+        get=lambda *args, **kwargs: SimpleNamespace(
+            instructions="Direct one shot.", version="fixture"
+        ),
+        schema=lambda task_id: {},
+    )
+    execution = TaskExecutor(registry=registry, store=store, prompts=prompts).structured(
+        "remotion_direction",
+        {
+            "shot_position": 1,
+            "shot_count": 2,
+            "narration_excerpt": "Cold enough to kill. Your thermostat would not save you.",
+            "content_mode": "factual",
+            "source_options": [],
+        },
+        RemotionShotDirection,
+    )
+
+    assert len(requests) == 1
+    assert execution.result.data == raw_direction
+    assert execution.artifact.body_lines == []
+    assert execution.artifact.asset_query == ""
 
 
 def test_timed_visual_plan_uses_the_canonical_host_schedule() -> None:
@@ -539,6 +597,64 @@ def test_structured_text_only_word_repair_does_not_request_host_fields() -> None
     assert set(requests[1].output_schema["properties"]) == {"spoken_text"}
     assert "exactly the single spoken_text field" in requests[1].instructions
     assert "Scene IDs" not in requests[1].instructions
+
+
+def test_spoken_text_field_leak_gets_a_small_targeted_repair() -> None:
+    requests = []
+
+    class Backend:
+        def complete(self, request):
+            requests.append(request)
+            spoken_text = (
+                "A fox found a lantern. pause_after_seconds 0.35"
+                if len(requests) == 1
+                else "A fox found a lantern."
+            )
+            return StructuredTextResult(data={"spoken_text": spoken_text})
+
+    backend = Backend()
+    registry = SimpleNamespace(
+        get=lambda backend_id: backend,
+        descriptor=lambda backend_id: SimpleNamespace(reservation_usd=0.0),
+    )
+    store = SimpleNamespace(
+        config=SimpleNamespace(
+            task_bindings={"script_draft": "local:fixture"},
+            output_language=OutputLanguage.ENGLISH,
+        ),
+        reserve_cost=lambda *args, **kwargs: None,
+    )
+    prompts = SimpleNamespace(
+        get=lambda *args, **kwargs: SimpleNamespace(
+            instructions="Return spoken text.", version="fixture"
+        ),
+        schema=lambda task_id: {},
+    )
+    executor = TaskExecutor(registry=registry, store=store, prompts=prompts)
+
+    execution = executor.structured(
+        "script_draft",
+        {"large_context": "must not be repeated in the targeted repair"},
+        ReplacementText,
+    )
+
+    assert execution.artifact.spoken_text == "A fox found a lantern."
+    assert len(requests) == 2
+    assert set(requests[1].output_schema["properties"]) == {"spoken_text"}
+    assert "original_input" not in requests[1].input_data
+    assert requests[1].input_data["invalid_output"]["spoken_text"].endswith("0.35")
+    assert requests[1].input_data["validation_errors"][0]["type"] == (
+        "spoken_text_host_field"
+    )
+    assert "words that should be spoken aloud" in requests[1].instructions
+
+
+def test_legacy_expanded_scene_rejects_spoken_host_fields() -> None:
+    with pytest.raises(ValueError, match="host schema field fragment"):
+        ExpandedSceneText(
+            scene_id="scene-001",
+            spoken_text="A fox found a lantern. pause_after_seconds 0.35",
+        )
 
 
 def test_structured_validation_repair_diagnostics_are_json_serializable() -> None:

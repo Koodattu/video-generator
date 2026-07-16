@@ -2,7 +2,7 @@
 
 ## Status and intent
 
-This document defines the v0 architecture implemented by the local-first Python CLI that turns one Creative Brief into a narrated still-image video. The structure and contracts are implemented; actual provider/model readiness is established only by Setup, Preflight, and the user's first evaluation Runs.
+This document defines the implemented local-first architecture that turns one Creative Brief into a narrated video. A Run selects either the original generated-still renderer or the fixed-template Remotion explainer renderer; both share the same editorial, narration, evidence, checkpoint, and delivery foundations. Actual provider/model readiness is established only by Setup, Preflight, and the user's first evaluation Runs.
 
 The design supports local, cloud, and hybrid Runs without creating separate workflows for providers or languages. All Backends conform to the narrow protocols in [Contract design](contracts.md). The normal user chooses a curated Run Profile; advanced users may override individual Workflow Tasks.
 
@@ -41,21 +41,37 @@ flowchart TD
     RA -- No --> L
     M -- Yes --> O["Final Narration Timeline"]
     O --> P["Caption alignment when needed"]
-    O --> Q["Scene or timed-Shot Visual Plan"]
     O --> R["Optional Music Brief"]
+    O --> RB{"Selected video_style"}
+    RB -- still_image --> Q["Scene or timed-Shot Visual Plan"]
     Q --> Q1["Backend-bound image prompt compilation"]
     Q1 --> S["Generate still images"]
-    S --> T["Visual Review when required"]
+    S --> T["Still-image Visual Review when required"]
     T --> T1{"Regeneration required?"}
-    T1 -- No --> U["Deterministic Render Plan"]
-    T1 -- Yes --> T2["One targeted regeneration batch"]
-    T2 --> T3["Re-review regenerated images; no further regeneration"]
-    T3 --> U
-    P --> U
+    T1 -- Yes --> T2["One targeted image regeneration batch"]
+    T2 --> T3["Re-review replacements; no further regeneration"]
+    T1 -- No --> U1["Deterministic still Render Plan"]
+    T3 --> U1
+    RB -- remotion_explainer --> RA["Host allocates word-anchored Shots"]
+    RA --> RD["One small LLM direction call per Shot"]
+    RD --> RC["Host compiles asset requests"]
+    RC --> RS["Resolve owned, stock, screenshot, or generated assets"]
+    RS --> AP{"Manual asset approval enabled?"}
+    AP -- Yes --> AH["Stop for hash-bound Dashboard approval"]
+    AH --> RV["Render and inspect composed proxy"]
+    AP -- No --> RV
+    RV --> RR["At most one generated-image repair and re-review"]
+    RR --> U2["Deterministic Remotion Render Plan"]
+    P --> U1
+    P --> U2
     R --> R1["Generate and fit instrumental Music Bed"]
-    R1 --> U
-    U --> V["FFmpeg render"]
-    V --> W["ffprobe and media QC"]
+    R1 --> U1
+    R1 --> U2
+    U1 --> V1["FFmpeg still render"]
+    U2 --> V2["Local Remotion frame render"]
+    V2 --> V3["FFmpeg audio/caption mux"]
+    V1 --> W["ffprobe and media QC"]
+    V3 --> W
     W --> X["Delivery Manifest and outputs"]
 ```
 
@@ -110,13 +126,14 @@ The runner manager should batch adjacent calls, while accepting bounded reloads 
 1. keep the selected LLM resident for research reduction, ideation, selection, outline, writing, and the three reviews;
 2. release it, load TTS, and synthesize all Scenes;
 3. only when duration misses: release TTS, reload the `duration_repair` LLM, then reload TTS for the changed Scenes;
-4. after the final Narration Timeline, load the assigned text Backend(s) for `visual_plan`, `image_prompt_compile`, and optional `music_brief`, grouping only tasks that actually share a model;
+4. after the final Narration Timeline, load the assigned text Backend(s): `visual_plan` and `image_prompt_compile` for still-image Runs, or the per-Shot `remotion_direction` and optional `remotion_asset_select` tasks for Remotion Runs, plus optional `music_brief`; group only tasks that actually share a model;
 5. load alignment only if captions need it;
-6. load the image model for all initial Scene or Shot images;
-7. load the vision reviewer when required;
-8. if review requests corrections, reload the image model for one regeneration batch, then reload the reviewer to assess those images once more;
-9. load the music model when music is enabled;
-10. release all model processes before FFmpeg rendering.
+6. load the image model for all required Scene/Shot images, including Remotion requests that could not be satisfied from approved local or network media;
+7. for Remotion Runs with the approval gate enabled, stop after asset resolution until the Dashboard creates a hash-bound approval child Run;
+8. load the vision reviewer when required; still-image review receives individual images, while Remotion review receives three frames from each composed proxy Shot;
+9. if review requests corrections, reload the image model for one regeneration batch, then reload the reviewer to assess the result once more;
+10. load the music model when music is enabled;
+11. release all model processes before Remotion or FFmpeg rendering.
 
 This is an optimization over the same artifact contracts, not a different workflow. Each Scene item is independently validated and atomically promoted, so an unhealthy runner can fail the aggregate stage without losing already completed items.
 
@@ -164,8 +181,14 @@ One Caption Track produces:
 - when requested, a separate MP4 with ASS/libass captions rendered into the pixels.
 
 Animated captions are a presentation transform over the same timing data, not a second alignment path.
+For `remotion_explainer`, the same canonical word timing is also passed to the fixed composition, which
+renders width-bounded kinetic caption groups of up to five words and highlights the active word. The
+primary MP4 retains the
+selectable SRT-derived track; it does not create a second ASS-burned Remotion output. The fixed
+composition reserves a caption-safe lower region so template copy cannot be obscured by those kinetic
+groups.
 
-## Images and continuity
+## Visual systems, assets, and continuity
 
 Visual planning happens after the Narration Timeline is final. It creates either a provider-neutral
 scene-locked Visual Plan or a Timed Visual Plan whose canonical Shot IDs and times cannot be changed by
@@ -177,6 +200,40 @@ Generative models are the intended production path. The deterministic stick rend
 The continuity target is recognizable semantics, not pixel identity. Signature traits, recurring props, color anchors, and relative relationships persist while poses and small drawing inconsistencies may vary. Where a Backend supports references, selected character sheets or prior images can be attached. Final-quality profiles may score each image against brief fulfillment, style, identity, composition, forbidden text/watermarks, and family-safety. All failed images are regenerated in at most one targeted batch, then those replacements are reviewed once more. They cannot trigger another regeneration; a remaining hard failure stops a strict Run.
 
 Generated images are normalized deterministically to the Delivery Format. For example, GPT Image 2 should generate at a legal 16:9 size such as 2048×1152 rather than invalid 1920×1080, then the media layer scales/crops to the final frame.
+
+The Remotion branch uses eight audited templates rather than model-generated React:
+`kinetic_hook`, `headline_zoom`, `source_screenshot`, `code_reveal`, `diagram_flow`,
+`comparison_split`, `meme_cutaway`, and `conclusion`. The host allocates immutable Shot IDs, word
+anchors, times, frames, transition and motion presets, asset IDs, and file paths. One strict
+`remotion_direction` call per Shot returns only visible copy, a template, an asset kind/query, and a
+sound-effect preset. A deterministic canonicalizer then maps that flat portable response to the selected
+component's actual field set: it owns first/final placement, clears non-rendered fields, bounds text, and
+downgrades an unusable template without asking the model to repair host-solvable combinations. It does
+not fabricate creative content, and the strict render contract still rejects malformed values. Visible
+factual copy must be a contiguous phrase already present in the evidence-reviewed narration. A
+candidate-selection call, when needed, may return only one supplied `candidate_id`.
+
+Asset resolution tries owned/authorized `media-library/` files, then allowlisted Wikimedia Commons
+media, then Pexels when configured, and finally the selected Image Backend. Offline mode forces the
+local-only branch, clears screenshot options, and rejects browser capture at the last execution
+boundary. Source screenshots are derived from evidence linked to the current Scene and are
+disabled unless their exact hostname or parent domain is present in the frozen
+`remotion_source_screenshot_hosts` trust allowlist. A restricted local browser process still applies URL,
+redirect, request, MIME, size, and timeout checks, and every HTTP(S) navigation/subresource must remain
+inside that allowlist. These controls reduce SSRF exposure but are not presented as an absolute network
+sandbox because Chromium resolves allowed names independently. Animated media is
+normalized to a bounded silent H.264 clip. Every selected asset stores retrieval time, content hash,
+transformation, creator, source, license, attribution, and review warnings. Assets requiring NC or ND
+terms are rejected; ShareAlike is opt-in. GIPHY and the discontinued Tenor API are not used.
+
+Final Remotion review runs against the actual low-resolution composition, not the raw asset. It
+extracts start, middle, and end frames for each Shot, submits one bounded visual decision per Shot,
+and permits one targeted generated-image replacement before a final re-review. Source screenshots and
+layout failures are not silently replaced with unrelated generated art. The Dashboard can create an
+immutable child Run containing a validated edit-plan override, and an optional manual approval gate
+creates another immutable child whose frozen asset-record hashes must still match before rendering.
+Source-screenshot edits are offered and accepted only when the Shot carries host-derived eligible source
+IDs from factual grounding and the Run remains online with a nonempty trusted-host allowlist.
 
 ## Research and factual mode
 
@@ -198,9 +255,12 @@ The Music Backend declares its observed duration limit. The media layer trims, f
 
 ## Rendering and media QC
 
-The deterministic Render Plan contains no model decisions. FFmpeg holds each normalized image for its
-Scene or Shot interval, applies hard cuts, combines the master narration and optional Music Bed, and
-writes H.264/AAC MP4 with `yuv420p`, 30 fps, and fast-start metadata.
+The deterministic Render Plan contains no model decisions. In the original branch, FFmpeg holds each
+normalized image for its Scene or Shot interval and applies hard cuts. In the Remotion branch, the
+pinned local TypeScript composition renders fixed components to PNG frames with host-owned timing,
+hard cuts, and exactly one section-wipe transition for a multi-Shot plan. FFmpeg then encodes or muxes
+the visual stream with master narration, optional Music Bed, and selectable captions. Both branches
+write H.264/AAC MP4 with `yuv420p`, 30 fps, and fast-start metadata.
 
 Preflight checks FFmpeg capabilities rather than assuming a version string is sufficient: H.264 encoding, AAC, `mov_text`, SRT, ASS/libass when animated captions are requested, and ffprobe. An installed build is not declared supported until those probes pass; the first real render remains the final integration check.
 
@@ -284,20 +344,31 @@ src/video_generator/
   runners.py
   run_store.py
   media.py
+  remotion_assets.py
+  remotion_renderer.py
+  dashboard/
   backends/
   workers/
   assets/runners/
+remotion/
+  package.json
+  package-lock.json
+  src/
+  scripts/
+media-library/
 tests/
 ```
 
 One reusable structured-task executor serves the text roles, and one static registry serves Backend lookup.
 
-## Explicit v0 non-goals
+## Explicit current non-goals
 
-- GUI, web service, publishing, or channel upload;
+- a public or multi-user hosted Dashboard, publishing, or channel upload;
 - arbitrary provider plugins or user-authored workflows;
 - multi-speaker dialogue or mid-Run language switching;
-- portrait/square delivery, video-generation models, camera motion, or transitions beyond hard cuts;
+- model-generated React/components, arbitrary transition graphs, or general timeline code generation;
+- portrait/square delivery or generative video-model clips;
+- DOM-selector/highlight authoring for evidence screenshots and arbitrary web-page automation;
 - concurrent local GPU models, multi-GPU scheduling, or VRAM bin-packing;
 - pixel-perfect recurring characters;
 - automatic commercial-rights conclusions;

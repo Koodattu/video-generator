@@ -9,9 +9,11 @@ from video_generator.contracts import (
     FactualResearchPack,
     FactualResearchSynthesis,
     MusicBrief,
+    NarrationScript,
     RenderPlan,
     RenderScene,
     ResearchSource,
+    ScriptScene,
 )
 
 
@@ -56,6 +58,57 @@ def test_render_scenes_must_be_contiguous() -> None:
             fps=30,
             duration_seconds=5,
         )
+
+
+@pytest.mark.parametrize(
+    "spoken_text",
+    [
+        "A fox found a lantern. pause_after_seconds 0.35",
+        'A fox found a lantern. "pause_after_seconds": 0.35',
+        "A fox found a lantern. scene_id scene-001",
+    ],
+)
+def test_narration_rejects_host_field_labels_inside_spoken_text(
+    spoken_text: str,
+) -> None:
+    with pytest.raises(ValidationError, match="host schema field fragment"):
+        NarrationScript(
+            title="Lantern",
+            scenes=[ScriptScene(scene_id="scene-001", spoken_text=spoken_text)],
+        )
+
+
+def test_narration_allows_ordinary_words_that_resemble_field_names() -> None:
+    script = NarrationScript(
+        title="Lantern",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text="The scene ID is visible, and the spoken text remains natural.",
+            )
+        ],
+    )
+
+    assert script.scenes[0].spoken_text.endswith("natural.")
+
+
+@pytest.mark.parametrize(
+    "spoken_text",
+    [
+        "Set schema_version: 1 before the migration runs.",
+        'The code reads scene_id = "scene-001" from the request.',
+        "The count_method len(items) is shown on screen.",
+    ],
+)
+def test_narration_allows_host_like_identifiers_in_technical_explanations(
+    spoken_text: str,
+) -> None:
+    script = NarrationScript(
+        title="Technical explainer",
+        scenes=[ScriptScene(scene_id="scene-001", spoken_text=spoken_text)],
+    )
+
+    assert script.scenes[0].spoken_text == spoken_text
 
 
 @pytest.mark.parametrize(

@@ -432,6 +432,13 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             )
         return {"schema_version": 1, "title": outline.get("title", "Fixture Story"), "scenes": scenes}
     if task.startswith("review_"):
+        if data.get("review_strategy") == "single-remotion-plan-constraint-v1":
+            return {
+                "satisfied": True,
+                "scene_id": None,
+                "evidence": "",
+                "recommendation": "",
+            }
         if data.get("review_strategy") == "single-brief-constraint-v1":
             return {
                 "satisfied": True,
@@ -696,6 +703,71 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                     text += " " + _fixture_sentence(language, index + len(text.split()))
                 scene["spoken_text"] = " ".join(text.split()[:desired]).rstrip(".,;:") + "."
         return {"schema_version": 1, "script": script, "dispositions": []}
+    if task == "remotion_direction":
+        language = OutputLanguage(data.get("output_language", request.output_language.value))
+        factual = _is_factual_content(data)
+        position = int(data.get("shot_position", 1))
+        total = int(data.get("shot_count", position))
+        source_options = data.get("source_options", [])
+        if position == 1:
+            template = "kinetic_hook"
+            asset_kind = "none"
+            asset_query = ""
+            body_lines = []
+            sfx = "pop"
+        elif position == total:
+            template = "conclusion"
+            asset_kind = "none"
+            asset_query = ""
+            body_lines = []
+            sfx = "click"
+        elif source_options and position % 4 == 0:
+            template = "source_screenshot"
+            asset_kind = "source_screenshot"
+            asset_query = ""
+            body_lines = []
+            sfx = "click"
+        elif position % 3 == 0 and not factual:
+            template = "diagram_flow"
+            asset_kind = "none"
+            asset_query = ""
+            body_lines = (
+                ["Syöte", "Muutos", "Tulos"]
+                if language is OutputLanguage.FINNISH
+                else ["Input", "Change", "Result"]
+            )
+            sfx = "click"
+        else:
+            template = "headline_zoom"
+            asset_kind = "generated_image"
+            asset_query = "literal snowy path visual"
+            body_lines = []
+            sfx = "whoosh"
+        excerpt = str(data.get("narration_excerpt") or "One concrete narrated point.")
+        headline = " ".join(excerpt.split()[:8]).rstrip(".,;:") or "One clear point"
+        return {
+            "template": template,
+            "headline": headline,
+            "supporting_text": ""
+            if factual
+            else (
+                "Tiivis deterministinen leikkauspäätös."
+                if language is OutputLanguage.FINNISH
+                else "A compact deterministic edit decision."
+            ),
+            "body_lines": body_lines,
+            "asset_kind": asset_kind,
+            "asset_query": asset_query,
+            "sfx": sfx,
+        }
+    if task == "remotion_asset_select":
+        candidates = data.get("candidates", [])
+        candidate_id = (
+            str(candidates[0].get("candidate_id"))
+            if candidates and isinstance(candidates[0], dict)
+            else "candidate-001"
+        )
+        return {"candidate_id": candidate_id}
     if task == "visual_plan":
         if data.get("visual_strategy") == "foundation-v1":
             has_character = data.get("content_format", "narrative") == "narrative"
@@ -930,6 +1002,13 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             payload["shot_id"] = visual["shot_id"]
         return payload
     if task == "visual_review":
+        if data.get("review_strategy") == "single-remotion-shot-v1":
+            return {
+                "passed": True,
+                "hard_failure": False,
+                "failures": [],
+                "regeneration_instruction": "",
+            }
         payload = {
             "scene_id": data["scene_id"],
             "passed": True,

@@ -6,7 +6,7 @@ from .contracts import BackendDescriptor, OutputLanguage, ProtocolName, TASK_IDS
 from .costs import PRICING_SNAPSHOT
 
 
-PROFILE_VERSION = "2026-07-15.v9"
+PROFILE_VERSION = "2026-07-16.v10"
 
 EXPECTED_LOCAL_MODEL_REVISIONS: dict[str, str] = {
     "local:voxcpm2": "bffb3df5a29440629464e5e839f4d214c8714c3d",
@@ -502,6 +502,8 @@ def _text_tasks(backend_id: str) -> dict[str, str]:
             "factual_review",
             "duration_repair",
             "visual_plan",
+            "remotion_direction",
+            "remotion_asset_select",
             "image_prompt_compile",
             "music_brief",
         }

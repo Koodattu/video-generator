@@ -1172,13 +1172,32 @@ def test_policy_thirty_two_net_tempo_satisfies_duration_and_delivery() -> None:
 
     assert tempo is not None
     assert tempo == pytest.approx(
-        2.577 * (1 - 0.002) * 17.12 / 53
+        2.577 * (1 - 0.01) * 17.12 / 53
     )
     final_speech_seconds = 17.12 / tempo
     final_duration_seconds = final_speech_seconds + 0.24
     achieved_words_per_second = 53 / final_speech_seconds
     assert 24 * 0.85 <= final_duration_seconds <= 24
     assert 2.025 <= achieved_words_per_second <= 2.577
+
+
+def test_net_tempo_reserves_probe_headroom_for_short_multi_clip_narration() -> None:
+    tempo = WorkflowEngine._narration_net_tempo_rate(
+        speech_seconds=9.577792,
+        pause_seconds=0.25,
+        word_count=31,
+        budget_seconds=12,
+        fps=30,
+        preferred_tempo=1.0,
+        minimum_words_per_second=2.244,
+        maximum_words_per_second=2.856,
+    )
+
+    assert tempo is not None
+    ideal_speech_seconds = 9.577792 / tempo
+    simulated_probe_seconds = ideal_speech_seconds - 0.025
+    assert 31 / simulated_probe_seconds <= 2.856
+    assert 12 * 0.85 <= simulated_probe_seconds + 0.25 <= 12
 
 
 def test_policy_thirty_two_net_tempo_rejects_infeasible_intersection() -> None:

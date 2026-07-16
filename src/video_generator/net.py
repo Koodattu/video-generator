@@ -41,7 +41,7 @@ class HttpClient:
     def __init__(self, *, timeout_seconds: float = 60, max_response_bytes: int = 20_000_000) -> None:
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
-        self._opener = urllib.request.build_opener()
+        self._opener = urllib.request.build_opener(_SecureRedirect())
 
     def request(
         self,
@@ -53,6 +53,7 @@ class HttpClient:
         body: bytes | None = None,
         timeout_seconds: float | None = None,
         max_response_bytes: int | None = None,
+        allowed_redirect_hosts: set[str] | frozenset[str] | None = None,
     ) -> HttpResponse:
         request_headers = {"User-Agent": "video-generator/0.1"}
         request_headers.update(headers or {})
@@ -63,8 +64,15 @@ class HttpClient:
             request_headers.setdefault("Content-Type", "application/json")
         request = urllib.request.Request(url, data=body, headers=request_headers, method=method.upper())
         maximum = max_response_bytes or self.max_response_bytes
+        opener = (
+            self._opener
+            if allowed_redirect_hosts is None
+            else urllib.request.build_opener(
+                _AllowlistedRedirect(frozenset(allowed_redirect_hosts))
+            )
+        )
         try:
-            with self._opener.open(request, timeout=timeout_seconds or self.timeout_seconds) as response:
+            with opener.open(request, timeout=timeout_seconds or self.timeout_seconds) as response:
                 response_body = response.read(maximum + 1)
                 if len(response_body) > maximum:
                     raise BackendError("provider response exceeded the byte limit", kind=ErrorKind.INVALID_OUTPUT)
@@ -177,6 +185,110 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class _SecureRedirect(urllib.request.HTTPRedirectHandler):
+    _FORWARDED_HEADERS = {
+        "accept",
+        "accept-encoding",
+        "accept-language",
+        "user-agent",
+    }
+
+    @staticmethod
+    def _reject_https_downgrade(req: Any, newurl: str) -> None:
+        source_url = getattr(req, "full_url", "")
+        source = urllib.parse.urlparse(source_url)
+        target = urllib.parse.urlparse(newurl)
+        if source.scheme.casefold() == "https" and target.scheme.casefold() != "https":
+            raise BackendError(
+                "HTTPS redirects may not downgrade to an insecure scheme",
+                kind=ErrorKind.UNSUPPORTED,
+            )
+
+    @classmethod
+    def _strip_sensitive_headers(cls, request: Any) -> Any:
+        if request is None:
+            return None
+        for values in (request.headers, request.unredirected_hdrs):
+            for name in list(values):
+                if name.casefold() not in cls._FORWARDED_HEADERS:
+                    del values[name]
+        return request
+
+    def _build_redirect_request(
+        self,
+        req: Any,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Any:
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        return self._strip_sensitive_headers(redirected)
+
+    def redirect_request(
+        self,
+        req: Any,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Any:
+        self._reject_https_downgrade(req, newurl)
+        validate_public_http_url(newurl)
+        return self._build_redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class _AllowlistedRedirect(_SecureRedirect):
+    def __init__(self, allowed_hosts: frozenset[str]) -> None:
+        super().__init__()
+        self.allowed_hosts = frozenset(host.casefold() for host in allowed_hosts)
+
+    def redirect_request(
+        self,
+        req: Any,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> Any:
+        self._reject_https_downgrade(req, newurl)
+        parsed = validate_public_http_url(newurl)
+        if (parsed.hostname or "").casefold() not in self.allowed_hosts:
+            raise BackendError(
+                f"redirect target is outside the provider host allowlist: {parsed.hostname}",
+                kind=ErrorKind.UNSUPPORTED,
+            )
+        return self._build_redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def validate_public_http_url(url: str) -> urllib.parse.ParseResult:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise BackendError("source URL must use public HTTP(S)", kind=ErrorKind.UNSUPPORTED)
+    if parsed.username or parsed.password:
+        raise BackendError("source URLs may not contain credentials", kind=ErrorKind.UNSUPPORTED)
+    try:
+        answers = socket.getaddrinfo(
+            parsed.hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+        )
+    except socket.gaierror as exc:
+        raise BackendError(
+            f"could not resolve source host: {parsed.hostname}", kind=ErrorKind.TRANSIENT
+        ) from exc
+    for answer in answers:
+        address = ipaddress.ip_address(answer[4][0].split("%", 1)[0])
+        if not address.is_global:
+            raise BackendError(
+                f"source resolves to a non-public address: {address}",
+                kind=ErrorKind.UNSUPPORTED,
+            )
+    return parsed
+
+
 class SafeSourceFetcher:
     ALLOWED_MIME = {"text/html", "text/plain", "application/json", "application/xhtml+xml"}
 
@@ -185,22 +297,7 @@ class SafeSourceFetcher:
 
     @staticmethod
     def _validate_url(url: str) -> urllib.parse.ParseResult:
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise BackendError("source URL must use public HTTP(S)", kind=ErrorKind.UNSUPPORTED)
-        if parsed.username or parsed.password:
-            raise BackendError("source URLs may not contain credentials", kind=ErrorKind.UNSUPPORTED)
-        try:
-            answers = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
-        except socket.gaierror as exc:
-            raise BackendError(f"could not resolve source host: {parsed.hostname}", kind=ErrorKind.TRANSIENT) from exc
-        for answer in answers:
-            address = ipaddress.ip_address(answer[4][0].split("%", 1)[0])
-            if not address.is_global:
-                raise BackendError(
-                    f"source resolves to a non-public address: {address}", kind=ErrorKind.UNSUPPORTED
-                )
-        return parsed
+        return validate_public_http_url(url)
 
     def fetch(self, request: SourceFetchRequest) -> SourceDocument:
         raise BackendError(

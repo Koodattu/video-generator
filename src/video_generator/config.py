@@ -16,8 +16,10 @@ from .contracts import (
     ProtocolName,
     Quality,
     RawRunConfig,
+    RemotionAssetPolicy,
     ResolvedRunConfig,
     TASK_PROTOCOL,
+    VideoStyle,
     VisualShotMode,
 )
 from .errors import ConfigurationError
@@ -30,6 +32,7 @@ SECRET_NAMES = {
     "ELEVENLABS_API_KEY",
     "HF_TOKEN",
     "BRAVE_SEARCH_API_KEY",
+    "PEXELS_API_KEY",
 }
 
 
@@ -191,10 +194,19 @@ def resolve_config(
     active_tasks = set(TASK_PROTOCOL)
     if raw.offline or raw.research_query_limit == 0:
         active_tasks.discard("search")
+    effective_visual_shot_mode = (
+        VisualShotMode.CADENCED
+        if raw.video_style is VideoStyle.REMOTION_EXPLAINER
+        else raw.visual_shot_mode
+    )
     if (
-        not raw.captions_enabled and raw.visual_shot_mode is VisualShotMode.SCENE_LOCKED
+        not raw.captions_enabled and effective_visual_shot_mode is VisualShotMode.SCENE_LOCKED
     ) or BACKEND_DESCRIPTORS[bindings["narration_synthesis"]].supports_word_timing:
         active_tasks.discard("caption_alignment")
+    if raw.video_style is VideoStyle.STILL_IMAGE:
+        active_tasks -= {"remotion_direction", "remotion_asset_select"}
+    else:
+        active_tasks -= {"visual_plan", "image_prompt_compile"}
     if raw.quality is Quality.DRAFT:
         active_tasks.discard("visual_review")
     if not raw.music_enabled:
@@ -256,9 +268,20 @@ def resolve_config(
             raw.narration_delivery,
         ),
         audience=raw.audience,
+        video_style=raw.video_style,
         style=raw.style,
         style_description=raw.style_description,
         motion_style=raw.motion_style,
+        remotion_asset_policy=(
+            RemotionAssetPolicy.LOCAL_ONLY
+            if raw.offline
+            else raw.remotion_asset_policy
+        ),
+        remotion_allow_share_alike=raw.remotion_allow_share_alike,
+        remotion_require_asset_approval=raw.remotion_require_asset_approval,
+        remotion_source_screenshot_hosts=(
+            [] if raw.offline else raw.remotion_source_screenshot_hosts
+        ),
         offline=raw.offline,
         cost_ceiling_usd=raw.cost_ceiling_usd,
         failure_policy=raw.failure_policy,
@@ -269,7 +292,7 @@ def resolve_config(
         visual_target_seconds=raw.visual_target_seconds,
         visual_min_seconds=raw.visual_min_seconds,
         visual_max_seconds=raw.visual_max_seconds,
-        visual_shot_mode=raw.visual_shot_mode,
+        visual_shot_mode=effective_visual_shot_mode,
         shot_target_seconds=raw.shot_target_seconds,
         shot_min_seconds=raw.shot_min_seconds,
         shot_max_seconds=raw.shot_max_seconds,
@@ -294,6 +317,10 @@ def active_task_ids(config: ResolvedRunConfig) -> set[str]:
         not config.captions_enabled and config.visual_shot_mode is VisualShotMode.SCENE_LOCKED
     ) or speech.supports_word_timing:
         task_ids.discard("caption_alignment")
+    if config.video_style is VideoStyle.STILL_IMAGE:
+        task_ids -= {"remotion_direction", "remotion_asset_select"}
+    else:
+        task_ids -= {"visual_plan", "image_prompt_compile"}
     if config.quality is Quality.DRAFT:
         task_ids.discard("visual_review")
     if not config.music_enabled:

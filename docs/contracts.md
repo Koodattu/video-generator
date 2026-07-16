@@ -38,10 +38,14 @@ The durable artifact set is deliberately finite.
 | `TimedVisualPlan` | Resolved Style Profile and canonical, frame-aligned generated-image Shots linked to parent Scenes | visual planning |
 | `ImageRequest` / `TimedImageRequest` | Backend-specific compiled prompt and generation settings linked to one Scene or Shot | prompt compiler |
 | `VisualReviewReport` | Brief/style/identity scores and one targeted regeneration instruction | visual review |
+| `RemotionEditPlan` | Host-timed Shots using one of eight fixed templates, bounded visible copy, asset intent, motion, transition, and SFX presets | host allocator plus one small direction call per Shot |
+| `RemotionAssetRequestSet` | Host-owned asset IDs, kinds, English search queries or generated prompts, and evidence-linked source IDs | deterministic Remotion asset compiler |
+| `RemotionAssetBundle` / `AssetRights` | Resolved local media references, hashes, transformations, source/creator/license/attribution data, and review warnings | Remotion asset resolver |
 | `CaptionTrack` | Canonical words and monotonic time spans | timing normalization |
 | `MusicBrief` | Instrumental intent, mood arc, exclusions, requested duration | music planning |
 | `MusicAsset` | Normalized media reference, actual duration, generation provenance | music generation/post-processing |
 | `RenderPlan` | Exact media references, time ranges, codecs, caption modes, audio mix settings | render planning |
+| `RemotionRenderPlan` | Fixed composition, edit plan, resolved assets, word-caption frames, renderer/runtime settings, and exact output paths | deterministic Remotion render planning |
 | `DeliveryManifest` | Output files, hashes, media properties, QC result, warnings | delivery verification |
 
 Prompts, raw Backend responses needed for debugging, review reports, and usage records are also persisted, but they do not replace normalized artifacts. Hidden model reasoning is never requested or stored.
@@ -139,18 +143,44 @@ A Run Profile maps each fixed Workflow Task ID to exactly one compatible Backend
 | `narration_synthesis` | Speech | always |
 | `duration_repair` | Structured Text | measured narration misses its accepted band |
 | `caption_alignment` | Alignment | captions or cadenced Shots need timing and TTS timing is insufficient |
-| `visual_plan` | Structured Text | always |
-| `image_prompt_compile` | Structured Text | always; output is bound to the selected Image Backend |
-| `image_generate` | Image | always |
-| `visual_review` | vision-capable Structured Text | selected quality/profile requires it |
+| `visual_plan` | Structured Text | `still_image` Runs |
+| `remotion_direction` | Structured Text | `remotion_explainer` Runs; called separately for each Shot |
+| `remotion_asset_select` | Structured Text | binding required for `remotion_explainer`; called only when more than one eligible candidate exists |
+| `image_prompt_compile` | Structured Text | `still_image` Runs; output is bound to the selected Image Backend |
+| `image_generate` | Image | all still-image Runs; Remotion fallback or targeted repair when resolved media is unavailable or unsuitable |
+| `visual_review` | vision-capable Structured Text | selected quality/profile requires it; individual stills or composed Remotion proxy frames |
 | `music_brief` | Structured Text | music is enabled |
 | `music_generate` | Music | music is enabled |
 
 `image_prompt_compile` is a real, separately selectable Workflow Task rather than hidden string concatenation. It receives provider-neutral visual artifacts plus a bounded descriptor for the target Image Backend and emits a validated Image Request for that Backend. Its own Backend/model, instructions, and output hash are persisted. A deterministic compiler Backend may implement the same task for simple/test renderers.
 
+The Remotion task boundary is deliberately smaller. The host first creates canonical IDs, word anchors,
+times, frame ranges, and a bounded narration excerpt. `remotion_direction` receives one Shot at a time
+and returns only `template`, `headline`, `supporting_text`, `body_lines`, `asset_kind`, `asset_query`,
+and `sfx`. The host derives purpose, motion, transition, generated-image prompt, asset/source IDs, URLs,
+paths, licenses, and renderer settings. The raw seven-field response is preserved, then a deterministic
+host canonicalizer resolves position-owned templates, removes stale fields that the fixed component
+cannot consume, bounds layout copy, and downgrades templates whose body or media prerequisites are
+missing. Unknown enums, malformed types, and extra fields remain hard validation failures. In factual
+mode, deterministic validation requires every visible copy field to be a contiguous phrase from the
+already reviewed narration excerpt. When stock search
+returns multiple eligible records, `remotion_asset_select` receives those records and may return only
+one supplied `candidate_id`; no model may create a URL or rights claim.
+Visual-only Brief requirements are then assessed individually against the complete assembled plan;
+promotion fails when a `must_include` or `avoid` rule remains unresolved. The same aggregate gate runs
+for immutable dashboard edit overrides.
+Evidence sources are offered as screenshot options only when their exact host or parent domain appears
+in the frozen `remotion_source_screenshot_hosts` trust allowlist. The resolver checks that policy again
+before launching the restricted capture browser, which applies the same policy to every redirect,
+frame, and subresource request. Offline configuration rejects that allowlist and the resolver has an
+independent last-mile offline guard. Each host-built edit Shot persists only the eligible source IDs for
+its own Scene; the Dashboard cannot create a source-screenshot child without one of those IDs.
+
 Deterministic validation, shot allocation, audio normalization, rendering, and media QC are internal
-stages rather than model tasks. The production image path always uses the configured Image Backend;
-the deterministic stick Backend exists only as an explicit test/manual backend and is never a fallback.
+stages rather than model tasks. The still-image production path always uses the configured Image
+Backend. Remotion may instead use an owned file, allowlisted stock asset, or evidence-linked screenshot,
+but the configured Image Backend remains the explicit fallback and repair path. The deterministic stick
+Backend exists only as an explicit test/manual backend and is never a fallback.
 
 ## Local runner boundary
 
@@ -168,6 +198,16 @@ There is no VRAM bin-packing. One GPU model family owns the card at a time. A si
 
 `local-llm.toml` is a typed Setup input, not a workflow plugin. It declares a stable profile ID, model/repository IDs, full commit and SHA-256 values, license, target GGUF, optional compatible drafter GGUF, stock llama.cpp commit and executable hash, context/batch settings, and `none` or `draft-mtp`. Setup copies and hashes only those assets. The runtime hard-forces loopback, a generated API key, one slot, and controlled model/host/port arguments. Provider output remains subject to the ordinary JSON Schema plus domain-model validation.
 
+Remotion is a deterministic renderer, not a model Backend. Setup copies the wheel-bundled scaffold when
+needed, installs the exact npm lock, validates TypeScript, and prepares a pinned Chrome Headless Shell.
+Preflight hashes the Node executable, complete installed Node dependency tree, complete browser runtime,
+composition sources, and local media-library inputs. Remotion subprocesses receive only an allowlisted
+operating-system/tool environment, never provider or model API keys. Generated bundles are built in a
+private staging directory, atomically published, and verified from an exact per-file attestation before
+every reuse. The frozen runtime snapshot is verified again immediately before every proxy or final
+Remotion render. Generate refuses an unprepared or changed runtime and never downloads Node packages or
+a browser.
+
 ## Item checkpoints
 
 Stages that fan out do not wait for the whole batch before preserving valid work. TTS items key by Scene;
@@ -175,6 +215,8 @@ image generation, visual review, and regeneration key by Scene or Shot according
 item writes to its own work directory, validates, and atomically promotes a manifest and media hash. The
 aggregate stage becomes complete only when every required item is promoted. Resume reuses valid items
 and schedules only missing or invalid items; stage-level hashes still determine downstream completion.
+Remotion asset resolution also checkpoints by Shot. Its composed proxy review evaluates three frames per
+Shot and can replace at most one generated asset per failed Shot before the second, terminal review.
 
 ## Run immutability and rerun
 
@@ -182,12 +224,21 @@ Run creation freezes the resolved profile, task instructions, prompts, JSON Sche
 
 The only operation that intentionally invalidates completed work is `rerun RUN_DIR --from STAGE [--config config.toml]`. It creates a new Run with `parent_run_id` and `fork_stage`, copies or content-addresses independently validated upstream artifacts without changing their provenance, and resolves current or supplied assets for the chosen stage onward. If supplied configuration would invalidate an earlier artifact, the command refuses the requested fork point and reports the earliest valid stage rather than silently moving it. It displays the new plan and cost reservation before any Backend call and never mutates the parent Run.
 
+Dashboard Remotion edits follow the same rule: an edit creates a validated child Run at `visual-plan`
+with a complete frozen override rather than patching the parent artifact. Optional manual asset approval
+creates a child at `visual-review` whose approval payload hashes the complete approved asset records.
+The workflow checks those hashes again after any visual-review regeneration; changed assets require a
+new approval child before rendering.
+
 ## Errors, retries, and omission
 
 Adapters return typed failures: `not_ready`, `unsupported`, `transient`, `invalid_output`, `policy_refusal`, `budget_exceeded`, or `internal`. The orchestrator decides retries; adapters do not hide them.
 
 - Transient cloud failures receive bounded backoff.
-- Invalid structured text may receive one schema-repair request.
+- Invalid structured text receives bounded validation repair: at most one retry for ordinary cloud
+  tasks and at most two for local or length-sensitive text tasks. A leaked host label inside a
+  single-field `spoken_text` response is repaired from only that invalid text plus the deterministic
+  error; the complete Script input is not resent.
 - Script revision and Duration Repair are explicit Workflow Tasks, not generic retries.
 - Final-quality visual review may cause one targeted image regeneration batch. Regenerated images are reviewed once more, cannot trigger another regeneration, and must pass or fail according to the declared policy.
 - OOM and unsupported-capability errors fail with the exact setup or override action; they do not silently select a smaller model.
@@ -197,4 +248,4 @@ Adapters return typed failures: `not_ready`, `unsupported`, `transient`, `invali
 
 Every stage records the Backend/model revision, prompt/task/schema versions, input and output hashes, attempts, elapsed time, warnings, and usage units. Cloud-cost guarding uses a dated pricing snapshot and bounded request maxima. If a provider cannot supply a defensible upper bound, the request needs an explicit configured reservation before it starts.
 
-Local stages record runtime, runner lifecycle data, optional worker-reported peak VRAM, and model asset hashes. The llama-server worker records baseline/load/peak/post-exit aggregate GPU observations and requires its managed PID to disappear; aggregate memory tolerance is advisory on Windows WDDM. Licenses and provider terms are checked against the declared Usage Purpose during Setup and Preflight; they are not inferred from a filename.
+Local stages record runtime, runner lifecycle data, optional worker-reported peak VRAM, and model asset hashes. The llama-server worker records baseline/load/peak/post-exit aggregate GPU observations and requires its managed PID to disappear; aggregate memory tolerance is advisory on Windows WDDM. Model licenses and provider terms are checked against the declared Usage Purpose during Setup and Preflight; they are not inferred from a filename. Remotion media rights are independently parsed, filtered, and recorded for each resolved asset at execution time, then emitted as delivery credits and warnings.

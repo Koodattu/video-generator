@@ -16,10 +16,12 @@ from .contracts import (
     PUBLIC_STAGES,
     Quality,
     ResolvedRunConfig,
+    VideoStyle,
 )
 from .errors import ConfigurationError, ErrorKind, VideoGeneratorError
 from .preflight import run_preflight
 from .provenance import build_runtime_snapshot, verify_runtime_snapshot
+from .remotion_renderer import setup_remotion_runtime
 from .profiles import BACKEND_DESCRIPTORS, PROFILES
 from .prompting import build_frozen_assets, canonical_backend_descriptor_payload
 from .run_store import RunStore, TASK_STAGE_IMPACT, earliest_config_impact
@@ -38,6 +40,17 @@ EXIT_CONFIG = 2
 EXIT_NOT_READY = 3
 EXIT_BUDGET = 4
 EXIT_INVALID_OUTPUT = 5
+
+
+def _configure_console_output() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (OSError, ValueError):
+            continue
 
 
 def _print_preflight(report: PreflightReport) -> None:
@@ -162,6 +175,16 @@ def _command_setup(args: argparse.Namespace) -> int:
         wsl_distribution=args.wsl_distro,
         llm_profile=args.llm_profile,
     )
+    if args.config:
+        setup_config = resolve_config(args.config)
+        if setup_config.video_style is VideoStyle.REMOTION_EXPLAINER:
+            results.extend(
+                setup_remotion_runtime(
+                    project_root,
+                    download=not args.no_download,
+                    environment=environment,
+                )
+            )
     for item in results:
         print(f"[{'OK' if item.ready else 'FAIL'}] {item.name}: {item.detail}")
         if item.action:
@@ -241,6 +264,8 @@ def _command_generate(args: argparse.Namespace) -> int:
     }
     if args.offline is not None:
         overrides["offline"] = args.offline
+    if args.video_style is not None:
+        overrides["video_style"] = args.video_style
     config = resolve_config(args.config, overrides=overrides)
     brief = load_brief(args.brief)
     environment = load_environment(args.config)
@@ -269,6 +294,12 @@ def _completed_call_counts(store: RunStore) -> dict[str, int]:
     visual_review = store.completed_item_ids("visual-review")
     music_brief = store.completed_item_ids("music-brief")
     music_brief_stage = store.stage_record("music-brief")
+    ledger_counts = {
+        task_id: sum(
+            1 for call in store.manifest.cloud_calls if call.task_id == task_id
+        )
+        for task_id in ("remotion_direction", "remotion_asset_select")
+    }
     return {
         "search": len(store.completed_item_ids("research")),
         "narration_synthesis": sum(
@@ -280,6 +311,7 @@ def _completed_call_counts(store: RunStore) -> dict[str, int]:
         "image_generate": len(store.completed_item_ids("images"))
         + sum(1 for item_id in visual_review if item_id.endswith("-regeneration")),
         "visual_review": sum(1 for item_id in visual_review if "-review-" in item_id),
+        **ledger_counts,
         "music_brief": int(
             "brief" in music_brief
             or (music_brief_stage is not None and music_brief_stage.status == "complete")
@@ -361,6 +393,8 @@ def _earliest_frozen_impact(
         stages.append("narration")
     if old_runtime.get("ffmpeg") != new_runtime.get("ffmpeg") or old_runtime.get("ffprobe") != new_runtime.get("ffprobe"):
         stages.append("narration")
+    if old_runtime.get("remotion") != new_runtime.get("remotion"):
+        stages.append("images")
     old_runners = old_runtime.get("runner_manifests", {})
     new_runners = new_runtime.get("runner_manifests", {})
     if isinstance(old_runners, dict) and isinstance(new_runners, dict):
@@ -568,7 +602,7 @@ def _command_runs_prune(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="video-generator",
-        description="Generate narrated still-image videos with per-task local or cloud Backends.",
+        description="Generate narrated still-image or Remotion videos with per-task local or cloud Backends.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -622,6 +656,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--profile", choices=sorted(name for name in PROFILES if name != "deterministic-test"))
     generate.add_argument("--language", choices=[item.value for item in OutputLanguage])
     generate.add_argument("--duration-seconds", type=float)
+    generate.add_argument("--video-style", choices=[item.value for item in VideoStyle])
     generate.add_argument("--offline", action=argparse.BooleanOptionalAction, default=None)
     generate.add_argument("--stop-after", choices=PUBLIC_STAGES)
     generate.add_argument("--live-preflight", action="store_true")
@@ -676,6 +711,7 @@ def _exit_code(error: VideoGeneratorError) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _configure_console_output()
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     if getattr(args, "older_than", 0) < 0:
