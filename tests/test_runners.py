@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from video_generator.errors import BackendError, ErrorKind
-from video_generator.runners import RunnerManager, RunnerSpec, runner_setup_source_revision
+from video_generator.runners import (
+    DockerRuntimeSpec,
+    RunnerManager,
+    RunnerSpec,
+    runner_setup_source_revision,
+)
 from video_generator.util import atomic_write_json, sha256_file
 
 
@@ -28,6 +33,59 @@ def test_native_runner_protocol_forces_utf8_stdio(tmp_path: Path) -> None:
     )
     _, second_environment = manager._command(spec)
     assert second_environment["HF_MODULES_CACHE"] != environment["HF_MODULES_CACHE"]
+
+
+def test_docker_runner_requires_an_immutable_typed_runtime() -> None:
+    common = {
+        "backend_id": "local:higgs-tts-3-4b",
+        "platform": "docker",
+        "command": [sys.executable],
+        "model_family": "higgs-docker",
+        "model_paths": [".cache/models/higgs"],
+        "asset_manifests": {".cache/models/higgs/asset-manifest.json": "hash"},
+        "runtime_files": {".cache/runtimes/higgs/runtime.json": "hash"},
+        "runtime_revision": "runtime-v1",
+        "model_revision": "model-v1",
+        "setup_source_revision": "source-v1",
+        "license_name": "fixture",
+    }
+    with pytest.raises(ValueError, match="requires docker runtime settings"):
+        RunnerSpec.model_validate(common)
+    with pytest.raises(ValueError, match="pinned by sha256 digest"):
+        DockerRuntimeSpec(
+            image_reference="lmsysorg/sglang-omni:dev",
+            image_id="sha256:" + "1" * 64,
+            server_revision="abcdef1",
+            docker_server_version="28.4.0",
+        )
+
+
+def test_docker_runner_command_receives_only_manager_owned_container_name(tmp_path: Path) -> None:
+    manager = RunnerManager(project_root=tmp_path, run_root=tmp_path / "runs" / "fixture")
+    settings = DockerRuntimeSpec(
+        image_reference="lmsysorg/sglang-omni@sha256:" + "2" * 64,
+        image_id="sha256:" + "3" * 64,
+        server_revision="abcdef1",
+        docker_server_version="28.4.0",
+    )
+    spec = SimpleNamespace(
+        backend_id="local:higgs-tts-3-4b",
+        platform="docker",
+        command=[sys.executable],
+        environment={},
+        docker=settings,
+    )
+
+    command, environment = manager._command(
+        spec,
+        container_name="video-generator-local--higgs-tts-3-4b-a1b2c3d4",
+    )
+
+    assert command == [sys.executable]
+    assert environment["VIDEO_GENERATOR_DOCKER_CONTAINER_NAME"].endswith("a1b2c3d4")
+    assert environment["VIDEO_GENERATOR_DOCKER_IMAGE_REFERENCE"] == settings.image_reference
+    with pytest.raises(BackendError, match="missing managed runtime settings"):
+        manager._command(spec)
 
 
 def test_runner_setup_revision_covers_host_pins_worker_and_lock(monkeypatch) -> None:

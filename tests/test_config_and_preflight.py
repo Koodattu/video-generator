@@ -178,12 +178,14 @@ def test_local_voice_preflight_rejects_transcript_outside_private(
     assert "outside private/" in transcript.detail
 
 
-def test_omnivoice_preflight_requires_reference_transcript(
+@pytest.mark.parametrize("backend_id", ["local:omnivoice", "local:higgs-tts-3-4b"])
+def test_transcript_required_tts_preflight_requires_reference_transcript(
     tmp_path: Path,
     resolved_config,
+    backend_id: str,
 ) -> None:
     bindings = dict(resolved_config.task_bindings)
-    bindings["narration_synthesis"] = "local:omnivoice"
+    bindings["narration_synthesis"] = backend_id
     config = resolved_config.model_copy(
         update={
             "project_root": str(tmp_path),
@@ -202,15 +204,17 @@ def test_omnivoice_preflight_requires_reference_transcript(
     assert "Set voice.reference_transcript" in (check.action or "")
 
 
-def test_omnivoice_preflight_rejects_empty_reference_transcript(
+@pytest.mark.parametrize("backend_id", ["local:omnivoice", "local:higgs-tts-3-4b"])
+def test_transcript_required_tts_preflight_rejects_empty_reference_transcript(
     tmp_path: Path,
     resolved_config,
+    backend_id: str,
 ) -> None:
     transcript = tmp_path / "private" / "voice" / "me.txt"
     transcript.parent.mkdir(parents=True)
     transcript.write_text("  \n", encoding="utf-8")
     bindings = dict(resolved_config.task_bindings)
-    bindings["narration_synthesis"] = "local:omnivoice"
+    bindings["narration_synthesis"] = backend_id
     config = resolved_config.model_copy(
         update={
             "project_root": str(tmp_path),

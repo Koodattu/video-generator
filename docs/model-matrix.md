@@ -109,7 +109,19 @@ Use language-matched recordings of the same authorized voice rather than separat
 
 VoxCPM's optional `voxcpm[timestamps]`/stable-ts post-processing is worth benchmarking as an Alignment implementation. It is not native authoritative TTS timing and must pass the same exact-script coverage checks as the implemented ASR Backends.
 
-### OmniVoice, MOSS-TTS, and X-Voice challengers
+### Higgs TTS 3, OmniVoice, MOSS-TTS, and X-Voice challengers
+
+`bosonai/higgs-tts-3-4b` is the expressive EN/FI Docker challenger. Windows runs the exact pinned
+SGLang-Omni Linux image through Docker Desktop's WSL2 engine; no separate user distro, host-network
+mode, privileged container, or cloud inference is used. Setup downloads the exact model revision,
+hashes its files, records the image digest and image ID, and Generate starts one short-lived offline
+container behind the project's exclusive GPU lease. Canonical narration remains plain text for
+captions and factual review; Python may prepend only allowlisted Higgs delivery tokens and verifies
+that removing them reproduces the canonical text exactly. The first RTX 4090 health load reached
+about 22.8 GB and returned to the host VRAM baseline after shutdown. Creator-use output requires the
+supplied Boson AI attribution; hosting or product embedding requires a separate commercial license.
+[Higgs model](https://huggingface.co/bosonai/higgs-tts-3-4b),
+[SGLang-Omni Higgs cookbook](https://sgl-project.github.io/sglang-omni/cookbook/higgs_tts.html)
 
 `k2-fsa/OmniVoice` is the first local TTS challenger. Its official Python package supports native Windows CUDA, Finnish and English, transcript-assisted voice cloning, and 24 kHz output. The worker disables its optional ASR so it cannot fetch another model at runtime, requires the authorized transcript already present in `private/`, and leaves cadence correction and word timing to the host/faster-whisper path. The weights are treated conservatively as CC-BY-NC even though the code is Apache-2.0. [OmniVoice model](https://huggingface.co/k2-fsa/OmniVoice), [OmniVoice repository](https://github.com/k2-fsa/OmniVoice)
 
@@ -162,7 +174,6 @@ its gray safety placeholder; the adapter rejected it. That is not a usable-gener
 
 | Candidate | Decision under the native-Windows-only rule |
 |---|---|
-| Higgs TTS 3 | Not integrated: official supported inference is SGLang-Omni/vLLM-Omni on Linux/container paths; no validated complete native-Windows TTS/codec runtime |
 | HiDream-O1 Dev | Not integrated: the official custom runtime hard-requires or source-edits around FlashAttention, whose Windows path is not supported/tested sufficiently for this project |
 
 Neither exclusion is a failed quality or VRAM benchmark; the project did not run an unsupported
@@ -197,6 +208,7 @@ The target machine has 24 GB VRAM and 64 GB system RAM. These figures are planni
 | OmniVoice | First native EN/FI TTS challenger |
 | MOSS-TTS v1.5 + codec | Main model and codec share the card; run alone |
 | X-Voice Stage 1 | Low-memory experimental native EN/FI challenger; noncommercial weights |
+| Higgs TTS 3 | Managed Docker Desktop/WSL2 runtime; about 22.8 GB measured at startup, run alone |
 | faster-whisper Turbo | Native CTranslate2 CUDA worker; live probe must confirm the exact Windows wheel and GPU |
 | Parakeet 0.6B | Optional WSL2 comparison Backend |
 | FLUX.2 klein 4B | Reserve 13 GB; batch images while resident |

@@ -302,6 +302,7 @@ installed one at a time:
 | `local:omnivoice` | EN/FI voice cloning | Primary TTS challenger; 24 kHz mono, host-side timing/tempo remains authoritative |
 | `local:moss-tts-v1.5` | EN/FI voice cloning | Conditional fit challenger; pinned local codec, SDPA, 48 kHz stereo |
 | `local:x-voice` | EN/FI voice cloning | Experimental Stage 1 challenger; 24 kHz mono, exact transcript and language-matched reference required, CC-BY-NC weights |
+| `local:higgs-tts-3-4b` | EN/FI voice cloning | Docker Desktop/WSL2 challenger; pinned SGLang-Omni image, exact transcript, allowlisted speed controls, Boson creator attribution required |
 | `local:z-image-turbo` | Text-to-image | First image challenger; 9 steps, guidance zero, exclusions compiled into the positive prompt |
 | `local:ideogram-4-nf4` | Text-to-image | Gated noncommercial challenger; local Python builds its strict JSON caption, never a hosted magic prompt |
 | `local:qwen-image-2512-nf4` | Text-to-image | NF4 transformer/text encoder with CPU offload; native negative prompt and true-CFG |
@@ -309,6 +310,7 @@ installed one at a time:
 ```powershell
 video-generator setup --backend local:omnivoice
 video-generator setup --backend local:x-voice
+video-generator setup --backend local:higgs-tts-3-4b
 video-generator setup --backend local:z-image-turbo
 
 # Larger conditional challengers; prepare and live-probe separately.
@@ -332,8 +334,11 @@ Measured component smokes on the RTX 4090 used by this project reached about 6.1
 OmniVoice, 12.9 GB for MOSS-TTS, 2.0 GB for X-Voice, 22.6 GB for Z-Image Turbo, and 17.5 GB for
 Qwen-Image. Z-Image produced the stronger minimalist doodle fixture; Qwen-Image was valid but more
 painterly/noisy. Ideogram loaded successfully but returned its gray safety placeholder, which the
-adapter rejected. Higgs TTS 3 and HiDream-O1 Dev were not run or integrated because no complete,
-supported native-Windows route was found; this is not a failed quality benchmark.
+adapter rejected. Higgs TTS 3 now uses a managed Linux container through Docker Desktop's WSL2
+engine. Setup pins and attests both the SGLang-Omni image and Higgs checkpoint; Generate publishes no
+host port, performs serial requests, and verifies container and VRAM cleanup. The RTX 4090 live load
+reached roughly 22.8 GB, so Higgs must run alone. HiDream-O1 Dev remains a separate unintegrated
+image-model experiment.
 
 ## Mix Backends per task
 

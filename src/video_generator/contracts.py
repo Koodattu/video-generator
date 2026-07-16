@@ -1689,7 +1689,7 @@ class BackendDescriptor(VersionedContract):
     revision: str
     protocols: set[ProtocolName]
     cloud: bool
-    runner: Literal["in_process", "native", "wsl", "either"] = "in_process"
+    runner: Literal["in_process", "native", "wsl", "docker", "either"] = "in_process"
     languages: set[OutputLanguage]
     required_env: list[str] = Field(default_factory=list)
     required_assets: list[str] = Field(default_factory=list)

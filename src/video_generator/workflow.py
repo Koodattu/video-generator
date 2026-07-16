@@ -136,6 +136,7 @@ from .run_store import RunStore
 from .schema import restricted_json_schema
 from .util import (
     atomic_write_json,
+    atomic_write_text,
     hash_run_input,
     hash_value,
     relative_path,
@@ -12653,13 +12654,26 @@ class WorkflowEngine:
                     ("media_credits_markdown", credits_markdown, "text/markdown"),
                 ]
             )
+        delivery_warnings = list(self.store.manifest.warnings)
+        if self.config.task_bindings["narration_synthesis"] == "local:higgs-tts-3-4b":
+            model_credit = outputs_dir / "model-credits.md"
+            atomic_write_text(
+                model_credit,
+                "# Model credits\n\n"
+                "This audio was created with Boson AI's Higgs Audio — "
+                "https://www.boson.ai/higgs-audio\n",
+            )
+            output_files.append(("model_credits_markdown", model_credit, "text/markdown"))
+            delivery_warnings.append(
+                "Published Higgs Audio creator works must include the supplied Boson AI attribution."
+            )
         manifest = delivery_manifest(
             run_id=self.store.manifest.run_id,
             output_files=output_files,
             workspace_root=self.project_root,
             duration=rendered.plan.duration_seconds,
             checks=checks,
-            warnings=self.store.manifest.warnings,
+            warnings=delivery_warnings,
         )
         atomic_write_json(workspace.work_dir / "delivery-manifest-copy.json", manifest.model_dump(mode="json"))
         output_manifest = outputs_dir / "delivery-manifest.json"

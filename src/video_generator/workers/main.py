@@ -1458,6 +1458,10 @@ def build_worker(kind: str, paths: Paths) -> Worker:
         return MossTtsWorker(paths)
     if kind == "xvoice":
         return XVoiceWorker(paths)
+    if kind == "higgs-docker":
+        from .higgs_docker import HiggsDockerWorker
+
+        return HiggsDockerWorker(paths)
     if kind == "parakeet":
         return ParakeetWorker(paths)
     if kind == "faster-whisper":
@@ -1504,6 +1508,7 @@ def main(argv: list[str] | None = None) -> int:
             "omnivoice",
             "moss-tts",
             "xvoice",
+            "higgs-docker",
             "parakeet",
             "faster-whisper",
             "flux",

@@ -134,6 +134,7 @@ class BackendRegistry:
             "local:omnivoice",
             "local:moss-tts-v1.5",
             "local:x-voice",
+            "local:higgs-tts-3-4b",
         }:
             return LocalSpeechBackend(backend_id, self.runners)
         if backend_id in {

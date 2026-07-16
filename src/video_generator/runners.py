@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -13,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, IO, Literal, Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .contracts import ProbeItem, ProbeReport
 from .errors import BackendError, ErrorKind
@@ -55,6 +56,8 @@ def runner_setup_source_revision(model_family: str) -> str:
     }
     if model_family == "xvoice":
         sources["conda_lock"] = requirements.with_name("xvoice-conda-win-64.lock")
+    if model_family == "higgs-docker":
+        sources["docker_worker"] = package_root / "workers" / "higgs_docker.py"
     source_revisions = [
         f"{name}={sha256_file(path) if path.is_file() else '<missing>'}"
         for name, path in sorted(sources.items())
@@ -79,18 +82,39 @@ def decode_wsl_output(value: bytes) -> str:
     return value.decode("utf-8-sig", errors="replace")
 
 
+class DockerRuntimeSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    protocol_version: Literal[1] = 1
+    image_reference: str
+    image_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    server_revision: str = Field(min_length=7)
+    internal_port: int = Field(default=8000, ge=1, le=65535)
+    docker_server_version: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_immutable_image(self) -> "DockerRuntimeSpec":
+        if "@sha256:" not in self.image_reference:
+            raise ValueError("Docker image_reference must be pinned by sha256 digest")
+        digest = self.image_reference.rsplit("@", 1)[-1]
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            raise ValueError("Docker image_reference contains an invalid digest")
+        return self
+
+
 class RunnerSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     protocol_version: Literal[1] = 1
     backend_id: str
-    platform: str = Field(pattern="^(native|wsl)$")
+    platform: str = Field(pattern="^(native|wsl|docker)$")
     command: list[str] = Field(min_length=1)
     model_family: str
     requires_cuda: bool = True
     timeout_seconds: float = Field(default=600, gt=0, le=7200)
     startup_timeout_seconds: float = Field(default=180, gt=0, le=1800)
     wsl_distribution: str = ""
+    docker: DockerRuntimeSpec | None = None
     environment: dict[str, str] = Field(default_factory=dict)
     model_paths: list[str] = Field(min_length=1)
     asset_manifests: dict[str, str] = Field(min_length=1)
@@ -101,6 +125,16 @@ class RunnerSpec(BaseModel):
     setup_source_revision: str
     license_name: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_platform_settings(self) -> "RunnerSpec":
+        if self.platform == "docker" and self.docker is None:
+            raise ValueError("docker Runner requires docker runtime settings")
+        if self.platform != "docker" and self.docker is not None:
+            raise ValueError("docker runtime settings are only valid for docker Runners")
+        if self.platform == "wsl" and not self.wsl_distribution:
+            raise ValueError("WSL Runner requires wsl_distribution")
+        return self
 
 
 def windows_to_wsl(path: Path) -> str:
@@ -172,6 +206,7 @@ class _RunnerProcess:
     started_at: float = field(default_factory=time.monotonic)
     health: dict[str, Any] = field(default_factory=dict)
     gpu_baseline: dict[str, Any] = field(default_factory=dict)
+    container_name: str = ""
 
 
 class RunnerManager:
@@ -297,7 +332,7 @@ class RunnerManager:
                     items.append(
                         ProbeItem(name="gpu_memory_baseline", ready=True, detail=detail)
                     )
-        else:
+        elif spec.platform == "wsl":
             wsl = shutil.which("wsl.exe") or shutil.which("wsl")
             distro_ready = False
             python_ready = False
@@ -371,6 +406,8 @@ class RunnerManager:
                     ),
                 ]
             )
+        else:
+            items.extend(self._probe_docker_runtime(spec))
         for model_path in spec.model_paths:
             path = (self.project_root / model_path).resolve()
             in_cache = False
@@ -472,7 +509,8 @@ class RunnerManager:
                 requires_gpu_evidence = bool(
                     spec.requires_cuda or spec.model_family == "llama-server"
                 )
-                ready = process_exited and gpu_released and (
+                container_absent = bool(cleanup.get("container_absent", True))
+                ready = process_exited and gpu_released and container_absent and (
                     not requires_gpu_evidence
                     or (gpu_observable and within_tolerance)
                 )
@@ -513,6 +551,87 @@ class RunnerManager:
             ready=all(item.ready for item in items),
             items=items,
         )
+
+    @staticmethod
+    def _docker_json(docker: str, arguments: list[str], *, timeout: float = 30) -> Any:
+        completed = subprocess.run(
+            [docker, *arguments],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip() or "Docker command failed"
+            raise OSError(detail)
+        return json.loads(completed.stdout)
+
+    def _probe_docker_runtime(self, spec: RunnerSpec) -> list[ProbeItem]:
+        settings = spec.docker
+        if settings is None:
+            return [ProbeItem(name="docker_runtime", ready=False, detail="Docker settings are missing")]
+        docker = shutil.which("docker")
+        if not docker:
+            return [
+                ProbeItem(
+                    name="docker_runtime",
+                    ready=False,
+                    detail="Docker CLI is unavailable",
+                    action="Install or start Docker Desktop with its WSL2 Linux engine.",
+                )
+            ]
+        try:
+            info = self._docker_json(docker, ["info", "--format", "{{json .}}"])
+            image_values = self._docker_json(
+                docker,
+                ["image", "inspect", settings.image_reference],
+            )
+            image = image_values[0] if isinstance(image_values, list) and image_values else {}
+        except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+            return [
+                ProbeItem(
+                    name="docker_runtime",
+                    ready=False,
+                    detail=f"Docker runtime probe failed: {exc}",
+                    action="Start Docker Desktop, then rerun Setup for this Backend.",
+                )
+            ]
+        linux_ready = isinstance(info, dict) and str(info.get("OSType", "")).casefold() == "linux"
+        runtimes = info.get("Runtimes", {}) if isinstance(info, dict) else {}
+        nvidia_ready = isinstance(runtimes, dict) and "nvidia" in runtimes
+        server_version = str(info.get("ServerVersion") or "") if isinstance(info, dict) else ""
+        version_ready = server_version == settings.docker_server_version
+        image_id = str(image.get("Id") or "") if isinstance(image, dict) else ""
+        repo_digests = set(image.get("RepoDigests") or []) if isinstance(image, dict) else set()
+        image_ready = image_id == settings.image_id and settings.image_reference in repo_digests
+        return [
+            ProbeItem(
+                name="docker_linux_engine",
+                ready=linux_ready,
+                detail="Docker Linux engine available" if linux_ready else "Docker is not using a Linux engine",
+                action=None if linux_ready else "Enable Docker Desktop's WSL2 Linux engine.",
+            ),
+            ProbeItem(
+                name="docker_nvidia_runtime",
+                ready=nvidia_ready,
+                detail="NVIDIA container runtime available" if nvidia_ready else "NVIDIA container runtime missing",
+                action=None if nvidia_ready else "Repair Docker Desktop GPU support for WSL2.",
+            ),
+            ProbeItem(
+                name="docker_server_version",
+                ready=version_ready,
+                detail=server_version or "Docker server version unavailable",
+                action=None if version_ready else f"Rerun Setup for {spec.backend_id} after the Docker update.",
+            ),
+            ProbeItem(
+                name="docker_image",
+                ready=image_ready,
+                detail=image_id or "pinned Docker image is unavailable",
+                action=None if image_ready else f"Rerun Setup for {spec.backend_id} without --no-download.",
+            ),
+        ]
 
     @staticmethod
     def _verify_asset_manifest(manifest_path: Path, *, expected_revision: str | None) -> str:
@@ -586,7 +705,12 @@ class RunnerManager:
             return "verified"
         raise ValueError("asset manifest has no verifiable files")
 
-    def _command(self, spec: RunnerSpec) -> tuple[list[str], dict[str, str]]:
+    def _command(
+        self,
+        spec: RunnerSpec,
+        *,
+        container_name: str = "",
+    ) -> tuple[list[str], dict[str, str]]:
         inherited_names = {
             "PATH",
             "PATHEXT",
@@ -620,7 +744,23 @@ class RunnerManager:
                 "VIDEO_GENERATOR_RUN_ROOT": str(self.run_root),
             }
         )
-        if spec.platform == "native":
+        if spec.platform in {"native", "docker"}:
+            if spec.platform == "docker":
+                if spec.docker is None or not container_name:
+                    raise BackendError(
+                        f"Docker runner for {spec.backend_id} is missing managed runtime settings",
+                        kind=ErrorKind.NOT_READY,
+                        action=f"Rerun Setup for {spec.backend_id}.",
+                    )
+                environment.update(
+                    {
+                        "VIDEO_GENERATOR_DOCKER_CONTAINER_NAME": container_name,
+                        "VIDEO_GENERATOR_DOCKER_IMAGE_REFERENCE": spec.docker.image_reference,
+                        "VIDEO_GENERATOR_DOCKER_IMAGE_ID": spec.docker.image_id,
+                        "VIDEO_GENERATOR_DOCKER_INTERNAL_PORT": str(spec.docker.internal_port),
+                        "VIDEO_GENERATOR_DOCKER_SERVER_REVISION": spec.docker.server_revision,
+                    }
+                )
             return list(spec.command), environment
         wsl = shutil.which("wsl.exe") or shutil.which("wsl")
         if not wsl or not spec.wsl_distribution:
@@ -664,7 +804,12 @@ class RunnerManager:
         if not self._lease_held:
             self.lease.acquire()
             self._lease_held = True
-        command, environment = self._command(spec)
+        container_name = (
+            f"video-generator-{runner_slug(spec.backend_id)}-{uuid.uuid4().hex[:12]}"
+            if spec.platform == "docker"
+            else ""
+        )
+        command, environment = self._command(spec, container_name=container_name)
         logs = self.run_root / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         stderr_handle = (logs / f"runner-{runner_slug(spec.backend_id)}.log").open(
@@ -731,6 +876,7 @@ class RunnerManager:
             reader,
             stderr_handle,
             gpu_baseline=gpu_baseline,
+            container_name=container_name,
         )
         self.current = running
         try:
@@ -827,17 +973,64 @@ class RunnerManager:
                 raise BackendError("local runner result was not an object", kind=ErrorKind.INVALID_OUTPUT)
             return result
 
+    @staticmethod
+    def _valid_managed_container_name(value: str) -> bool:
+        return bool(
+            re.fullmatch(r"video-generator-[a-z0-9][a-z0-9_.-]{1,110}", value)
+        )
+
+    @classmethod
+    def _docker_container_exists(cls, docker: str, container_name: str) -> bool:
+        if not cls._valid_managed_container_name(container_name):
+            return False
+        completed = subprocess.run(
+            [docker, "container", "inspect", container_name],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+        return completed.returncode == 0
+
+    @classmethod
+    def _remove_managed_container(cls, container_name: str) -> bool:
+        if not cls._valid_managed_container_name(container_name):
+            return False
+        docker = shutil.which("docker")
+        if not docker:
+            return False
+        try:
+            if cls._docker_container_exists(docker, container_name):
+                subprocess.run(
+                    [docker, "rm", "-f", container_name],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=90,
+                    check=False,
+                )
+            return not cls._docker_container_exists(docker, container_name)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
     def stop_current(self) -> None:
         runner = self.current
         if runner is None:
             return
         process = runner.process
+        platform = str(getattr(runner.spec, "platform", "native"))
         lifecycle: dict[str, Any] | None = None
         forced = False
         if process.poll() is None and process.stdin is not None:
             try:
                 result = self._invoke_current(
-                    "shutdown", {}, timeout=45, stop_on_failure=False
+                    "shutdown",
+                    {},
+                    timeout=90 if platform == "docker" else 45,
+                    stop_on_failure=False,
                 )
                 reported_lifecycle = result.get("lifecycle")
                 if isinstance(reported_lifecycle, dict):
@@ -846,6 +1039,12 @@ class RunnerManager:
             except (BackendError, OSError, subprocess.TimeoutExpired):
                 forced = True
                 self._kill_process_tree(process)
+        container_absent = True
+        container_name = str(getattr(runner, "container_name", "") or "")
+        if platform == "docker":
+            container_absent = self._remove_managed_container(container_name)
+            if not container_absent:
+                forced = True
         requires_gpu_evidence = bool(
             getattr(runner.spec, "requires_cuda", False)
             or runner.spec.model_family == "llama-server"
@@ -906,6 +1105,12 @@ class RunnerManager:
                         "used_mb": post_exit.used_mb,
                         "process_ids": list(post_exit.process_ids),
                     },
+                }
+            if platform == "docker":
+                lifecycle = {
+                    **lifecycle,
+                    "container_name": container_name,
+                    "container_absent": container_absent,
                 }
             self.last_cleanup[runner.spec.backend_id] = lifecycle
             self._cleanup_sequence += 1

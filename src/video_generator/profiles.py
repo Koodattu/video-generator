@@ -6,7 +6,7 @@ from .contracts import BackendDescriptor, OutputLanguage, ProtocolName, TASK_IDS
 from .costs import PRICING_SNAPSHOT
 
 
-PROFILE_VERSION = "2026-07-16.v10"
+PROFILE_VERSION = "2026-07-16.v11"
 
 EXPECTED_LOCAL_MODEL_REVISIONS: dict[str, str] = {
     "local:voxcpm2": "bffb3df5a29440629464e5e839f4d214c8714c3d",
@@ -16,6 +16,7 @@ EXPECTED_LOCAL_MODEL_REVISIONS: dict[str, str] = {
     "local:omnivoice": "c5fdb5ccb189668d56333f77ba2629f4cd7535f4",
     "local:moss-tts-v1.5": "be7766a6735b98bd793f7c79fb720b4d0f5d13b8",
     "local:x-voice": "7f24fe778ddf7a47e25d87e5d5153599c1d4d5c2",
+    "local:higgs-tts-3-4b": "7556c17e05201fccd9c8cc120bc216dcc7b5d561",
     "local:z-image-turbo": "f332072aa78be7aecdf3ee76d5c247082da564a6",
     "local:ideogram-4-nf4": "1874bc70267ba2c823a7239e1d70dd308c8d64dc",
     "local:qwen-image-2512-nf4": "25468b98e3276ca6700de15c6628e51b7de54a26",
@@ -270,6 +271,26 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         notes=(
             "Experimental native-Windows Stage1 backend with a pinned Conda/Pynini runtime; "
             "the model weights prohibit commercial use."
+        ),
+    ),
+    "local:higgs-tts-3-4b": BackendDescriptor(
+        backend_id="local:higgs-tts-3-4b",
+        provider="local",
+        model_id="bosonai/higgs-tts-3-4b",
+        revision="runner-manifest-v1",
+        protocols={ProtocolName.SPEECH},
+        cloud=False,
+        runner="docker",
+        languages=_all_languages(),
+        required_assets=["higgs-tts-3-4b", "sglang-omni-docker"],
+        supports_voice_cloning=True,
+        requires_reference_transcript=True,
+        exclusive_gpu=True,
+        license_name="Boson AI Higgs Audio Research License + Creator Use Grant",
+        notes=(
+            "Docker Desktop/WSL2 challenger with allowlisted delivery controls. Published creator "
+            "works require prominent Boson AI attribution; hosting or product embedding requires "
+            "a separate commercial license."
         ),
     ),
     "local:parakeet-tdt-0.6b-v3": BackendDescriptor(

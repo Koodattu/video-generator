@@ -19,6 +19,7 @@ from .errors import ErrorKind, VideoGeneratorError
 from .local_llm import LocalLlmProfile, load_local_llm_profile
 from .profiles import BACKEND_DESCRIPTORS, PROFILES
 from .runners import (
+    DockerRuntimeSpec,
     RunnerManager,
     RunnerSpec,
     decode_wsl_output,
@@ -80,6 +81,12 @@ XVOICE_CMUDICT_URL = (
 XVOICE_CMUDICT_SHA256 = (
     "d07cca47fd72ad32ea9d8ad1219f85301eeaf4568f8b6b73747506a71fb5afd6"
 )
+HIGGS_MODEL_REVISION = "7556c17e05201fccd9c8cc120bc216dcc7b5d561"
+HIGGS_IMAGE_REFERENCE = (
+    "lmsysorg/sglang-omni@"
+    "sha256:46235435997d1fa93fc81fb1c2d5b7fd8470d77395a5c348c0176094ffddf95e"
+)
+HIGGS_SERVER_REVISION = "bdb6748882465e0b4c0b3298f95cb6e47adf5e10"
 Z_IMAGE_TURBO_REVISION = "f332072aa78be7aecdf3ee76d5c247082da564a6"
 IDEOGRAM_4_NF4_REVISION = "1874bc70267ba2c823a7239e1d70dd308c8d64dc"
 QWEN_IMAGE_2512_REVISION = "25468b98e3276ca6700de15c6628e51b7de54a26"
@@ -1398,6 +1405,239 @@ def prepare_standard_backend(
     return ProbeItem(name=definition.backend_id, ready=True, detail=f"prepared: {path}")
 
 
+def prepare_higgs_docker_backend(
+    project_root: Path,
+    *,
+    environment: Mapping[str, str],
+    download: bool,
+) -> ProbeItem:
+    docker = shutil.which("docker")
+    if not docker:
+        raise VideoGeneratorError(
+            "Docker Desktop is required for local:higgs-tts-3-4b",
+            kind=ErrorKind.NOT_READY,
+            action="Install or start Docker Desktop with its WSL2 Linux engine.",
+        )
+    setup_environment = _setup_tool_environment(environment, project_root)
+    info_text = _run(
+        [docker, "info", "--format", "{{json .}}"],
+        cwd=project_root,
+        environment=setup_environment,
+        timeout=60,
+    )
+    try:
+        info = json.loads(info_text)
+    except json.JSONDecodeError as exc:
+        raise VideoGeneratorError(
+            "Docker returned invalid runtime metadata",
+            kind=ErrorKind.NOT_READY,
+        ) from exc
+    if str(info.get("OSType") or "").casefold() != "linux":
+        raise VideoGeneratorError(
+            "Higgs TTS requires Docker Desktop's WSL2 Linux engine",
+            kind=ErrorKind.NOT_READY,
+        )
+    runtimes = info.get("Runtimes") or {}
+    if not isinstance(runtimes, dict) or "nvidia" not in runtimes:
+        raise VideoGeneratorError(
+            "Docker's NVIDIA runtime is unavailable",
+            kind=ErrorKind.NOT_READY,
+            action="Repair Docker Desktop GPU support for WSL2.",
+        )
+    inspect = subprocess.run(
+        [docker, "image", "inspect", HIGGS_IMAGE_REFERENCE],
+        cwd=project_root,
+        env=setup_environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        check=False,
+    )
+    if inspect.returncode != 0:
+        if not download:
+            raise VideoGeneratorError(
+                "the pinned SGLang-Omni Docker image is not prepared",
+                kind=ErrorKind.NOT_READY,
+                action="Rerun Setup without --no-download for local:higgs-tts-3-4b.",
+            )
+        _run(
+            [docker, "pull", HIGGS_IMAGE_REFERENCE],
+            cwd=project_root,
+            environment=setup_environment,
+            timeout=7200,
+        )
+        inspect_text = _run(
+            [docker, "image", "inspect", HIGGS_IMAGE_REFERENCE],
+            cwd=project_root,
+            environment=setup_environment,
+            timeout=60,
+        )
+    else:
+        inspect_text = inspect.stdout
+    try:
+        image_values = json.loads(inspect_text)
+        image = image_values[0]
+        image_id = str(image["Id"])
+        repo_digests = {str(value) for value in image.get("RepoDigests") or []}
+    except (IndexError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise VideoGeneratorError(
+            "the pinned SGLang-Omni image could not be attested",
+            kind=ErrorKind.NOT_READY,
+        ) from exc
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) or HIGGS_IMAGE_REFERENCE not in repo_digests:
+        raise VideoGeneratorError(
+            "the local SGLang-Omni image does not match its pinned digest",
+            kind=ErrorKind.NOT_READY,
+        )
+
+    model_definition = LocalDefinition(
+        backend_id="local:higgs-tts-3-4b",
+        kind="higgs-docker",
+        platform="docker",
+        python_version="3.12",
+        requirements_name="higgs-docker.in",
+        model_repo="bosonai/higgs-tts-3-4b",
+        model_revision=HIGGS_MODEL_REVISION,
+        model_subdir="higgs-tts-3-4b",
+        timeout_seconds=1800,
+        startup_timeout_seconds=1200,
+    )
+    model_root = (project_root / ".cache" / "models" / model_definition.model_subdir).resolve()
+    model_cache = (project_root / ".cache" / "models").resolve()
+    model_root.relative_to(model_cache)
+    model_manifest = model_root / "asset-manifest.json"
+    if model_manifest.is_file():
+        try:
+            _verify_snapshot_manifest(model_manifest, model_definition)
+        except (OSError, ValueError) as exc:
+            raise VideoGeneratorError(
+                "the cached Higgs model snapshot failed verification",
+                kind=ErrorKind.NOT_READY,
+                action="Move the invalid snapshot aside, then rerun Setup.",
+            ) from exc
+    elif not download:
+        raise VideoGeneratorError(
+            "the pinned Higgs model snapshot is not prepared",
+            kind=ErrorKind.NOT_READY,
+            action="Rerun Setup without --no-download for local:higgs-tts-3-4b.",
+        )
+    else:
+        if model_root.exists() and any(model_root.iterdir()):
+            raise VideoGeneratorError(
+                "the Higgs model directory is nonempty but has no verified asset manifest",
+                kind=ErrorKind.NOT_READY,
+                action="Move the incomplete directory aside, then rerun Setup.",
+            )
+        model_cache.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=".higgs-tts-3-4b-", dir=model_cache)).resolve()
+        staging.relative_to(model_cache)
+        try:
+            download_environment = dict(setup_environment)
+            docker_environment = ["--env", "HF_HUB_DISABLE_TELEMETRY=1"]
+            if environment.get("HF_TOKEN"):
+                download_environment["HF_TOKEN"] = environment["HF_TOKEN"]
+                docker_environment.extend(["--env", "HF_TOKEN"])
+            download_script = (
+                "import os,sys; from huggingface_hub import snapshot_download; "
+                "snapshot_download(repo_id=sys.argv[1], revision=sys.argv[2], "
+                "local_dir=sys.argv[3], token=os.environ.get('HF_TOKEN') or None)"
+            )
+            _run(
+                [
+                    docker,
+                    "run",
+                    "--rm",
+                    "--mount",
+                    f"type=bind,source={staging},target=/download",
+                    *docker_environment,
+                    HIGGS_IMAGE_REFERENCE,
+                    "/opt/omni/bin/python",
+                    "-c",
+                    download_script,
+                    model_definition.model_repo,
+                    model_definition.model_revision,
+                    "/download",
+                ],
+                cwd=project_root,
+                environment=download_environment,
+                timeout=14400,
+            )
+            from .workers.prepare import write_asset_manifest
+
+            write_asset_manifest(
+                staging,
+                repo=model_definition.model_repo,
+                revision=model_definition.model_revision,
+            )
+            _verify_snapshot_manifest(staging / "asset-manifest.json", model_definition)
+            if model_root.exists():
+                model_root.rmdir()
+            replace_path(staging, model_root)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+        model_manifest = model_root / "asset-manifest.json"
+
+    runtime_root = project_root / ".cache" / "runtimes" / "local--higgs-tts-3-4b"
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    runtime_attestation = runtime_root / "container-runtime.json"
+    atomic_write_json(
+        runtime_attestation,
+        {
+            "schema_version": 1,
+            "image_reference": HIGGS_IMAGE_REFERENCE,
+            "image_id": image_id,
+            "repo_digests": sorted(repo_digests),
+            "docker_server_version": str(info.get("ServerVersion") or ""),
+            "server_revision": HIGGS_SERVER_REVISION,
+            "model_id": model_definition.model_repo,
+            "model_revision": model_definition.model_revision,
+            "model_asset_manifest_sha256": sha256_file(model_manifest),
+        },
+    )
+    spec = RunnerSpec(
+        backend_id=model_definition.backend_id,
+        platform="docker",
+        command=[sys.executable, "-m", "video_generator.workers.main", "--kind", "higgs-docker"],
+        model_family="higgs-docker",
+        requires_cuda=True,
+        timeout_seconds=model_definition.timeout_seconds,
+        startup_timeout_seconds=model_definition.startup_timeout_seconds,
+        docker=DockerRuntimeSpec(
+            image_reference=HIGGS_IMAGE_REFERENCE,
+            image_id=image_id,
+            server_revision=HIGGS_SERVER_REVISION,
+            internal_port=8000,
+            docker_server_version=str(info.get("ServerVersion") or ""),
+        ),
+        environment={
+            "PYTHONPATH": str(project_root / "src"),
+            "VIDEO_GENERATOR_MODEL_PATH": relative_path(model_root, project_root),
+            "VIDEO_GENERATOR_RUNTIME_REVISION": sha256_file(runtime_attestation),
+            "VIDEO_GENERATOR_MODEL_REVISION": model_definition.model_revision,
+        },
+        model_paths=[relative_path(model_root, project_root)],
+        asset_manifests={
+            relative_path(model_manifest, project_root): sha256_file(model_manifest),
+        },
+        asset_revisions={
+            relative_path(model_manifest, project_root): model_definition.model_revision,
+        },
+        runtime_files={
+            relative_path(runtime_attestation, project_root): sha256_file(runtime_attestation),
+        },
+        runtime_revision=sha256_file(runtime_attestation),
+        model_revision=model_definition.model_revision,
+        setup_source_revision=runner_setup_source_revision(model_definition.kind),
+        license_name=BACKEND_DESCRIPTORS[model_definition.backend_id].license_name,
+    )
+    runner_path = project_root / ".cache" / "runners" / runner_slug(spec.backend_id) / "runner.json"
+    atomic_write_json(runner_path, spec.model_dump(mode="json"))
+    return ProbeItem(name=spec.backend_id, ready=True, detail=f"prepared: {runner_path}")
+
+
 def _download_verified_url(
     *,
     url: str,
@@ -2430,6 +2670,15 @@ def setup_backends(
         if backend_id == "local:x-voice":
             results.append(
                 prepare_xvoice_backend(
+                    project_root,
+                    environment=environment,
+                    download=download,
+                )
+            )
+            continue
+        if backend_id == "local:higgs-tts-3-4b":
+            results.append(
+                prepare_higgs_docker_backend(
                     project_root,
                     environment=environment,
                     download=download,

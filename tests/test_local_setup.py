@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -190,6 +191,77 @@ def test_native_cuda_runner_uses_selected_torch_backend(
     assert runtime_lock.read_bytes() == setup._requirements_path(
         definition.requirements_name
     ).with_suffix(".lock").read_bytes()
+
+
+def test_higgs_docker_setup_attests_cached_image_and_model_without_download(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_id = "sha256:" + "8" * 64
+    model_root = tmp_path / ".cache" / "models" / "higgs-tts-3-4b"
+    model_root.mkdir(parents=True)
+    (model_root / "weights.safetensors").write_bytes(b"fixture")
+    manifest = model_root / "asset-manifest.json"
+    manifest.write_text("{}\n", encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def fake_run(command, *, cwd, environment=None, timeout=7200):
+        values = [str(value) for value in command]
+        commands.append(values)
+        if values[1:3] == ["info", "--format"]:
+            return json.dumps(
+                {
+                    "OSType": "linux",
+                    "Runtimes": {"nvidia": {}},
+                    "ServerVersion": "28.4.0",
+                }
+            )
+        raise AssertionError(f"unexpected Setup command: {values}")
+
+    def fake_subprocess_run(command, **kwargs):
+        values = [str(value) for value in command]
+        assert values[1:3] == ["image", "inspect"]
+        return subprocess.CompletedProcess(
+            values,
+            0,
+            stdout=json.dumps(
+                [
+                    {
+                        "Id": image_id,
+                        "RepoDigests": [setup.HIGGS_IMAGE_REFERENCE],
+                    }
+                ]
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(setup.shutil, "which", lambda name: "docker.exe" if name == "docker" else None)
+    monkeypatch.setattr(setup, "_run", fake_run)
+    monkeypatch.setattr(setup.subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(setup, "_verify_snapshot_manifest", lambda *args, **kwargs: None)
+
+    result = setup.prepare_higgs_docker_backend(
+        tmp_path,
+        environment={"PATH": "fixture"},
+        download=False,
+    )
+
+    spec = setup.RunnerSpec.model_validate(
+        json.loads(
+            (
+                tmp_path
+                / ".cache"
+                / "runners"
+                / "local--higgs-tts-3-4b"
+                / "runner.json"
+            ).read_text(encoding="utf-8")
+        )
+    )
+    assert result.ready is True
+    assert spec.platform == "docker"
+    assert spec.docker is not None
+    assert spec.docker.image_id == image_id
+    assert not any(values[1] in {"pull", "run"} for values in commands)
 
 
 def test_parse_uv_version() -> None:

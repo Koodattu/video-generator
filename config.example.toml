@@ -101,4 +101,5 @@ elevenlabs_voice_id = ""
 # narration_synthesis = "local:omnivoice"             # Native Windows EN/FI voice clone.
 # narration_synthesis = "local:moss-tts-v1.5"         # Native Windows conditional challenger.
 # narration_synthesis = "local:x-voice"               # Native Windows EN/FI; exact transcript, matching reference_language, eSpeak NG, noncommercial weights.
+# narration_synthesis = "local:higgs-tts-3-4b"        # Docker Desktop/WSL2 EN/FI; exact transcript, pinned SGLang-Omni image, creator attribution required.
 # caption_alignment = "local:parakeet-tdt-0.6b-v3" # Optional WSL2 comparison Backend.
