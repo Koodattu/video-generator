@@ -174,6 +174,12 @@ The current machine has WSL2 enabled but no distribution. Setup should report th
 
 ## Milestone 6 — Local Backends
 
+> Status update (2026-07-17): subsequent human evaluation promoted Higgs TTS 3, kept VoxCPM2 and
+> OmniVoice as alternatives, and demoted X-Voice and MOSS-TTS to retained legacy options. The first
+> Qwen-Image smoke below used 20 steps at 1024×576 and is not a valid quality result; the current
+> adapter uses the documented 50-step path at 1664×928. Ideogram has no usable smoke image because
+> its separate generation attempt returned the model's safety placeholder.
+
 Integrate one model at a time against existing conformance tests:
 
 1. a manifest-selected GGUF through pinned stock Windows `llama-server.exe`, beginning with pinned Qwen, Gemma, and EuroLLM candidates and separate MTP variants only where supported;
@@ -185,9 +191,11 @@ Integrate one model at a time against existing conformance tests:
 7. native-Windows TTS challengers OmniVoice, MOSS-TTS v1.5, and X-Voice Stage 1;
 8. native-Windows image challengers Z-Image Turbo, Ideogram 4 NF4, and Qwen-Image-2512 NF4.
 
-Short English/Finnish component smokes passed for OmniVoice, MOSS-TTS, and X-Voice. Z-Image and
-Qwen-Image produced valid 1024×576 images; Ideogram loaded but its safety placeholder was rejected.
-These results do not replace the end-to-end and human quality gates below.
+Short English/Finnish component smokes passed mechanically for OmniVoice, MOSS-TTS, and X-Voice.
+Human evaluation later demoted MOSS-TTS and X-Voice. Z-Image produced a usable 1024×576 image; the
+Qwen-Image output used the obsolete 20-step shortcut and is not a promotion-quality result.
+Ideogram loaded but its safety placeholder was rejected. These results do not replace the
+end-to-end and human quality gates below.
 
 For each Backend:
 

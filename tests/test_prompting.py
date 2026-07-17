@@ -43,6 +43,17 @@ def test_image_prompt_compiler_supports_every_local_image_backend() -> None:
         assert marker in prompt.instructions
 
 
+def test_qwen_image_prompt_uses_the_quality_path_without_style_contradictions() -> None:
+    prompt = PromptLibrary().get(
+        "image_prompt_compile",
+        language=OutputLanguage.ENGLISH,
+        target_image_backend="local:qwen-image-2512-nf4",
+    )
+
+    assert "official 50-step" in prompt.instructions
+    assert "never negate a requested" in prompt.instructions
+
+
 def test_image_prompt_compiler_supports_every_registered_image_backend() -> None:
     image_backends = {
         backend_id

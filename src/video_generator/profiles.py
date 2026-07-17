@@ -6,7 +6,26 @@ from .contracts import BackendDescriptor, OutputLanguage, ProtocolName, TASK_IDS
 from .costs import PRICING_SNAPSHOT
 
 
-PROFILE_VERSION = "2026-07-16.v11"
+PROFILE_VERSION = "2026-07-17.v12"
+
+BACKEND_SELECTION_TIERS: dict[str, str] = {
+    "local:higgs-tts-3-4b": "preferred",
+    "local:voxcpm2": "alternative",
+    "local:omnivoice": "alternative",
+    "local:moss-tts-v1.5": "legacy",
+    "local:x-voice": "legacy",
+    "local:z-image-turbo": "alternative",
+    "local:ideogram-4-nf4": "experimental",
+    "local:qwen-image-2512-nf4": "experimental",
+}
+
+BACKEND_SELECTION_TIER_ORDER = {
+    "preferred": 0,
+    "standard": 1,
+    "alternative": 2,
+    "experimental": 3,
+    "legacy": 4,
+}
 
 EXPECTED_LOCAL_MODEL_REVISIONS: dict[str, str] = {
     "local:voxcpm2": "bffb3df5a29440629464e5e839f4d214c8714c3d",
@@ -30,11 +49,12 @@ def image_generation_dimensions(
     delivery_width: int,
     delivery_height: int,
 ) -> tuple[int, int]:
+    if backend_id == "local:qwen-image-2512-nf4":
+        return 1664, 928
     if backend_id in {
         "local:flux.2-klein-4b",
         "local:z-image-turbo",
         "local:ideogram-4-nf4",
-        "local:qwen-image-2512-nf4",
     }:
         return 1024, 576
     if backend_id == "deterministic:stick":
@@ -221,6 +241,7 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         supports_voice_cloning=True,
         exclusive_gpu=True,
         license_name="Apache-2.0",
+        notes="Secondary local TTS option after Higgs TTS 3; retained for native-Windows use.",
     ),
     "local:omnivoice": BackendDescriptor(
         backend_id="local:omnivoice",
@@ -236,7 +257,10 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         requires_reference_transcript=True,
         exclusive_gpu=True,
         license_name="CC-BY-NC-4.0",
-        notes="Native Windows challenger; authorized 3–10 second voice references are recommended.",
+        notes=(
+            "Secondary local TTS option after Higgs TTS 3; authorized 3–10 second voice "
+            "references are recommended."
+        ),
     ),
     "local:moss-tts-v1.5": BackendDescriptor(
         backend_id="local:moss-tts-v1.5",
@@ -251,7 +275,10 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         supports_voice_cloning=True,
         exclusive_gpu=True,
         license_name="Apache-2.0",
-        notes="Native Windows challenger using pinned local remote code and SDPA; requires a fit probe.",
+        notes=(
+            "Legacy lower-quality TTS option retained for compatibility and explicit evaluation; "
+            "uses pinned local remote code and SDPA."
+        ),
     ),
     "local:x-voice": BackendDescriptor(
         backend_id="local:x-voice",
@@ -269,8 +296,8 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         exclusive_gpu=True,
         license_name="CC-BY-NC-4.0",
         notes=(
-            "Experimental native-Windows Stage1 backend with a pinned Conda/Pynini runtime; "
-            "the model weights prohibit commercial use."
+            "Legacy lower-quality TTS option retained for compatibility and explicit evaluation. "
+            "Its pinned native-Windows Stage1 weights prohibit commercial use."
         ),
     ),
     "local:higgs-tts-3-4b": BackendDescriptor(
@@ -288,9 +315,9 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         exclusive_gpu=True,
         license_name="Boson AI Higgs Audio Research License + Creator Use Grant",
         notes=(
-            "Docker Desktop/WSL2 challenger with allowlisted delivery controls. Published creator "
-            "works require prominent Boson AI attribution; hosting or product embedding requires "
-            "a separate commercial license."
+            "Preferred local EN/FI TTS Backend. Uses Docker Desktop/WSL2 with allowlisted delivery "
+            "controls. Published creator works require prominent Boson AI attribution; hosting or "
+            "product embedding requires a separate commercial license."
         ),
     ),
     "local:parakeet-tdt-0.6b-v3": BackendDescriptor(
@@ -390,7 +417,10 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         supports_negative_prompt=True,
         exclusive_gpu=True,
         license_name="Ideogram 4 Non-Commercial",
-        notes="Gated text-to-image challenger; Python compiles the existing prompt into native JSON locally.",
+        notes=(
+            "Experimental gated noncommercial Backend. Model loading passed, but the current smoke "
+            "returned a rejected gray safety placeholder and produced no usable comparison image."
+        ),
     ),
     "local:qwen-image-2512-nf4": BackendDescriptor(
         backend_id="local:qwen-image-2512-nf4",
@@ -405,7 +435,10 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
         supports_negative_prompt=True,
         exclusive_gpu=True,
         license_name="Apache-2.0",
-        notes="Text-to-image only; transformer and text encoder load as NF4 with model CPU offload.",
+        notes=(
+            "Experimental text-to-image Backend pending quality re-evaluation; uses the official "
+            "50-step path, NF4 with protected boundary layers, and model CPU offload."
+        ),
     ),
     "elevenlabs:music_v2": BackendDescriptor(
         backend_id="elevenlabs:music_v2",
@@ -560,7 +593,7 @@ PROFILES: dict[str, dict[str, str]] = {
     "local": _profile(
         search="ddgs:duckduckgo",
         text="local:llama-server",
-        speech="local:voxcpm2",
+        speech="local:higgs-tts-3-4b",
         alignment="local:faster-whisper-large-v3-turbo",
         image="local:flux.2-klein-4b",
         review="local:qwen3.6-27b-q4-vision",

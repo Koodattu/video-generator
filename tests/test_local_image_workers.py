@@ -284,20 +284,35 @@ def test_qwen_image_uses_nf4_offload_and_true_cfg(
     monkeypatch.setenv("VIDEO_GENERATOR_MODEL_PATH", ".cache/models/fixture")
 
     worker = QwenImageWorker(_paths(tmp_path))
-    worker.dispatch(
+    result = worker.dispatch(
         "image.generate",
-        _payload(settings={"inference_steps": 35, "guidance_scale": 4.0}),
+        _payload(settings={"guidance_scale": 4.0}),
     )
 
     quantization = calls["quantization"]
     assert quantization["quant_backend"] == "bitsandbytes_4bit"
     assert quantization["components_to_quantize"] == ["transformer", "text_encoder"]
     assert quantization["quant_kwargs"]["bnb_4bit_quant_type"] == "nf4"
+    assert quantization["quant_kwargs"]["llm_int8_skip_modules"] == [
+        "time_text_embed",
+        "img_in",
+        "txt_in",
+        "norm_out",
+        "proj_out",
+    ]
     assert calls["offload"] is True
     generate = calls["generate"]
+    assert generate["num_inference_steps"] == 50
     assert generate["true_cfg_scale"] == 4.0
     assert generate["negative_prompt"] == "text, logo, watermark"
     assert "guidance_scale" not in generate
+    assert result["generation_settings"]["nf4_skip_modules"] == [
+        "time_text_embed",
+        "img_in",
+        "txt_in",
+        "norm_out",
+        "proj_out",
+    ]
 
 
 @pytest.mark.parametrize("worker_type", [ZImageWorker, Ideogram4Worker, QwenImageWorker])

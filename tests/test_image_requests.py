@@ -15,7 +15,8 @@ from video_generator.contracts import (
     VisualPlan,
 )
 from video_generator.errors import BackendError, ErrorKind
-from video_generator.workflow import WorkflowEngine, _raw_image_extension
+from video_generator.profiles import image_generation_dimensions
+from video_generator.workflow import ImagePromptContent, WorkflowEngine, _raw_image_extension
 
 
 def _continuity_inputs() -> tuple[StoryOutline, NarrationScript]:
@@ -131,8 +132,8 @@ def test_flux_request_uses_host_owned_dimensions_and_sampler_settings() -> None:
         ("local:ideogram-4-nf4", "low", 12, None, True),
         ("local:ideogram-4-nf4", "medium", 20, None, True),
         ("local:ideogram-4-nf4", "high", 48, None, True),
-        ("local:qwen-image-2512-nf4", "low", 20, 4.0, True),
-        ("local:qwen-image-2512-nf4", "medium", 35, 4.0, True),
+        ("local:qwen-image-2512-nf4", "low", 50, 4.0, True),
+        ("local:qwen-image-2512-nf4", "medium", 50, 4.0, True),
         ("local:qwen-image-2512-nf4", "high", 50, 4.0, True),
     ],
 )
@@ -169,6 +170,80 @@ def test_challenger_image_requests_use_host_owned_runtime_settings(
     assert request.settings.inference_steps == steps
     assert request.settings.guidance_scale == guidance
     assert request.settings.cpu_offload is cpu_offload
+
+
+def test_qwen_image_uses_its_documented_native_generation_size() -> None:
+    width, height = image_generation_dimensions(
+        "local:qwen-image-2512-nf4",
+        delivery_width=1280,
+        delivery_height=720,
+    )
+    request = ImageRequest(
+        scene_id="scene-001",
+        target_backend_id="local:qwen-image-2512-nf4",
+        prompt="A clear winter shelter diagram in a restrained blue and amber palette.",
+        width=width,
+        height=height,
+    )
+
+    assert (request.width, request.height) == (1664, 928)
+    assert image_generation_dimensions(
+        "local:flux.2-klein-4b",
+        delivery_width=1280,
+        delivery_height=720,
+    ) == (1024, 576)
+
+
+def test_non_qwen_image_request_still_requires_exact_widescreen_dimensions() -> None:
+    with pytest.raises(ValueError, match="16:9 aspect ratio"):
+        ImageRequest(
+            scene_id="scene-001",
+            target_backend_id="local:flux.2-klein-4b",
+            prompt="A clear winter shelter diagram.",
+            width=1664,
+            height=928,
+        )
+
+
+def test_qwen_negative_prompt_drops_approved_palette_and_style_conflicts() -> None:
+    visual_brief = VisualBrief(
+        scene_id="scene-001",
+        story_moment="A cyan shelter glows beside an amber lantern.",
+        subjects=["cyan shelter", "amber lantern"],
+        action="The lantern illuminates the shelter.",
+        emotion="focused",
+        environment="snowy night",
+        composition="centered wide view",
+        must_show=["cyan shelter", "amber lantern"],
+        must_avoid=["text", "logos"],
+        continuity_from_previous=[],
+        state_after_scene=["The shelter remains visible."],
+    )
+    style_profile = StyleProfile(
+        style_id="paper-cut",
+        description="Simple paper-cut collage with cyan and amber accents.",
+        palette=["cyan", "amber", "black"],
+        line_style="rough paper-cut edges",
+        background="dark paper texture",
+        must_avoid=["text"],
+    )
+    content = ImagePromptContent(
+        prompt=(
+            "A simple paper-cut collage of a cyan shelter and amber lantern on dark paper."
+        ),
+        negative_prompt=(
+            "text, logos, no cyan or amber colors, without paper-cut collage, black lantern, "
+            "blurry anatomy"
+        ),
+    )
+
+    result = WorkflowEngine._deconflict_qwen_negative_prompt(
+        content,
+        visual_brief=visual_brief,
+        style_profile=style_profile,
+    )
+
+    assert result.negative_prompt == "text, logos, black lantern, blurry anatomy"
 
 
 def test_raw_image_extension_matches_backend_output_format() -> None:

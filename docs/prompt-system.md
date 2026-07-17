@@ -239,9 +239,18 @@ Each compiler assembles the same information in the form its target Backend hand
 - GPT Image 2: concise natural-language prompt, exact 16:9 legal generation size, high-fidelity references where useful;
 - Gemini 3.1 Flash Image: explicit aspect ratio/image size plus supported character/object references;
 - FLUX.2 klein: direct descriptive prompt and only settings the installed runner actually supports;
+- Z-Image and Ideogram 4: model-specific positive constraints and sampler presets;
+- Qwen-Image-2512: detailed positive composition, non-conflicting native negative conditioning, and
+  host-owned 50-step true-CFG generation at the model's 1664×928 landscape preset;
 - deterministic stick Backend: maps the Visual Brief to known shapes and positions without generative prompting.
 
-Compilers must not invent story content. If a Visual Brief lacks a required detail, compilation fails back to visual planning. Adapter-specific defaults are persisted in the Image Request, and all outputs are normalized by the media layer rather than relying on a model to return exactly 1920×1080.
+Compilers must not invent story content. If a Visual Brief lacks a required detail, compilation fails
+back to visual planning. For Qwen-Image, Python additionally removes any comma/semicolon-delimited
+negative clause whose meaningful words are already required by the approved Visual Brief or Style
+Profile; this prevents a generated negative prompt from banning its own palette, medium,
+composition, or must-show content. Adapter-specific defaults are persisted in the Image Request, and
+all outputs are normalized by the media layer rather than relying on a model to return exactly
+1920×1080.
 
 For important recurring characters, final-quality profiles may create or select a reference image before the Scene batch when the Backend supports references. This is an optimization for recognizable traits, not a promise of pixel-perfect continuity.
 

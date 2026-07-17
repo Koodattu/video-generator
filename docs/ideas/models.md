@@ -1,5 +1,12 @@
 # Model research report — July 11, 2026
 
+> Historical research note. The July 17 human comparison supersedes this shortlist: Higgs TTS 3 is
+> the preferred local narrator; VoxCPM2 and OmniVoice are alternatives; X-Voice and MOSS-TTS are
+> retained legacy/lower-quality options. The original Qwen-Image sample used an unsupported
+> quality shortcut (20 steps at 1024×576) and must not be treated as representative. No usable
+> Ideogram image was produced: no comparison video selected it, and its component smoke returned the
+> model's safety placeholder.
+
 I read the repository, current model profile, completed run artifacts, and the attached report. The attachment’s general direction is sensible, but its shortlist is incomplete—especially for TTS and current image generation.
 
 ## Bottom line

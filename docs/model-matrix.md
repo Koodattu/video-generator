@@ -1,6 +1,6 @@
 # Model matrix
 
-Verified against first-party documentation on 2026-07-15. These are candidates, not timeless claims or quality winners. A model enters a built-in profile only after capability conformance, an English/Finnish fixture, native-Windows smoke tests, and license/terms checks.
+Verified against first-party documentation through 2026-07-17. These are dated decisions, not timeless claims. A model enters a built-in profile only after capability conformance, English/Finnish fixtures, platform smoke tests, license/terms checks, and human quality evaluation.
 
 ## Selection policy
 
@@ -22,7 +22,7 @@ Setup answers the first two with pinned assets and live probes. Contract tests a
 | Script reviews | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
 | Visual planning | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
 | Image-prompt compilation | same local GGUF runner | GPT-5.6 Terra | Gemini 3.5 Flash | same local GGUF runner |
-| Narration | VoxCPM2 | ElevenLabs Multilingual v2 | ElevenLabs Multilingual v2 | ElevenLabs Multilingual v2 |
+| Narration | Higgs TTS 3 | ElevenLabs Multilingual v2 | ElevenLabs Multilingual v2 | ElevenLabs Multilingual v2 |
 | Word timing | faster-whisper large-v3-turbo plus exact-script reconciliation | ElevenLabs returned timestamps | ElevenLabs returned timestamps | ElevenLabs returned timestamps |
 | Image generation | FLUX.2 klein 4B | GPT Image 2 | Gemini 3.1 Flash Image | FLUX.2 klein 4B |
 | Visual review | Qwen3.6 vision path, evaluation-gated | GPT-5.6 Terra | Gemini 3.5 Flash | Qwen3.6 vision path, evaluation-gated |
@@ -101,17 +101,9 @@ Do not create separate Finnish orchestration or assume a separate Finnish LLM. M
 
 ## Local narration and alignment
 
-### VoxCPM2
+### Higgs TTS 3 primary; VoxCPM2 and OmniVoice alternatives
 
-`openbmb/VoxCPM2` is the local TTS primary. It is Apache-2.0, supports English and Finnish among its documented languages, supports voice cloning, and is reported around 8 GB VRAM on an RTX 4090-class path. The implemented v0 runner uses native Windows with `optimize = false`; another platform is considered only if this path fails its live fixtures. [VoxCPM repository](https://github.com/OpenBMB/VoxCPM), [VoxCPM2 weights](https://huggingface.co/openbmb/VoxCPM2), [Windows/Triton FAQ](https://voxcpm.readthedocs.io/en/latest/faq.html)
-
-Use language-matched recordings of the same authorized voice rather than separate TTS models unless evaluation says otherwise. The adapter probes the actual output sample rate and duration instead of hardcoding a documentation claim. VoxCPM does not provide the authoritative word timing required for captions.
-
-VoxCPM's optional `voxcpm[timestamps]`/stable-ts post-processing is worth benchmarking as an Alignment implementation. It is not native authoritative TTS timing and must pass the same exact-script coverage checks as the implemented ASR Backends.
-
-### Higgs TTS 3, OmniVoice, MOSS-TTS, and X-Voice challengers
-
-`bosonai/higgs-tts-3-4b` is the expressive EN/FI Docker challenger. Windows runs the exact pinned
+`bosonai/higgs-tts-3-4b` is the preferred EN/FI local narrator. Windows runs the exact pinned
 SGLang-Omni Linux image through Docker Desktop's WSL2 engine; no separate user distro, host-network
 mode, privileged container, or cloud inference is used. Setup downloads the exact model revision,
 hashes its files, records the image digest and image ID, and Generate starts one short-lived offline
@@ -123,16 +115,23 @@ supplied Boson AI attribution; hosting or product embedding requires a separate 
 [Higgs model](https://huggingface.co/bosonai/higgs-tts-3-4b),
 [SGLang-Omni Higgs cookbook](https://sgl-project.github.io/sglang-omni/cookbook/higgs_tts.html)
 
-`k2-fsa/OmniVoice` is the first local TTS challenger. Its official Python package supports native Windows CUDA, Finnish and English, transcript-assisted voice cloning, and 24 kHz output. The worker disables its optional ASR so it cannot fetch another model at runtime, requires the authorized transcript already present in `private/`, and leaves cadence correction and word timing to the host/faster-whisper path. The weights are treated conservatively as CC-BY-NC even though the code is Apache-2.0. [OmniVoice model](https://huggingface.co/k2-fsa/OmniVoice), [OmniVoice repository](https://github.com/k2-fsa/OmniVoice)
+`openbmb/VoxCPM2` and `k2-fsa/OmniVoice` are the two retained alternatives. VoxCPM2 is Apache-2.0,
+supports English/Finnish voice cloning, and uses its native-Windows compatibility path. OmniVoice
+supports native Windows CUDA, Finnish and English, transcript-assisted voice cloning, and 24 kHz
+output; its weights are treated conservatively as CC-BY-NC. Both leave authoritative word timing to
+the host/faster-whisper path. [VoxCPM repository](https://github.com/OpenBMB/VoxCPM),
+[VoxCPM2 weights](https://huggingface.co/openbmb/VoxCPM2),
+[OmniVoice model](https://huggingface.co/k2-fsa/OmniVoice),
+[OmniVoice repository](https://github.com/k2-fsa/OmniVoice)
 
-`OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5` is a conditional native-Windows challenger. Setup pins both its main checkpoint and `MOSS-Audio-Tokenizer-v2`; inference forces local-only remote code and SDPA, never FlashAttention or a server/container. The native TorchCodec/shared-FFmpeg path produced short English and Finnish 48 kHz stereo smokes at about 12.9 GB peak VRAM. Both assets are Apache-2.0. [MOSS-TTS v1.5](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5), [MOSS Audio Tokenizer v2](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer-v2)
-
-`XRXRX/X-Voice` Stage 1 is an experimental native-Windows challenger. Its isolated runtime combines
-a pinned micromamba/Conda layer for Pynini/OpenFST, hash-locked uv packages, an exact source checkout,
-Vocos, eSpeak NG, and bounded support data. It requires the exact transcript and the actual language
-of the authorized reference clip. Short English and Finnish 24 kHz mono smokes and cleanup passed at
-about 2.0 GB peak VRAM, but a Finnish brand-name pronunciation error remains. The source is MIT and
-the weights are CC-BY-NC, so the adapter is limited to personal noncommercial use. [X-Voice](https://github.com/sunnyxrxrx/X-Voice)
+`OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5` and `XRXRX/X-Voice` Stage 1 are retained as
+legacy/lower-quality comparison Backends. They remain addressable by explicit task override, and
+their setup, worker, provenance, and tests remain in the project, but they are not recommended
+choices. MOSS uses its pinned local codec and SDPA path. X-Voice requires the exact transcript and
+actual reference language and has CC-BY-NC weights.
+[MOSS-TTS v1.5](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v1.5),
+[MOSS Audio Tokenizer v2](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Local-Transformer-v2),
+[X-Voice](https://github.com/sunnyxrxrx/X-Voice)
 
 OmniVoice also passed short English and Finnish synthesis plus ASR smokes at about 6.1 GB peak VRAM.
 These are component smokes, not the 30-second bilingual end-to-end or 60–90-second promotion gates.
@@ -164,11 +163,22 @@ above the official planning claim. Do not run it concurrently with another GPU m
 
 `ideogram-ai/ideogram-4-nf4-diffusers` is gated and noncommercial. Its adapter never invokes Ideogram's hosted magic-prompt service and never asks the orchestration LLM for another large JSON object. Python deterministically wraps the existing approved image prompt in the strict native caption schema, uses a per-step guidance schedule, and begins with model CPU offload. [Ideogram 4 repository](https://github.com/ideogram-oss/ideogram4), [prompt schema](https://github.com/ideogram-oss/ideogram4/blob/main/docs/prompting.md), [Diffusers pipeline](https://huggingface.co/docs/diffusers/main/api/pipelines/ideogram4)
 
-`Qwen/Qwen-Image-2512` is loaded only through on-the-fly NF4 quantization of the transformer and text encoder plus CPU offload. Full BF16 is not a 24 GB configuration. The adapter passes actual negative conditioning with `true_cfg_scale`, starts at exact 1024×576, and does not advertise reference-image editing. [Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512), [Diffusers quantization/offload](https://huggingface.co/docs/diffusers/en/quicktour)
+`Qwen/Qwen-Image-2512` is loaded through selective on-the-fly NF4 quantization of the transformer and
+text encoder plus CPU offload. The small `time_text_embed`, `img_in`, `txt_in`, `norm_out`, and
+`proj_out` boundary modules remain in their original precision. The adapter uses the model's
+documented 50-step path at 1664×928, passes native negative conditioning with
+`true_cfg_scale = 4.0`, and does not advertise reference-image editing. Full BF16 is not a 24 GB
+configuration. Python removes negative-prompt clauses that conflict with approved positive visual or
+style terms before the request reaches the model.
+[Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512),
+[Qwen-Image repository](https://github.com/QwenLM/Qwen-Image),
+[Diffusers Qwen pipeline](https://huggingface.co/docs/diffusers/api/pipelines/qwenimage)
 
-The Qwen smoke produced a valid image at about 17.5 GB peak, but was more painterly/noisy than Z-Image
-for the minimalist doodle fixture. Ideogram setup and model loading succeeded, but generation returned
-its gray safety placeholder; the adapter rejected it. That is not a usable-generation pass.
+The earlier Qwen smoke used 20 steps at 1024×576 and produced a noisy image. Because the 2512 base
+checkpoint is not a distilled 20-step model, that result is not a representative quality comparison.
+Qwen remains experimental until the corrected 50-step path is run and judged. Ideogram was not
+selected by any comparison-video configuration; its separate component smoke loaded the model but
+returned its gray safety placeholder, which the adapter rejected. No usable Ideogram image exists.
 
 ### Native-Windows exclusions
 
@@ -204,17 +214,17 @@ The target machine has 24 GB VRAM and 64 GB system RAM. These figures are planni
 | Local Backend | Conservative implication |
 | --- | --- |
 | 14–19 GB GGUF candidate | Near the GPU limit once context/MTP/work buffers and Windows display use are included; start at 32K, one slot, MTP off |
-| VoxCPM2 | About 8 GB reported; native compatibility path |
-| OmniVoice | First native EN/FI TTS challenger |
-| MOSS-TTS v1.5 + codec | Main model and codec share the card; run alone |
-| X-Voice Stage 1 | Low-memory experimental native EN/FI challenger; noncommercial weights |
-| Higgs TTS 3 | Managed Docker Desktop/WSL2 runtime; about 22.8 GB measured at startup, run alone |
+| Higgs TTS 3 | Preferred; managed Docker Desktop/WSL2 runtime, about 22.8 GB measured at startup, run alone |
+| VoxCPM2 | Alternative; about 8 GB reported, native compatibility path |
+| OmniVoice | Alternative native EN/FI narrator |
+| MOSS-TTS v1.5 + codec | Legacy/lower quality; retained for comparisons, run alone |
+| X-Voice Stage 1 | Legacy/lower quality; low-memory, noncommercial weights |
 | faster-whisper Turbo | Native CTranslate2 CUDA worker; live probe must confirm the exact Windows wheel and GPU |
 | Parakeet 0.6B | Optional WSL2 comparison Backend |
 | FLUX.2 klein 4B | Reserve 13 GB; batch images while resident |
 | Z-Image-Turbo | Reserve the full card despite the lower official claim |
-| Ideogram 4 NF4 | Budget the full 24 GB and begin with model CPU offload |
-| Qwen-Image-2512 NF4 | Quantized/offloaded challenger; run alone |
+| Ideogram 4 NF4 | Experimental; no usable smoke, budget the full card |
+| Qwen-Image-2512 NF4 | Experimental selective-NF4/offload path; 50 steps at 1664×928, run alone |
 | ACE-Step XL Turbo | Reserve the full card; no concurrent model |
 
 Measured component smokes on 2026-07-15 reached approximately 6.1 GB peak for OmniVoice, 12.9 GB

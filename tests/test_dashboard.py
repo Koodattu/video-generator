@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from video_generator.contracts import CreativeBrief, TASK_IDS
 from video_generator.dashboard import create_dashboard_app
+from video_generator.dashboard.app import _backend_catalog, _task_catalog
 from video_generator.dashboard import views as dashboard_views
 from video_generator.dashboard.jobs import Job, RunSupervisor
 from video_generator.dashboard.views import list_runs, resolve_artifact_path, run_detail
@@ -46,6 +47,34 @@ class FakeSupervisor:
 
     def close(self) -> None:
         pass
+
+
+def test_dashboard_ranks_curated_local_voice_backends() -> None:
+    backends = _backend_catalog({})
+    tasks = {item["task_id"]: item for item in _task_catalog(backends)}
+    voice_options = tasks["narration_synthesis"]["backend_options"]
+
+    assert PROFILES["local"]["narration_synthesis"] == "local:higgs-tts-3-4b"
+    assert backends["local:higgs-tts-3-4b"]["selection_tier"] == "preferred"
+    assert backends["local:voxcpm2"]["selection_tier"] == "alternative"
+    assert backends["local:omnivoice"]["selection_tier"] == "alternative"
+    assert backends["local:x-voice"]["selection_tier"] == "legacy"
+    assert backends["local:moss-tts-v1.5"]["selection_tier"] == "legacy"
+    assert voice_options.index("local:higgs-tts-3-4b") < voice_options.index(
+        "local:voxcpm2"
+    )
+    assert voice_options.index("local:voxcpm2") < voice_options.index("local:x-voice")
+    assert voice_options.index("local:omnivoice") < voice_options.index(
+        "local:moss-tts-v1.5"
+    )
+
+
+def test_dashboard_marks_unpromoted_local_image_backends_experimental() -> None:
+    backends = _backend_catalog({})
+
+    assert backends["local:ideogram-4-nf4"]["selection_tier"] == "experimental"
+    assert backends["local:qwen-image-2512-nf4"]["selection_tier"] == "experimental"
+    assert backends["local:z-image-turbo"]["selection_tier"] == "alternative"
 
 
 @pytest.fixture

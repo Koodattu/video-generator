@@ -18,6 +18,15 @@ from ..errors import ErrorKind, VideoGeneratorError
 from ..util import replace_path
 
 
+QWEN_IMAGE_NF4_SKIP_MODULES = [
+    "time_text_embed",
+    "img_in",
+    "txt_in",
+    "norm_out",
+    "proj_out",
+]
+
+
 class Worker(Protocol):
     def health(self) -> dict[str, Any]: ...
 
@@ -1306,6 +1315,7 @@ class QwenImageWorker:
                 "load_in_4bit": True,
                 "bnb_4bit_quant_type": "nf4",
                 "bnb_4bit_compute_dtype": torch.bfloat16,
+                "llm_int8_skip_modules": QWEN_IMAGE_NF4_SKIP_MODULES,
             },
             components_to_quantize=["transformer", "text_encoder"],
         )
@@ -1327,6 +1337,7 @@ class QwenImageWorker:
         return {
             "model_path": str(self.model_path),
             "runtime": "diffusers-nf4",
+            "nf4_skip_modules": QWEN_IMAGE_NF4_SKIP_MODULES,
             "load_elapsed_seconds": self.load_elapsed_seconds,
             "load_peak_vram_mb": self.load_peak_vram_mb,
         }
@@ -1336,7 +1347,7 @@ class QwenImageWorker:
             raise ValueError(f"unsupported Qwen-Image operation: {operation}")
         _reject_image_references(payload, "Qwen-Image-2512")
         settings = payload.get("settings") or {}
-        steps = int(settings.get("inference_steps") or 35)
+        steps = int(settings.get("inference_steps") or 50)
         true_cfg_value = settings.get("guidance_scale")
         true_cfg_scale = float(true_cfg_value if true_cfg_value is not None else 4.0)
         seed = _image_seed(payload)
@@ -1361,6 +1372,7 @@ class QwenImageWorker:
                 "true_cfg_scale": true_cfg_scale,
                 "cpu_offload": True,
                 "quantization": "nf4",
+                "nf4_skip_modules": QWEN_IMAGE_NF4_SKIP_MODULES,
                 "negative_prompt_mode": "native",
             },
         )

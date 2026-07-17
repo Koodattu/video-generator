@@ -199,7 +199,10 @@ Generative models are the intended production path. The deterministic stick rend
 
 The continuity target is recognizable semantics, not pixel identity. Signature traits, recurring props, color anchors, and relative relationships persist while poses and small drawing inconsistencies may vary. Where a Backend supports references, selected character sheets or prior images can be attached. Final-quality profiles may score each image against brief fulfillment, style, identity, composition, forbidden text/watermarks, and family-safety. All failed images are regenerated in at most one targeted batch, then those replacements are reviewed once more. They cannot trigger another regeneration; a remaining hard failure stops a strict Run.
 
-Generated images are normalized deterministically to the Delivery Format. For example, GPT Image 2 should generate at a legal 16:9 size such as 2048×1152 rather than invalid 1920×1080, then the media layer scales/crops to the final frame.
+Generated images are normalized deterministically to the Delivery Format. For example, GPT Image 2
+generates at a legal 16:9 size such as 2048×1152 rather than invalid 1920×1080. Qwen-Image-2512 uses
+its documented 1664×928 landscape preset. The media layer then scales/crops either raw result to the
+exact delivery frame.
 
 The Remotion branch uses eight audited templates rather than model-generated React:
 `kinetic_hook`, `headline_zoom`, `source_screenshot`, `code_reveal`, `diagram_flow`,

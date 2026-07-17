@@ -1438,8 +1438,14 @@ class ImageRequest(VersionedContract):
 
     @model_validator(mode="after")
     def validate_image_request(self) -> "ImageRequest":
-        if abs(self.width / self.height - 16 / 9) > 0.002:
-            raise ValueError("image dimensions must use a 16:9 aspect ratio")
+        qwen_native_landscape = (
+            self.target_backend_id == "local:qwen-image-2512-nf4"
+            and (self.width, self.height) == (1664, 928)
+        )
+        if not qwen_native_landscape and abs(self.width / self.height - 16 / 9) > 0.002:
+            raise ValueError(
+                "image dimensions must use a 16:9 aspect ratio or the Qwen 1664x928 preset"
+            )
         if len(set(self.reference_paths)) != len(self.reference_paths):
             raise ValueError("image reference paths must be unique")
         return self

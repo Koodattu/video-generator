@@ -77,8 +77,8 @@ authorization = "self"
 # Keep these files under private/, which is excluded from version control.
 reference_audio = "private/voice/me.wav"
 reference_transcript = "private/voice/me.txt"
-# The language actually spoken in the reference clip. X-Voice requires an exact match;
-# it may differ from output_language for cross-language cloning.
+# The language actually spoken in the reference clip. Some retained compatibility Backends,
+# including X-Voice, require an exact match; it may differ from output_language.
 reference_language = "en"
 # Used by profiles that route narration to ElevenLabs. When blank, ELEVENLABS_VOICE_ID
 # is loaded from .env or the process environment.
@@ -94,12 +94,14 @@ elevenlabs_voice_id = ""
 # remotion_direction = "local:llama-server"          # One small creative decision per Shot.
 # remotion_asset_select = "local:llama-server"       # One supplied candidate_id only.
 # image_generate = "local:flux.2-klein-4b"
-# image_generate = "local:z-image-turbo"             # Native Windows T2I challenger.
-# image_generate = "local:ideogram-4-nf4"             # Gated noncommercial NF4 challenger.
-# image_generate = "local:qwen-image-2512-nf4"        # NF4 plus CPU offload; fit-test first.
+# image_generate = "local:z-image-turbo"              # Alternative native-Windows T2I Backend.
+# image_generate = "local:ideogram-4-nf4"             # Experimental; gated/noncommercial, no usable smoke.
+# image_generate = "local:qwen-image-2512-nf4"        # Experimental; 50 steps at 1664x928, NF4/offload.
+# Recommended EN/FI voice; Docker Desktop/WSL2, exact transcript, Boson attribution required:
+# narration_synthesis = "local:higgs-tts-3-4b"
+# narration_synthesis = "local:voxcpm2"               # Alternative native-Windows EN/FI voice clone.
+# narration_synthesis = "local:omnivoice"             # Alternative native-Windows EN/FI voice clone.
 # narration_synthesis = "elevenlabs:eleven_multilingual_v2"
-# narration_synthesis = "local:omnivoice"             # Native Windows EN/FI voice clone.
-# narration_synthesis = "local:moss-tts-v1.5"         # Native Windows conditional challenger.
-# narration_synthesis = "local:x-voice"               # Native Windows EN/FI; exact transcript, matching reference_language, eSpeak NG, noncommercial weights.
-# narration_synthesis = "local:higgs-tts-3-4b"        # Docker Desktop/WSL2 EN/FI; exact transcript, pinned SGLang-Omni image, creator attribution required.
+# narration_synthesis = "local:moss-tts-v1.5"         # Legacy/lower quality; retained for explicit comparisons.
+# narration_synthesis = "local:x-voice"               # Legacy/lower quality; noncommercial weights.
 # caption_alignment = "local:parakeet-tdt-0.6b-v3" # Optional WSL2 comparison Backend.

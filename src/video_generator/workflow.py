@@ -146,7 +146,7 @@ from .util import (
 
 
 INTERNAL_REVISION = "media-workflow-v9"
-MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v63"
+MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v65"
 
 HOST_LEXICAL_POLICY_PREFIX = "Host lexical support policy"
 HOST_SELF_CONTAINED_POLICY_PREFIX = "Host self-contained claim policy"
@@ -3002,6 +3002,103 @@ class WorkflowEngine:
         content = ImagePromptContent(prompt=prompt, negative_prompt=negative_prompt)
         self._validate_image_request_language(content)
         return content
+
+    @staticmethod
+    def _approved_image_prompt_word_groups(
+        *,
+        visual_brief: Any,
+        style_profile: Any,
+    ) -> list[set[str]]:
+        def words(value: str) -> set[str]:
+            return {
+                token
+                for token in re.findall(
+                    r"[^\W\d_]+",
+                    unicodedata.normalize("NFKC", value).casefold(),
+                    flags=re.UNICODE,
+                )
+                if token not in HOST_LEXICAL_STOPWORDS
+            }
+
+        values = [
+            visual_brief.story_moment,
+            *visual_brief.subjects,
+            visual_brief.action,
+            visual_brief.environment,
+            visual_brief.composition,
+            *visual_brief.must_show,
+            *visual_brief.identity_requirements,
+            *visual_brief.persistent_elements,
+            style_profile.description,
+            *style_profile.palette,
+            style_profile.line_style,
+            style_profile.background,
+        ]
+        groups = [words(value) for value in values]
+        palette_group = set().union(
+            *(words(value) for value in style_profile.palette)
+        )
+        return [group for group in [*groups, palette_group] if group]
+
+    @classmethod
+    def _deconflict_qwen_negative_prompt(
+        cls,
+        content: ImagePromptContent,
+        *,
+        visual_brief: Any,
+        style_profile: Any,
+    ) -> ImagePromptContent:
+        approved_word_groups = cls._approved_image_prompt_word_groups(
+            visual_brief=visual_brief,
+            style_profile=style_profile,
+        )
+        framing_words = {
+            "avoid",
+            "avoiding",
+            "ban",
+            "banned",
+            "color",
+            "colors",
+            "colour",
+            "colours",
+            "composition",
+            "exclude",
+            "excluding",
+            "image",
+            "images",
+            "lighting",
+            "look",
+            "medium",
+            "no",
+            "not",
+            "palette",
+            "scene",
+            "style",
+            "treatment",
+            "unwanted",
+            "visual",
+            "without",
+        }
+        kept_clauses: list[str] = []
+        for clause in re.split(r"[,;\n]+", content.negative_prompt):
+            compact = " ".join(clause.split()).strip()
+            if not compact:
+                continue
+            clause_words = {
+                token
+                for token in re.findall(
+                    r"[^\W\d_]+",
+                    unicodedata.normalize("NFKC", compact).casefold(),
+                    flags=re.UNICODE,
+                )
+                if token not in HOST_LEXICAL_STOPWORDS and token not in framing_words
+            }
+            if clause_words and any(
+                clause_words.issubset(group) for group in approved_word_groups
+            ):
+                continue
+            kept_clauses.append(compact)
+        return content.model_copy(update={"negative_prompt": ", ".join(kept_clauses)})
 
     @staticmethod
     def _outline_scene_evidence_ids(
@@ -10028,6 +10125,12 @@ class WorkflowEngine:
                         ),
                         target_image_backend=target_backend_id,
                     )
+                if target_backend_id == "local:qwen-image-2512-nf4":
+                    prompt_content = self._deconflict_qwen_negative_prompt(
+                        prompt_content,
+                        visual_brief=visual_brief,
+                        style_profile=visual_plan.style_profile,
+                    )
                 request_data = {
                     "schema_version": 1,
                     "scene_id": visual_brief.scene_id,
@@ -10174,7 +10277,7 @@ class WorkflowEngine:
         elif target_backend_id == "local:qwen-image-2512-nf4":
             settings = settings.model_copy(
                 update={
-                    "inference_steps": {"low": 20, "medium": 35, "high": 50}[quality],
+                    "inference_steps": 50,
                     "guidance_scale": 4.0,
                     "cpu_offload": True,
                 }

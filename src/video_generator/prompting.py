@@ -26,7 +26,7 @@ MULTI_FORMAT_TASK_PROMPT_REVISIONS = {
     "review_constraints": "scope-aware-brief-and-remotion-plan-v2",
     "script_revision": "spoken-text-only-v1",
     "duration_repair": "spoken-text-only-v1",
-    "image_prompt_compile": "local-image-targets-v1",
+    "image_prompt_compile": "local-image-targets-v3",
     "remotion_direction": "brief-constraints-v1",
     "visual_review": "remotion-hard-failure-v1",
 }
@@ -639,9 +639,11 @@ negative constraints concise because the local runner compiles them into positiv
 Do not request reference images. Python owns the quality-specific sampler settings.
 """,
     "local:qwen-image-2512-nf4": """
-Target guidance for Qwen-Image-2512 NF4: use a concrete English scene description with explicit
-subjects, actions, spatial relationships, lighting, and composition. Supply a concise native negative
-prompt and do not request reference images. Python owns the quality-specific steps and CFG setting.
+Target guidance for Qwen-Image-2512 NF4: use a detailed concrete English scene description with the
+subject, action, spatial relationships, medium, palette, lighting, and composition stated positively.
+Keep the native negative prompt to actual defects and unwanted lettering; never negate a requested
+palette, medium, lighting treatment, or composition. Do not request reference images. Python owns the
+official 50-step true-CFG path and higher native generation resolution.
 """,
     "deterministic:stick": """
 Target guidance for deterministic stick rendering: preserve the Visual Brief fields and simple 16:9

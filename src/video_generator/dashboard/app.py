@@ -47,7 +47,12 @@ from ..contracts import (
 )
 from ..errors import CheckpointError, ConfigurationError, VideoGeneratorError
 from ..preflight import run_preflight
-from ..profiles import BACKEND_DESCRIPTORS, PROFILES
+from ..profiles import (
+    BACKEND_DESCRIPTORS,
+    BACKEND_SELECTION_TIERS,
+    BACKEND_SELECTION_TIER_ORDER,
+    PROFILES,
+)
 from ..prompting import build_frozen_assets
 from ..provenance import build_runtime_snapshot, verify_runtime_snapshot
 from ..remotion_renderer import remotion_motion_for_template
@@ -198,6 +203,7 @@ def _backend_catalog(environment: dict[str, str]) -> dict[str, Any]:
             "supports_reference_images": descriptor.supports_reference_images,
             "reservation_usd": descriptor.reservation_usd,
             "configured": all(environment.get(name) for name in descriptor.required_env),
+            "selection_tier": BACKEND_SELECTION_TIERS.get(backend_id, "standard"),
             "notes": descriptor.notes,
         }
     return result
@@ -214,8 +220,19 @@ def _task_catalog(backends: dict[str, Any]) -> list[dict[str, Any]]:
             "protocol": TASK_PROTOCOL[task_id].value,
             "backend_options": [
                 backend_id
-                for backend_id, descriptor in backends.items()
-                if TASK_PROTOCOL[task_id].value in descriptor["protocols"]
+                for backend_id in sorted(
+                    (
+                        candidate_id
+                        for candidate_id, descriptor in backends.items()
+                        if TASK_PROTOCOL[task_id].value in descriptor["protocols"]
+                    ),
+                    key=lambda candidate_id: (
+                        BACKEND_SELECTION_TIER_ORDER[
+                            backends[candidate_id]["selection_tier"]
+                        ],
+                        candidate_id,
+                    ),
+                )
             ],
         }
         for task_id in TASK_IDS

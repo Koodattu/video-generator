@@ -993,8 +993,15 @@ function renderModelGrid() {
       task.backend_options.forEach((backendId) => {
         const backend = state.bootstrap.backends[backendId];
         const option = document.createElement("option");
+        const tierLabel = {
+          preferred: "recommended",
+          alternative: "alternative",
+          experimental: "experimental",
+          legacy: "legacy · lower quality",
+        }[backend.selection_tier];
         option.value = backendId;
-        option.textContent = `${backend.cloud ? "☁" : "◆"} ${backend.provider} · ${backend.model_id}${backend.cloud && !backend.configured ? " · key missing" : ""}`;
+        option.textContent = `${backend.cloud ? "☁" : "◆"} ${backend.provider} · ${backend.model_id}${tierLabel ? ` · ${tierLabel}` : ""}${backend.cloud && !backend.configured ? " · key missing" : ""}`;
+        option.title = backend.notes || "";
         select.append(option);
       });
       select.addEventListener("change", invalidatePreflight);

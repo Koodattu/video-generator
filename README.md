@@ -158,7 +158,7 @@ The local profile uses:
 |---|---|
 | Research search | Keyless DDGS/DuckDuckGo, or no search when `offline = true` |
 | Text/reviews/prompt compilation | Manifest-selected GGUF through stock `llama-server.exe` |
-| English/Finnish voice clone | VoxCPM2 |
+| English/Finnish voice clone | Higgs TTS 3 through Docker Desktop/WSL2 |
 | Local timestamps | faster-whisper large-v3-turbo through CTranslate2 on native Windows |
 | Images | FLUX.2 Klein 4B through Diffusers |
 | Optional music | ACE-Step 1.5 XL Turbo |
@@ -167,9 +167,10 @@ Setup pins runtime/model revisions, stores assets in `.cache/`, writes hashes an
 and may take a long time. Generate is offline with respect to model repositories and never downloads
 missing weights.
 
-The placement policy is Windows first. The default LLM, VoxCPM, faster-whisper, FLUX, ACE-Step,
-FFmpeg, and orchestrator paths run natively. Parakeet/NeMo remains an explicit WSL2 override for
-matched English/Finnish comparison; it is not required for an ordinary local Run.
+The placement policy is Windows first unless the selected model has a better supported Linux
+runtime. The default LLM, faster-whisper, FLUX, ACE-Step, FFmpeg, and orchestrator paths run
+natively. Higgs TTS 3 runs in a pinned Linux container through Docker Desktop's WSL2 engine.
+Parakeet/NeMo remains an explicit WSL2 override for matched English/Finnish comparison.
 
 ### 1. Prepare one auditable local LLM profile
 
@@ -252,9 +253,9 @@ them inside the distribution or pass the name of another prepared distribution w
 
 ### 3. Prepare all Backends active in config
 
-With music disabled and draft quality, this prepares the selected LLM, VoxCPM, faster-whisper Turbo,
-FLUX, and optionally Brave. Set `offline = true` if you want no web search and no Brave key. Each
-Backend receives an isolated, hash-locked runtime. Native uv runners install from reviewed Windows
+With music disabled and draft quality, this prepares the selected LLM, Higgs TTS 3,
+faster-whisper Turbo, FLUX, and optionally Brave. Set `offline = true` if you want no web search.
+Each Backend receives an isolated, hash-locked runtime. Native uv runners install from reviewed Windows
 lockfiles committed with artifact hashes; X-Voice combines a pinned Conda lock for Pynini/OpenFST with
 a hash-locked uv package set. Live Preflight then loads each
 worker sequentially. For llama.cpp it additionally requires the child server PID to exit and records
@@ -292,39 +293,48 @@ Use `--no-download` to verify existing assets/environments. A missing runner, ex
 WSL distribution, key, voice file, FFmpeg capability, disk allowance, or Cost Ceiling makes Preflight
 fail with an explicit action. It never substitutes another model.
 
-### Native Windows model challengers
+### Local model selection
 
-The default local profile remains VoxCPM2 plus FLUX. Challengers are separate pinned runners and are
-installed one at a time:
+The default local profile uses Higgs TTS 3 plus FLUX. Other implementations remain available as
+explicit overrides; the Dashboard orders and labels them by the current human evaluation rather than
+presenting every successfully loaded model as an equal recommendation.
 
-| Backend | Role | Initial policy |
+| Backend | Role | Current policy |
 |---|---|---|
-| `local:omnivoice` | EN/FI voice cloning | Primary TTS challenger; 24 kHz mono, host-side timing/tempo remains authoritative |
-| `local:moss-tts-v1.5` | EN/FI voice cloning | Conditional fit challenger; pinned local codec, SDPA, 48 kHz stereo |
-| `local:x-voice` | EN/FI voice cloning | Experimental Stage 1 challenger; 24 kHz mono, exact transcript and language-matched reference required, CC-BY-NC weights |
-| `local:higgs-tts-3-4b` | EN/FI voice cloning | Docker Desktop/WSL2 challenger; pinned SGLang-Omni image, exact transcript, allowlisted speed controls, Boson creator attribution required |
-| `local:z-image-turbo` | Text-to-image | First image challenger; 9 steps, guidance zero, exclusions compiled into the positive prompt |
-| `local:ideogram-4-nf4` | Text-to-image | Gated noncommercial challenger; local Python builds its strict JSON caption, never a hosted magic prompt |
-| `local:qwen-image-2512-nf4` | Text-to-image | NF4 transformer/text encoder with CPU offload; native negative prompt and true-CFG |
+| `local:higgs-tts-3-4b` | EN/FI voice cloning | **Preferred**; pinned Docker Desktop/WSL2 runtime, exact transcript, allowlisted delivery controls, Boson creator attribution required |
+| `local:voxcpm2` | EN/FI voice cloning | Alternative; native Windows |
+| `local:omnivoice` | EN/FI voice cloning | Alternative; native Windows, 24 kHz mono |
+| `local:moss-tts-v1.5` | EN/FI voice cloning | Legacy/lower quality; retained for explicit comparisons |
+| `local:x-voice` | EN/FI voice cloning | Legacy/lower quality; retained for explicit comparisons, CC-BY-NC weights |
+| `local:z-image-turbo` | Text-to-image | Alternative; 9 steps, guidance zero, exclusions compiled into the positive prompt |
+| `local:ideogram-4-nf4` | Text-to-image | Experimental; gated/noncommercial and no usable generation smoke yet |
+| `local:qwen-image-2512-nf4` | Text-to-image | Experimental; 50 steps at 1664×928, selective NF4, CPU offload, native negative prompt and true-CFG |
 
 ```powershell
-video-generator setup --backend local:omnivoice
-video-generator setup --backend local:x-voice
 video-generator setup --backend local:higgs-tts-3-4b
+video-generator setup --backend local:voxcpm2
+video-generator setup --backend local:omnivoice
 video-generator setup --backend local:z-image-turbo
 
-# Larger conditional challengers; prepare and live-probe separately.
+# Retained legacy voices and experimental image Backends; prepare/live-probe separately.
 video-generator setup --backend local:moss-tts-v1.5
+video-generator setup --backend local:x-voice
 video-generator setup --backend local:ideogram-4-nf4
 video-generator setup --backend local:qwen-image-2512-nf4
 ```
 
 Ideogram Setup succeeds only after you personally accept its Hugging Face license gate and configure
-`HF_TOKEN`; Setup cannot accept terms for you. Every image challenger starts at exact 1024×576 and
-rejects reference images because these adapters are text-to-image only. The Dashboard lists prepared
-and unprepared descriptors, but it does not install model assets.
+`HF_TOKEN`; Setup cannot accept terms for you. It was not selected by any of the six comparison-video
+configs, so those runs contain no Ideogram images. Its earlier component smoke reached model loading
+but returned the model's gray safety placeholder, which the adapter correctly rejected. Do not bypass
+that refusal or describe it as a usable image.
 
-X-Voice Setup is native Windows, but it is intentionally experimental and noncommercial. It uses a
+FLUX, Z-Image, and Ideogram generate at 1024×576. Qwen-Image generates at its documented 1664×928
+landscape size and is deterministically normalized to the delivery frame. These adapters remain
+text-to-image only and reject reference images. The Dashboard lists prepared and unprepared
+descriptors, but it does not install model assets.
+
+X-Voice Setup is native Windows, but the Backend is intentionally legacy and noncommercial. It uses a
 pinned micromamba/Conda layer for Pynini/OpenFST, a pinned eSpeak NG runtime, and hash-locked Python
 packages. Supply the exact UTF-8 transcript and the language actually spoken in the authorized
 reference clip. Short English and Finnish synthesis/cleanup smokes passed; one Finnish loanword was
@@ -332,13 +342,19 @@ mispronounced, so the model is not promoted.
 
 Measured component smokes on the RTX 4090 used by this project reached about 6.1 GB peak for
 OmniVoice, 12.9 GB for MOSS-TTS, 2.0 GB for X-Voice, 22.6 GB for Z-Image Turbo, and 17.5 GB for
-Qwen-Image. Z-Image produced the stronger minimalist doodle fixture; Qwen-Image was valid but more
-painterly/noisy. Ideogram loaded successfully but returned its gray safety placeholder, which the
-adapter rejected. Higgs TTS 3 now uses a managed Linux container through Docker Desktop's WSL2
-engine. Setup pins and attests both the SGLang-Omni image and Higgs checkpoint; Generate publishes no
-host port, performs serial requests, and verifies container and VRAM cleanup. The RTX 4090 live load
-reached roughly 22.8 GB, so Higgs must run alone. HiDream-O1 Dev remains a separate unintegrated
-image-model experiment.
+Qwen-Image. The earlier Qwen sample used only 20 steps at 1024×576 even though the base 2512 model is
+not a distilled 20-step checkpoint, so its noisy result is not a valid promotion-quality comparison.
+The corrected code uses 50 steps, 1664×928, true CFG 4.0, and keeps the small input/output boundary
+modules out of NF4 while still quantizing the large transformer and text encoder. Qwen remains
+experimental until that exact path is run and judged. Before generation, Python also removes
+negative-prompt clauses that contradict approved positive palette, medium, composition, or
+must-show details.
+
+Higgs TTS 3 uses a managed Linux container through Docker Desktop's WSL2 engine. Setup pins and
+attests both the SGLang-Omni image and Higgs checkpoint; Generate publishes no host port, performs
+serial requests, and verifies container and VRAM cleanup. The RTX 4090 live load reached roughly
+22.8 GB, so Higgs must run alone. HiDream-O1 Dev remains a separate unintegrated image-model
+experiment.
 
 ## Mix Backends per task
 
