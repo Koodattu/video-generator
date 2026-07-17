@@ -222,7 +222,7 @@ The initial profile should encode these visual properties as structured fields r
 - sparse, naive background marks sufficient to establish place;
 - basic-paint-program feel: sincere amateur drawing, small natural inconsistencies, no polished vector geometry;
 - one clear focal action and readable silhouettes at video size;
-- generous empty space and safe framing for 16:9 delivery;
+- generous empty space and safe framing for the selected 16:9 or 9:16 delivery;
 - no letters, labels, captions, speech bubbles, signatures, logos, UI, or watermarks;
 - no photorealism, 3D rendering, elaborate shading, gradients, or glossy concept-art finish.
 
@@ -236,12 +236,12 @@ The compiler instructions are versioned per target Image Backend. A deterministi
 
 Each compiler assembles the same information in the form its target Backend handles best:
 
-- GPT Image 2: concise natural-language prompt, exact 16:9 legal generation size, high-fidelity references where useful;
+- GPT Image 2: concise natural-language prompt, exact legal generation size for the selected orientation, high-fidelity references where useful;
 - Gemini 3.1 Flash Image: explicit aspect ratio/image size plus supported character/object references;
 - FLUX.2 klein: direct descriptive prompt and only settings the installed runner actually supports;
 - Z-Image and Ideogram 4: model-specific positive constraints and sampler presets;
 - Qwen-Image-2512: detailed positive composition, non-conflicting native negative conditioning, and
-  host-owned 50-step true-CFG generation at the model's 1664×928 landscape preset;
+  host-owned 50-step true-CFG generation at the model's 1664×928 or 928×1664 preset;
 - deterministic stick Backend: maps the Visual Brief to known shapes and positions without generative prompting.
 
 Compilers must not invent story content. If a Visual Brief lacks a required detail, compilation fails
@@ -250,7 +250,7 @@ negative clause whose meaningful words are already required by the approved Visu
 Profile; this prevents a generated negative prompt from banning its own palette, medium,
 composition, or must-show content. Adapter-specific defaults are persisted in the Image Request, and
 all outputs are normalized by the media layer rather than relying on a model to return exactly
-1920×1080.
+the selected delivery dimensions.
 
 For important recurring characters, final-quality profiles may create or select a reference image before the Scene batch when the Backend supports references. This is an optimization for recognizable traits, not a promise of pixel-perfect continuity.
 

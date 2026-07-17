@@ -190,7 +190,10 @@ function renderHeader() {
   status.textContent = statusLabel(summary.status);
   byId("run-id").textContent = summary.run_id;
   byId("run-title").textContent = summary.idea_direction || "Surprise me";
-  byId("run-subtitle").textContent = [summary.profile, titleCase(summary.quality), summary.output_language?.toUpperCase(), `${summary.duration_seconds}s target`].filter(Boolean).join(" · ");
+  const frame = summary.delivery_width && summary.delivery_height
+    ? `${titleCase(summary.orientation)} ${summary.delivery_width}×${summary.delivery_height}`
+    : titleCase(summary.orientation);
+  byId("run-subtitle").textContent = [summary.profile, titleCase(summary.quality), frame, summary.output_language?.toUpperCase(), `${summary.duration_seconds}s target`].filter(Boolean).join(" · ");
   byId("header-cost").textContent = formatMoney(summary.cost?.calculated_list_price_usd);
   byId("scene-count").textContent = String(state.detail.scenes?.length || 0);
   byId("artifact-count").textContent = String(state.detail.files?.length || 0);
@@ -343,6 +346,7 @@ function renderOverview() {
     ["Profile", detail.config.profile],
     ["Language", String(detail.config.output_language || "").toUpperCase()],
     ["Quality", titleCase(detail.config.quality)],
+    ["Video format", `${titleCase(detail.config.orientation)} · ${detail.config.delivery_width}×${detail.config.delivery_height}`],
     ["Content", `${titleCase(detail.config.content_mode)} · ${titleCase(detail.config.content_format)}`],
     ["Narration", titleCase(detail.config.narration_pace)],
     ["Video renderer", titleCase(detail.config.video_style)],
@@ -598,11 +602,16 @@ function renderScenes() {
     workspace.append(bar);
   }
   const grid = element("div", "scene-grid");
+  const deliveryWidth = Number(state.detail.config.delivery_width || 16);
+  const deliveryHeight = Number(state.detail.config.delivery_height || 9);
+  const portraitFrame = deliveryHeight > deliveryWidth;
+  grid.classList.toggle("is-portrait", portraitFrame);
   for (const [position, scene] of state.detail.scenes.entries()) {
     const visualId = scene.shot_id || scene.scene_id;
     const card = element("article", "scene-card");
     card.id = `visual-${visualId}`;
     const imageWrap = element("div", "scene-image-wrap");
+    imageWrap.classList.add(portraitFrame ? "is-portrait" : "is-landscape");
     if (scene.image_url) {
       if (scene.media_kind === "video") {
         const video = document.createElement("video");
@@ -893,6 +902,7 @@ function formPayload() {
       output_language: byId("output-language").value,
       duration_seconds: Number(byId("duration-seconds").value),
       quality: byId("quality").value,
+      orientation: byId("orientation").value,
       content_mode: byId("content-mode").value,
       content_format: byId("content-format").value,
       narration_pace: byId("narration-pace").value,
@@ -1026,6 +1036,7 @@ function applyDefaults() {
   byId("profile").value = defaults.profile;
   byId("output-language").value = defaults.output_language;
   byId("quality").value = defaults.quality;
+  byId("orientation").value = defaults.orientation || "landscape";
   byId("content-mode").value = defaults.content_mode;
   byId("content-format").value = defaults.content_format;
   byId("narration-pace").value = defaults.narration_pace;
@@ -1233,6 +1244,7 @@ function bindEvents() {
     renderActiveTab();
   }));
   byId("profile").addEventListener("change", () => { applyProfileModels(); invalidatePreflight(); });
+  byId("orientation").addEventListener("change", invalidatePreflight);
   byId("surprise-me").addEventListener("change", () => {
     byId("idea-direction").disabled = byId("surprise-me").checked;
     byId("idea-direction").setCustomValidity("");

@@ -449,7 +449,7 @@ class GeminiImageBackend(_GeminiClient):
                 "response_format": {
                     "type": "image",
                     "mime_type": "image/jpeg",
-                    "aspect_ratio": "16:9",
+                    "aspect_ratio": request.settings.aspect_ratio,
                     "image_size": image_size,
                 },
             }
@@ -510,7 +510,10 @@ class GeminiImageBackend(_GeminiClient):
                 ),
                 width=width,
                 height=height,
-                generation_settings={"aspect_ratio": "16:9", "image_size": image_size},
+                generation_settings={
+                    "aspect_ratio": request.settings.aspect_ratio,
+                    "image_size": image_size,
+                },
                 provider_request_id=provider_request_id,
             ),
             usage=usage,

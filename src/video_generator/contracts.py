@@ -61,6 +61,15 @@ class VideoStyle(StrEnum):
     REMOTION_EXPLAINER = "remotion_explainer"
 
 
+class VideoOrientation(StrEnum):
+    LANDSCAPE = "landscape"
+    PORTRAIT = "portrait"
+
+    @property
+    def aspect_ratio(self) -> Literal["16:9", "9:16"]:
+        return "9:16" if self is VideoOrientation.PORTRAIT else "16:9"
+
+
 class RemotionAssetPolicy(StrEnum):
     LOCAL_ONLY = "local_only"
     STOCK_PREFERRED = "stock_preferred"
@@ -270,6 +279,7 @@ class RawRunConfig(VersionedContract):
     narration_pace: NarrationPace = NarrationPace.STANDARD
     narration_delivery: Annotated[str, Field(max_length=500)] = ""
     audience: Literal["family_safe_general"] = "family_safe_general"
+    orientation: VideoOrientation = VideoOrientation.LANDSCAPE
     video_style: VideoStyle = VideoStyle.STILL_IMAGE
     style: Annotated[str, Field(min_length=1, max_length=120)] = "ms_paint_stick"
     style_description: Annotated[str, Field(max_length=1000)] = ""
@@ -420,6 +430,7 @@ class ResolvedRunConfig(VersionedContract):
     narration_delivery: str = ""
     narration_delivery_spec: NarrationDeliverySpec | None = None
     audience: str
+    orientation: VideoOrientation = VideoOrientation.LANDSCAPE
     video_style: VideoStyle = VideoStyle.STILL_IMAGE
     style: str
     style_description: str
@@ -1419,7 +1430,7 @@ class ImageGenerationSettings(ContractModel):
     guidance_scale: Annotated[FiniteFloat, Field(ge=0, le=30)] | None = None
     moderation: Literal["auto", "low"] | None = None
     output_format: Literal["png", "jpeg", "webp"] = "png"
-    aspect_ratio: Literal["16:9"] = "16:9"
+    aspect_ratio: Literal["16:9", "9:16"] = "16:9"
     image_size: Literal["1K", "2K", "4K"] | None = None
     cpu_offload: bool | None = None
 
@@ -1438,13 +1449,20 @@ class ImageRequest(VersionedContract):
 
     @model_validator(mode="after")
     def validate_image_request(self) -> "ImageRequest":
-        qwen_native_landscape = (
+        expected_ratio = 16 / 9 if self.settings.aspect_ratio == "16:9" else 9 / 16
+        qwen_native_size = (
             self.target_backend_id == "local:qwen-image-2512-nf4"
-            and (self.width, self.height) == (1664, 928)
+            and (self.width, self.height)
+            == (
+                (1664, 928)
+                if self.settings.aspect_ratio == "16:9"
+                else (928, 1664)
+            )
         )
-        if not qwen_native_landscape and abs(self.width / self.height - 16 / 9) > 0.002:
+        if not qwen_native_size and abs(self.width / self.height - expected_ratio) > 0.002:
             raise ValueError(
-                "image dimensions must use a 16:9 aspect ratio or the Qwen 1664x928 preset"
+                "image dimensions must match settings.aspect_ratio or use the matching "
+                "Qwen native preset"
             )
         if len(set(self.reference_paths)) != len(self.reference_paths):
             raise ValueError("image reference paths must be unique")

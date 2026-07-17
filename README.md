@@ -21,7 +21,8 @@ changing the workflow.
   narration presets with an optional custom delivery direction.
 - `still_image` preserves static/cadenced generated-image videos. `remotion_explainer` uses eight
   controlled kinetic-text, screenshot, code, diagram, comparison, meme, and conclusion templates.
-- Default output is 1280x720 draft or 1920x1080 final at 30 fps.
+- Landscape output is 1280x720 draft or 1920x1080 final; portrait output is 720x1280
+  draft or 1080x1920 final. Both run at 30 fps and are chosen before a Run starts.
 - SRT plus selectable captions by default. The still renderer can emit a second ASS-burned MP4; the
   Remotion renderer composites active-word kinetic captions into its primary visual stream.
 - Optional ambient instrumental music mixed below narration.
@@ -308,7 +309,7 @@ presenting every successfully loaded model as an equal recommendation.
 | `local:x-voice` | EN/FI voice cloning | Legacy/lower quality; retained for explicit comparisons, CC-BY-NC weights |
 | `local:z-image-turbo` | Text-to-image | Alternative; 9 steps, guidance zero, exclusions compiled into the positive prompt |
 | `local:ideogram-4-nf4` | Text-to-image | Experimental; gated/noncommercial and no usable generation smoke yet |
-| `local:qwen-image-2512-nf4` | Text-to-image | Experimental; 50 steps at 1664×928, selective NF4, CPU offload, native negative prompt and true-CFG |
+| `local:qwen-image-2512-nf4` | Text-to-image | Experimental; 50 steps at 1664×928 or 928×1664, selective NF4, CPU offload, native negative prompt and true-CFG |
 
 ```powershell
 video-generator setup --backend local:higgs-tts-3-4b
@@ -329,10 +330,38 @@ configs, so those runs contain no Ideogram images. Its earlier component smoke r
 but returned the model's gray safety placeholder, which the adapter correctly rejected. Do not bypass
 that refusal or describe it as a usable image.
 
-FLUX, Z-Image, and Ideogram generate at 1024×576. Qwen-Image generates at its documented 1664×928
-landscape size and is deterministically normalized to the delivery frame. These adapters remain
-text-to-image only and reject reference images. The Dashboard lists prepared and unprepared
-descriptors, but it does not install model assets.
+FLUX, Z-Image, and Ideogram generate at 1024×576 for landscape or 576×1024 for portrait.
+Qwen-Image uses its documented 1664×928 or 928×1664 preset. Each result is deterministically
+normalized to the selected delivery frame. These adapters remain text-to-image only and reject
+reference images. The Dashboard lists prepared and unprepared descriptors, but it does not install
+model assets.
+
+### Landscape and portrait image support
+
+`orientation = "landscape"` is the backward-compatible default. The Dashboard exposes the same
+choice as **Video format** before preflight and Run creation; the CLI can override it with
+`--orientation landscape` or `--orientation portrait`.
+
+| Image Backend | Landscape request | Portrait request | Support basis |
+|---|---:|---:|---|
+| GPT Image 2 | 2048×1152 | 1152×2048 | Documented arbitrary valid resolution within the API limits |
+| Gemini 3.1 Flash Image | 16:9, 2K | 9:16, 2K | Both aspect ratios and native dimensions are documented |
+| Qwen-Image-2512 | 1664×928 | 928×1664 | Both presets are documented in the model card |
+| Ideogram 4 NF4 | 1024×576 | 576×1024 | Width and height are flexible multiples of 16 within documented limits |
+| Z-Image Turbo | 1024×576 | 576×1024 | The runner exposes width/height; the base family documents arbitrary aspect ratios |
+| FLUX.2 Klein 4B | 1024×576 | 576×1024 | The runner exposes width/height, but the model card does not explicitly certify portrait presets |
+| Deterministic stick fixture | Delivery size | Delivery size | Programmatic renderer |
+
+The FLUX portrait path therefore remains a local runtime-smoke item rather than a documented model
+guarantee. There is no hidden landscape fallback: a portrait Run keeps portrait dimensions through
+planning, generation, normalization, captions, stock search, and rendering. Sources:
+[GPT Image 2 guide](https://developers.openai.com/api/docs/guides/image-generation),
+[Gemini image generation](https://ai.google.dev/gemini-api/docs/image-generation),
+[Qwen-Image-2512](https://huggingface.co/Qwen/Qwen-Image-2512),
+[Ideogram 4 NF4](https://huggingface.co/ideogram-ai/ideogram-4-nf4),
+[Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image),
+[Z-Image Turbo](https://huggingface.co/Tongyi-MAI/Z-Image-Turbo), and
+[FLUX.2 Klein 4B](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B).
 
 X-Voice Setup is native Windows, but the Backend is intentionally legacy and noncommercial. It uses a
 pinned micromamba/Conda layer for Pynini/OpenFST, a pinned eSpeak NG runtime, and hash-locked Python

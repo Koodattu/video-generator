@@ -19,6 +19,7 @@ from .contracts import (
     RemotionAssetPolicy,
     ResolvedRunConfig,
     TASK_PROTOCOL,
+    VideoOrientation,
     VideoStyle,
     VisualShotMode,
 )
@@ -233,6 +234,8 @@ def resolve_config(
             raise ConfigurationError("final quality requires a vision-capable visual_review Backend")
 
     width, height = (1280, 720) if raw.quality is Quality.DRAFT else (1920, 1080)
+    if raw.orientation is VideoOrientation.PORTRAIT:
+        width, height = height, width
     voice = raw.voice.model_copy(
         update={
             "reference_audio": _relative_private_path(raw.voice.reference_audio, path.parent, project_root),
@@ -268,6 +271,7 @@ def resolve_config(
             raw.narration_delivery,
         ),
         audience=raw.audience,
+        orientation=raw.orientation,
         video_style=raw.video_style,
         style=raw.style,
         style_description=raw.style_description,

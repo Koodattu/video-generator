@@ -864,9 +864,9 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                     else "a sparse setting consistent with the parent Outline Scene"
                 ),
                 "composition": (
-                    "one static arrangement centered in a readable 16:9 frame"
+                    "one static arrangement centered in the supplied readable frame"
                     if static_factual_staging
-                    else "one large focal action centered in a readable 16:9 frame"
+                    else "one large focal action centered in the supplied readable frame"
                 ),
                 "must_show": (
                     ["the staged subjects without a visible change", "clear silhouettes"]
@@ -891,6 +891,7 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                 "persistent_elements": ["keep the established palette and object design"],
             }
         script = data["script"]
+        aspect_ratio = str(data.get("delivery", {}).get("aspect_ratio") or "16:9")
         has_character = data.get("content_format", "narrative") == "narrative"
         style = {
             "style_id": data.get("style_id", "ms_paint_stick"),
@@ -930,7 +931,9 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                         "action": "Aino follows the tiny light" if has_character else "the boot compresses snow crystals",
                         "emotion": "curious and cautiously hopeful" if has_character else "clear and informative",
                         "environment": "sparse snowy path at blue hour",
-                        "composition": "medium-wide 16:9 view with one clear focal action",
+                        "composition": (
+                            f"readable {aspect_ratio} view with one clear focal action"
+                        ),
                         "must_show": ["red triangular scarf", "blue tin lantern"] if has_character else ["blue boot", "individual snow crystals"],
                         "must_avoid": ["written words", "crowd", "photorealism"],
                         "character_ids": ["character-aino"] if has_character else [],
@@ -971,8 +974,12 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
     if task == "image_prompt_compile":
         visual = data.get("visual_shot") or data["visual_brief"]
         style = data["style_profile"]
+        aspect_ratio = str(
+            data.get("generation_settings", {}).get("aspect_ratio") or "16:9"
+        )
         prompt = (
-            f"A deliberately crude raster drawing on a nearly white 16:9 canvas. {visual['story_moment']} "
+            f"A deliberately crude raster drawing on a nearly white {aspect_ratio} canvas. "
+            f"{visual['story_moment']} "
             f"Action: {visual['action']}. Composition: {visual['composition']}. "
             f"Use {style['line_style']}; flat limited colors; sparse background; readable silhouettes. "
             f"Must show: {', '.join(visual['must_show'])}. No letters, labels, captions, logos, signatures, "
@@ -996,7 +1003,7 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             "quality": str(data.get("image_quality", "medium")),
             "seed": None,
             "reference_paths": data.get("reference_paths", []),
-            "settings": {},
+            "settings": {"aspect_ratio": aspect_ratio},
         }
         if visual.get("shot_id"):
             payload["shot_id"] = visual["shot_id"]

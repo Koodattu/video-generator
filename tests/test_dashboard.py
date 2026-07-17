@@ -123,7 +123,7 @@ def test_dashboard_lists_run_without_exposing_voice_configuration(dashboard_run)
 def test_dashboard_normalizes_multi_format_defaults_for_legacy_runs(dashboard_run) -> None:
     config_path = dashboard_run.config_path
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    for field in ("content_format", "narration_pace", "visual_shot_mode"):
+    for field in ("content_format", "narration_pace", "orientation", "visual_shot_mode"):
         config.pop(field, None)
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
@@ -135,6 +135,7 @@ def test_dashboard_normalizes_multi_format_defaults_for_legacy_runs(dashboard_ru
 
     assert detail["config"]["content_format"] == "narrative"
     assert detail["config"]["narration_pace"] == "standard"
+    assert detail["config"]["orientation"] == "landscape"
     assert detail["config"]["visual_shot_mode"] == "scene_locked"
 
 
@@ -247,6 +248,7 @@ def test_dashboard_preflight_and_create_start_a_new_run(
         "brief": {"idea_direction": "A fox follows a lantern through the snow"},
         "options": {
             "profile": "local",
+            "orientation": "portrait",
             "offline": True,
             "research_query_limit": 0,
         },
@@ -266,6 +268,11 @@ def test_dashboard_preflight_and_create_start_a_new_run(
     created_store = RunStore.open(dashboard_run.root.parents[1] / "runs" / run_id)
     assert created_store.manifest.status == "created"
     assert created_store.brief.idea_direction == payload["brief"]["idea_direction"]
+    assert created_store.config.orientation.value == "portrait"
+    assert (
+        created_store.config.delivery_width,
+        created_store.config.delivery_height,
+    ) == (720, 1280)
 
 
 def test_dashboard_mutations_require_token_and_resume_queues_run(dashboard_run) -> None:

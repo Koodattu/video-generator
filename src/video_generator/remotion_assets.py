@@ -17,6 +17,7 @@ from .contracts import (
     RemotionAssetKind,
     RemotionAssetPolicy,
     RemotionAssetRequest,
+    VideoOrientation,
     utc_now,
 )
 from .errors import BackendError, ErrorKind, MediaError
@@ -369,6 +370,7 @@ class PexelsClient:
         request: RemotionAssetRequest,
         *,
         language: OutputLanguage,
+        orientation: VideoOrientation = VideoOrientation.LANDSCAPE,
         limit: int = 6,
     ) -> list[AssetCandidate]:
         if not self.api_key or request.kind not in {
@@ -380,7 +382,7 @@ class PexelsClient:
         params = {
             "query": request.query,
             "per_page": str(min(15, max(1, limit))),
-            "orientation": "landscape",
+            "orientation": orientation.value,
             # Direction calls deliberately produce English search queries for every output language.
             "locale": "en-US",
         }
@@ -413,14 +415,18 @@ class PexelsClient:
                     and str(value.get("file_type") or "").casefold() == "video/mp4"
                     and str(value.get("link") or "").startswith("https://")
                 ]
+                def short_edge(value: Mapping[str, Any]) -> int:
+                    dimension = "width" if orientation is VideoOrientation.PORTRAIT else "height"
+                    return int(value.get(dimension) or 0)
+
                 files.sort(
                     key=lambda value: (
-                        int(value.get("height") or 0) > 1080,
-                        -int(value.get("height") or 0),
+                        short_edge(value) > 1080,
+                        -short_edge(value),
                     )
                 )
                 chosen = next(
-                    (value for value in files if 480 <= int(value.get("height") or 0) <= 1080),
+                    (value for value in files if 480 <= short_edge(value) <= 1080),
                     files[0] if files else None,
                 )
                 if chosen is None:
@@ -430,7 +436,12 @@ class PexelsClient:
                 height = int(chosen.get("height") or item.get("height") or 0)
             else:
                 sources = item.get("src") if isinstance(item.get("src"), dict) else {}
-                download_url = str(sources.get("large2x") or sources.get("landscape") or "")
+                download_url = str(
+                    sources.get("large2x")
+                    or sources.get(orientation.value)
+                    or sources.get("original")
+                    or ""
+                )
                 width = int(item.get("width") or 0)
                 height = int(item.get("height") or 0)
             host = urllib.parse.urlparse(download_url).hostname or ""
@@ -475,6 +486,7 @@ def find_asset_candidates(
     language: OutputLanguage,
     allow_share_alike: bool,
     environment: Mapping[str, str],
+    orientation: VideoOrientation = VideoOrientation.LANDSCAPE,
     http: HttpClient | None = None,
 ) -> list[AssetCandidate]:
     client = http or HttpClient(timeout_seconds=30, max_response_bytes=MAX_ASSET_BYTES)
@@ -493,7 +505,9 @@ def find_asset_candidates(
         provider_errors.append(f"Wikimedia: {exc.message}")
     pexels = PexelsClient(http=client, api_key=environment.get("PEXELS_API_KEY", ""))
     try:
-        candidates.extend(pexels.search(request, language=language))
+        candidates.extend(
+            pexels.search(request, language=language, orientation=orientation)
+        )
     except BackendError as exc:
         provider_errors.append(f"Pexels: {exc.message}")
     if not candidates and provider_errors:

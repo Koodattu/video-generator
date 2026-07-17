@@ -48,6 +48,11 @@ const useEntrance = (motion: RenderShot["motion"]) => {
   };
 };
 
+const usePortrait = (): boolean => {
+  const {width, height} = useVideoConfig();
+  return height > width;
+};
+
 const MediaLayer: React.FC<{shot: RenderShot; base: string; dim?: boolean}> = ({shot, base, dim = false}) => {
   if (!shot.assetFile || !shot.assetMediaKind) return null;
   const src = joinAsset(base, shot.assetFile);
@@ -64,39 +69,44 @@ const MediaLayer: React.FC<{shot: RenderShot; base: string; dim?: boolean}> = ({
   );
 };
 
-const Headline: React.FC<{shot: RenderShot; compact?: boolean}> = ({shot, compact = false}) => (
-  <div style={{maxWidth: compact ? 900 : 1120}}>
-    <div
-      style={{
-        color: colors.ink,
-        fontFamily: "Arial Black, Arial, sans-serif",
-        fontSize: compact ? 64 : 92,
-        fontWeight: 900,
-        letterSpacing: -3,
-        lineHeight: 0.95,
-        textTransform: "uppercase",
-        textWrap: "balance"
-      }}
-    >
-      {shot.headline}
-    </div>
-    {shot.supportingText ? (
-      <div style={{color: colors.muted, fontFamily: "Arial, sans-serif", fontSize: 30, fontWeight: 700, lineHeight: 1.2, marginTop: 26}}>
-        {shot.supportingText}
+const Headline: React.FC<{shot: RenderShot; compact?: boolean}> = ({shot, compact = false}) => {
+  const portrait = usePortrait();
+  return (
+    <div style={{maxWidth: portrait ? "100%" : compact ? 900 : 1120}}>
+      <div
+        style={{
+          color: colors.ink,
+          fontFamily: "Arial Black, Arial, sans-serif",
+          fontSize: portrait ? (compact ? 58 : 72) : compact ? 64 : 92,
+          fontWeight: 900,
+          letterSpacing: portrait ? -2 : -3,
+          lineHeight: 0.95,
+          overflowWrap: "anywhere",
+          textTransform: "uppercase",
+          textWrap: "balance"
+        }}
+      >
+        {shot.headline}
       </div>
-    ) : null}
-  </div>
-);
+      {shot.supportingText ? (
+        <div style={{color: colors.muted, fontFamily: "Arial, sans-serif", fontSize: portrait ? 26 : 30, fontWeight: 700, lineHeight: 1.2, marginTop: portrait ? 20 : 26}}>
+          {shot.supportingText}
+        </div>
+      ) : null}
+    </div>
+  );
+};
 
 const KineticHook: React.FC<{shot: RenderShot; base: string; labels: RenderLabels}> = ({shot, base, labels}) => {
   const frame = useCurrentFrame();
   const entrance = useEntrance(shot.motion);
+  const portrait = usePortrait();
   const accent = frame % 14 < 7 ? colors.yellow : colors.coral;
   return (
     <AbsoluteFill style={{backgroundColor: colors.paper, overflow: "hidden"}}>
       <MediaLayer shot={shot} base={base} dim />
-      <div style={{position: "absolute", inset: 0, background: "linear-gradient(90deg, rgba(16,17,20,.95), rgba(16,17,20,.2))"}} />
-      <div style={{...entrance, position: "absolute", left: 72, right: 72, top: 110}}>
+      <div style={{position: "absolute", inset: 0, background: portrait ? "linear-gradient(0deg, rgba(16,17,20,.96), rgba(16,17,20,.2))" : "linear-gradient(90deg, rgba(16,17,20,.95), rgba(16,17,20,.2))"}} />
+      <div style={{...entrance, position: "absolute", left: portrait ? 46 : 72, right: portrait ? 46 : 72, top: portrait ? "16%" : 110}}>
         <div style={{background: accent, color: colors.paper, display: "inline-block", fontFamily: "Arial Black, Arial", fontSize: 22, fontWeight: 900, letterSpacing: 3, marginBottom: 24, padding: "10px 16px"}}>
           {labels.payAttention}
         </div>
@@ -108,12 +118,13 @@ const KineticHook: React.FC<{shot: RenderShot; base: string; labels: RenderLabel
 
 const HeadlineZoom: React.FC<{shot: RenderShot; base: string}> = ({shot, base}) => {
   const entrance = useEntrance(shot.motion);
+  const portrait = usePortrait();
   return (
     <AbsoluteFill style={{background: `radial-gradient(circle at 75% 30%, #243041, ${colors.paper} 58%)`}}>
-      <div style={{position: "absolute", right: 0, top: 0, width: "48%", height: "100%", opacity: 0.8}}>
+      <div style={{position: "absolute", right: 0, top: 0, width: portrait ? "100%" : "48%", height: portrait ? "54%" : "100%", opacity: 0.8}}>
         <MediaLayer shot={shot} base={base} />
       </div>
-      <div style={{...entrance, alignItems: "flex-start", display: "flex", height: "100%", justifyContent: "center", flexDirection: "column", padding: "0 70px", width: "65%"}}>
+      <div style={{...entrance, alignItems: "flex-start", bottom: portrait ? 0 : "auto", boxSizing: "border-box", display: "flex", height: portrait ? "50%" : "100%", justifyContent: "center", flexDirection: "column", padding: portrait ? "36px 46px" : "0 70px", position: portrait ? "absolute" : "relative", width: portrait ? "100%" : "65%"}}>
         <Headline shot={shot} compact />
       </div>
     </AbsoluteFill>
@@ -122,14 +133,15 @@ const HeadlineZoom: React.FC<{shot: RenderShot; base: string}> = ({shot, base}) 
 
 const SourceScreenshot: React.FC<{shot: RenderShot; base: string; labels: RenderLabels}> = ({shot, base, labels}) => {
   const entrance = useEntrance(shot.motion);
+  const portrait = usePortrait();
   return (
-    <AbsoluteFill style={{background: colors.paper, boxSizing: "border-box", display: "flex", flexDirection: "column", padding: 48}}>
+    <AbsoluteFill style={{background: colors.paper, boxSizing: "border-box", display: "flex", flexDirection: "column", padding: portrait ? 36 : 48}}>
       <div style={{color: colors.yellow, fontFamily: "Arial Black, Arial", fontSize: 22, letterSpacing: 2, marginBottom: 18}}>{labels.source}</div>
       <div style={{background: "white", border: `8px solid ${colors.panel}`, borderRadius: 18, boxShadow: "0 20px 80px rgba(0,0,0,.55)", flex: 1, minHeight: 0, overflow: "hidden", position: "relative", ...entrance}}>
         <MediaLayer shot={shot} base={base} />
       </div>
-      <div style={{alignItems: "center", display: "flex", justifyContent: "space-between", marginTop: 18}}>
-        <div style={{color: colors.ink, fontFamily: "Arial Black, Arial", fontSize: 34, fontWeight: 900}}>{shot.headline}</div>
+      <div style={{alignItems: portrait ? "flex-start" : "center", display: "flex", flexDirection: portrait ? "column" : "row", gap: portrait ? 8 : 0, justifyContent: "space-between", marginTop: 18}}>
+        <div style={{color: colors.ink, fontFamily: "Arial Black, Arial", fontSize: portrait ? 28 : 34, fontWeight: 900}}>{shot.headline}</div>
         <div style={{color: colors.muted, fontFamily: "Arial", fontSize: 18}}>{shot.sourceLabel || labels.citedSource}</div>
       </div>
     </AbsoluteFill>
@@ -138,14 +150,15 @@ const SourceScreenshot: React.FC<{shot: RenderShot; base: string; labels: Render
 
 const CodeReveal: React.FC<{shot: RenderShot}> = ({shot}) => {
   const frame = useCurrentFrame();
+  const portrait = usePortrait();
   return (
-    <AbsoluteFill style={{background: colors.paper, boxSizing: "border-box", padding: 58}}>
-      <div style={{color: colors.ink, fontFamily: "Arial Black, Arial", fontSize: 50, fontWeight: 900, marginBottom: 28}}>{shot.headline}</div>
+    <AbsoluteFill style={{background: colors.paper, boxSizing: "border-box", padding: portrait ? 36 : 58}}>
+      <div style={{color: colors.ink, fontFamily: "Arial Black, Arial", fontSize: portrait ? 42 : 50, fontWeight: 900, marginBottom: 28}}>{shot.headline}</div>
       <div style={{background: "#0b0c0f", border: "2px solid #30333d", borderRadius: 18, boxShadow: "0 24px 90px rgba(0,0,0,.5)", flex: 1, overflow: "hidden"}}>
         <div style={{background: "#20222a", display: "flex", gap: 10, padding: 16}}>
           {[colors.coral, colors.yellow, colors.green].map((color) => <div key={color} style={{background: color, borderRadius: 99, height: 14, width: 14}} />)}
         </div>
-        <div style={{fontFamily: "Consolas, monospace", fontSize: 31, lineHeight: 1.55, padding: 34}}>
+        <div style={{fontFamily: "Consolas, monospace", fontSize: portrait ? 22 : 31, lineHeight: 1.55, overflowWrap: "anywhere", padding: portrait ? 24 : 34}}>
           {shot.bodyLines.map((line, index) => {
             const visible = frame >= index * 7;
             return (
@@ -162,11 +175,12 @@ const CodeReveal: React.FC<{shot: RenderShot}> = ({shot}) => {
 
 const DiagramFlow: React.FC<{shot: RenderShot}> = ({shot}) => {
   const frame = useCurrentFrame();
+  const portrait = usePortrait();
   const lastActivationFrame = Math.max(1, shot.durationFrames - 8);
   return (
-    <AbsoluteFill style={{background: colors.paper, boxSizing: "border-box", padding: "70px 54px"}}>
-      <div style={{color: colors.ink, fontFamily: "Arial Black, Arial", fontSize: 52, fontWeight: 900, textAlign: "center"}}>{shot.headline}</div>
-      <div style={{alignItems: "center", display: "flex", flex: 1, justifyContent: "center", marginTop: 30, minWidth: 0}}>
+    <AbsoluteFill style={{background: colors.paper, boxSizing: "border-box", padding: portrait ? "44px 34px" : "70px 54px"}}>
+      <div style={{color: colors.ink, fontFamily: "Arial Black, Arial", fontSize: portrait ? 42 : 52, fontWeight: 900, textAlign: "center"}}>{shot.headline}</div>
+      <div style={{alignItems: "center", display: "flex", flex: 1, flexDirection: portrait ? "column" : "row", justifyContent: "center", marginTop: 30, minWidth: 0}}>
         {shot.bodyLines.map((line, index) => {
           const activationFrame = shot.bodyLines.length === 1
             ? 0
@@ -178,8 +192,8 @@ const DiagramFlow: React.FC<{shot: RenderShot}> = ({shot}) => {
           });
           return (
             <React.Fragment key={`${index}-${line}`}>
-              {index ? <div style={{color: colors.yellow, flex: "0 1 44px", fontFamily: "Arial Black", fontSize: 42, opacity: entrance, textAlign: "center", transform: `scaleX(${entrance})`, transformOrigin: "left center"}}>→</div> : null}
-              <div style={{background: index % 2 ? colors.cyan : colors.yellow, borderRadius: 18, color: colors.paper, flex: "1 1 0", fontFamily: "Arial Black, Arial", fontSize: 24, fontWeight: 900, maxWidth: 230, minWidth: 0, opacity: active ? 1 : 0.16, padding: "30px 16px", textAlign: "center", transform: `translateY(${(1 - entrance) * 22}px) scale(${0.9 + entrance * 0.1})`}}>{line}</div>
+              {index ? <div style={{color: colors.yellow, flex: portrait ? "0 1 30px" : "0 1 44px", fontFamily: "Arial Black", fontSize: portrait ? 32 : 42, opacity: entrance, textAlign: "center", transform: portrait ? `scaleY(${entrance})` : `scaleX(${entrance})`, transformOrigin: portrait ? "center top" : "left center"}}>{portrait ? "↓" : "→"}</div> : null}
+              <div style={{background: index % 2 ? colors.cyan : colors.yellow, borderRadius: 18, color: colors.paper, flex: portrait ? "0 1 auto" : "1 1 0", fontFamily: "Arial Black, Arial", fontSize: 24, fontWeight: 900, maxWidth: portrait ? "100%" : 230, minWidth: 0, opacity: active ? 1 : 0.16, padding: portrait ? "24px 28px" : "30px 16px", textAlign: "center", transform: `translateY(${(1 - entrance) * 22}px) scale(${0.9 + entrance * 0.1})`, width: portrait ? "82%" : "auto"}}>{line}</div>
             </React.Fragment>
           );
         })}
@@ -191,12 +205,13 @@ const DiagramFlow: React.FC<{shot: RenderShot}> = ({shot}) => {
 
 const ComparisonSplit: React.FC<{shot: RenderShot; labels: RenderLabels}> = ({shot, labels}) => {
   const entrance = useEntrance(shot.motion);
+  const portrait = usePortrait();
   return (
-    <AbsoluteFill style={{background: colors.paper, boxSizing: "border-box", padding: 48}}>
-      <div style={{color: colors.ink, fontFamily: "Arial Black, Arial", fontSize: 48, fontWeight: 900, textAlign: "center"}}>{shot.headline}</div>
-      <div style={{display: "grid", flex: 1, gap: 24, gridTemplateColumns: "1fr 1fr", marginTop: 34, ...entrance}}>
+    <AbsoluteFill style={{background: colors.paper, boxSizing: "border-box", padding: portrait ? 36 : 48}}>
+      <div style={{color: colors.ink, fontFamily: "Arial Black, Arial", fontSize: portrait ? 40 : 48, fontWeight: 900, textAlign: "center"}}>{shot.headline}</div>
+      <div style={{display: "grid", flex: 1, gap: 24, gridTemplateColumns: portrait ? "1fr" : "1fr 1fr", gridTemplateRows: portrait ? "1fr 1fr" : "none", marginTop: 34, ...entrance}}>
         {(shot.bodyLines.length === 2 ? shot.bodyLines : [labels.before, labels.after]).map((line, index) => (
-          <div key={`${index}-${line}`} style={{alignItems: "center", background: index ? colors.cyan : colors.coral, borderRadius: 24, color: colors.paper, display: "flex", fontFamily: "Arial Black, Arial", fontSize: 43, fontWeight: 900, justifyContent: "center", padding: 42, textAlign: "center"}}>{line}</div>
+          <div key={`${index}-${line}`} style={{alignItems: "center", background: index ? colors.cyan : colors.coral, borderRadius: 24, color: colors.paper, display: "flex", fontFamily: "Arial Black, Arial", fontSize: portrait ? 36 : 43, fontWeight: 900, justifyContent: "center", padding: portrait ? 30 : 42, textAlign: "center"}}>{line}</div>
         ))}
       </div>
     </AbsoluteFill>
@@ -205,13 +220,14 @@ const ComparisonSplit: React.FC<{shot: RenderShot; labels: RenderLabels}> = ({sh
 
 const MemeCutaway: React.FC<{shot: RenderShot; base: string}> = ({shot, base}) => {
   const entrance = useEntrance(shot.motion);
+  const portrait = usePortrait();
   return (
     <AbsoluteFill style={{background: colors.paper}}>
       <MediaLayer shot={shot} base={base} dim />
       <div style={{position: "absolute", inset: 0, background: "linear-gradient(0deg, rgba(16,17,20,.95), rgba(16,17,20,.05) 70%)"}} />
-      <div style={{...entrance, bottom: 48, left: 55, position: "absolute", right: 55}}>
-        <div style={{color: colors.ink, fontFamily: "Arial Black, Arial", fontSize: 58, fontWeight: 900, lineHeight: 1, textShadow: "0 4px 18px black", textTransform: "uppercase"}}>{shot.headline}</div>
-        <div style={{color: colors.yellow, fontFamily: "Arial", fontSize: 27, fontWeight: 800, marginTop: 18}}>{shot.supportingText}</div>
+      <div style={{...entrance, bottom: portrait ? 70 : 48, left: portrait ? 40 : 55, position: "absolute", right: portrait ? 40 : 55}}>
+        <div style={{color: colors.ink, fontFamily: "Arial Black, Arial", fontSize: portrait ? 48 : 58, fontWeight: 900, lineHeight: 1, textShadow: "0 4px 18px black", textTransform: "uppercase"}}>{shot.headline}</div>
+        <div style={{color: colors.yellow, fontFamily: "Arial", fontSize: portrait ? 24 : 27, fontWeight: 800, marginTop: 18}}>{shot.supportingText}</div>
       </div>
     </AbsoluteFill>
   );
@@ -219,8 +235,9 @@ const MemeCutaway: React.FC<{shot: RenderShot; base: string}> = ({shot, base}) =
 
 const Conclusion: React.FC<{shot: RenderShot; labels: RenderLabels}> = ({shot, labels}) => {
   const entrance = useEntrance(shot.motion);
+  const portrait = usePortrait();
   return (
-    <AbsoluteFill style={{alignItems: "center", background: `linear-gradient(135deg, ${colors.paper}, #182836)`, boxSizing: "border-box", display: "flex", justifyContent: "center", padding: 70, textAlign: "center"}}>
+    <AbsoluteFill style={{alignItems: "center", background: `linear-gradient(135deg, ${colors.paper}, #182836)`, boxSizing: "border-box", display: "flex", justifyContent: "center", padding: portrait ? 46 : 70, textAlign: "center"}}>
       <div style={entrance}>
         <div style={{color: colors.yellow, fontFamily: "Arial Black, Arial", fontSize: 22, letterSpacing: 4, marginBottom: 26}}>{labels.takeaway}</div>
         <Headline shot={shot} compact />

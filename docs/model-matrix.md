@@ -52,7 +52,7 @@ Model aliases can change behavior. Reproducible evaluations should prefer dated 
 
 ### Images
 
-The correct model is `gpt-image-2`, with dated snapshot `gpt-image-2-2026-04-21` currently documented. It supports generation, editing, and reference-image input. It is the OpenAI image primary. Image edges must be valid for the API; 1920×1080 is not directly legal because 1080 is not divisible by 16. Generate a 16:9 image such as 2048×1152 and normalize it deterministically to delivery resolution. Character references help but do not guarantee perfect recurrence. [GPT Image 2](https://developers.openai.com/api/docs/models/gpt-image-2), [image generation guide](https://developers.openai.com/api/docs/guides/image-generation)
+The correct model is `gpt-image-2`, with dated snapshot `gpt-image-2-2026-04-21` currently documented. It supports generation, editing, reference-image input, and portrait or landscape output. Image edges must be valid for the API; 1920×1080 is not directly legal because 1080 is not divisible by 16. Generate at 2048×1152 or 1152×2048 and normalize deterministically to delivery resolution. Character references help but do not guarantee perfect recurrence. [GPT Image 2](https://developers.openai.com/api/docs/models/gpt-image-2), [image generation guide](https://developers.openai.com/api/docs/guides/image-generation)
 
 OpenAI currently has no documented dedicated music-generation endpoint in the API guide set. The architecture must not invent one; the OpenAI-led profile uses ElevenLabs Music.
 
@@ -60,7 +60,7 @@ OpenAI currently has no documented dedicated music-generation endpoint in the AP
 
 `gemini-3.5-flash` is the stable Gemini text primary, with structured output, function calling, and Google Search support. It should be the first cloud reference profile implemented because its exact generally available capability set is explicit. [Gemini 3.5 Flash](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash), [Google Search grounding](https://ai.google.dev/gemini-api/docs/google-search)
 
-The correct current “Nano Banana 2” image ID is `gemini-3.1-flash-image`, not `nano-banana-2-flash`. Request `aspect_ratio = "16:9"` and a 2K image, then normalize the returned dimensions. Its supported reference-image features are useful for recurring characters. `gemini-3.1-flash-lite-image` is a cost-oriented candidate and `gemini-3-pro-image` a quality-oriented candidate, but neither becomes a default without the same fixtures. [Gemini 3.1 Flash Image](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-image), [Gemini image generation](https://ai.google.dev/gemini-api/docs/image-generation)
+The correct current “Nano Banana 2” image ID is `gemini-3.1-flash-image`, not `nano-banana-2-flash`. Request `aspect_ratio = "16:9"` or `"9:16"` and a 2K image, then normalize the returned dimensions. Its supported reference-image features are useful for recurring characters. `gemini-3.1-flash-lite-image` is a cost-oriented candidate and `gemini-3-pro-image` a quality-oriented candidate, but neither becomes a default without the same fixtures. [Gemini 3.1 Flash Image](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-image), [Gemini image generation](https://ai.google.dev/gemini-api/docs/image-generation)
 
 Google's image-language guidance does not list Finnish among its best-performance languages. Visual Briefs remain faithful to Finnish narration, but the image prompt compiler should emit English by default and verify that policy through fixtures.
 
@@ -166,7 +166,7 @@ above the official planning claim. Do not run it concurrently with another GPU m
 `Qwen/Qwen-Image-2512` is loaded through selective on-the-fly NF4 quantization of the transformer and
 text encoder plus CPU offload. The small `time_text_embed`, `img_in`, `txt_in`, `norm_out`, and
 `proj_out` boundary modules remain in their original precision. The adapter uses the model's
-documented 50-step path at 1664×928, passes native negative conditioning with
+documented 50-step path at 1664×928 or 928×1664, passes native negative conditioning with
 `true_cfg_scale = 4.0`, and does not advertise reference-image editing. Full BF16 is not a 24 GB
 configuration. Python removes negative-prompt clauses that conflict with approved positive visual or
 style terms before the request reaches the model.
@@ -224,7 +224,7 @@ The target machine has 24 GB VRAM and 64 GB system RAM. These figures are planni
 | FLUX.2 klein 4B | Reserve 13 GB; batch images while resident |
 | Z-Image-Turbo | Reserve the full card despite the lower official claim |
 | Ideogram 4 NF4 | Experimental; no usable smoke, budget the full card |
-| Qwen-Image-2512 NF4 | Experimental selective-NF4/offload path; 50 steps at 1664×928, run alone |
+| Qwen-Image-2512 NF4 | Experimental selective-NF4/offload path; 50 steps at 1664×928 or 928×1664, run alone |
 | ACE-Step XL Turbo | Reserve the full card; no concurrent model |
 
 Measured component smokes on 2026-07-15 reached approximately 6.1 GB peak for OmniVoice, 12.9 GB

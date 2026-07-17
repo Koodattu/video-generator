@@ -42,6 +42,7 @@ from ..contracts import (
     RemotionTemplate,
     TASK_IDS,
     TASK_PROTOCOL,
+    VideoOrientation,
     VideoStyle,
     VisualShotMode,
 )
@@ -133,6 +134,7 @@ class RunOptions(DashboardModel):
     content_format: ContentFormat = ContentFormat.NARRATIVE
     narration_pace: NarrationPace = NarrationPace.STANDARD
     narration_delivery: Annotated[str, Field(max_length=500)] = ""
+    orientation: VideoOrientation = VideoOrientation.LANDSCAPE
     video_style: VideoStyle = VideoStyle.STILL_IMAGE
     style: Annotated[str, Field(min_length=1, max_length=120)] = "ms_paint_stick"
     style_description: Annotated[str, Field(max_length=1000)] = ""

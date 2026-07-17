@@ -297,8 +297,8 @@ state_after_scene records the concrete change caused by the current action. pers
 lists state that carries onward. Respect every Outline continuity_obligation. Transitions must read
 as cause and effect while each image still depicts only its own Scene.
 
-Each Visual Brief describes subjects, one clear visible action, readable emotion, environment, 16:9
-composition, must-show traits, and must-avoid elements. Prefer readable silhouettes and one focal
+Each Visual Brief describes subjects, one clear visible action, readable emotion, environment, the
+supplied delivery aspect ratio, must-show traits, and must-avoid elements. Prefer readable silhouettes and one focal
 action. Never place prose, captions, dialogue, letters, labels, signs, logos, or watermarks inside an
 image.
 
@@ -308,7 +308,7 @@ background marks; sincere amateur paint-program character; small natural inconsi
 empty space. Forbid polished vector geometry, photorealism, 3D, gradients, glossy concept art, and
 elaborate shading. For another style_id, translate its style_description into an equally coherent,
 reusable Style Profile without importing Scene content. style_description may refine the selected
-style but never override safety, no-text, identity continuity, legibility, or 16:9 composition.
+style but never override safety, no-text, identity continuity, legibility, or the supplied composition.
 """,
     "remotion_direction": """
 Direct exactly one supplied narration Shot using one allowlisted Remotion template. Return only the
@@ -319,7 +319,8 @@ Never write React, TypeScript, JavaScript, CSS, shell commands, JSON paths, URLs
 download instructions.
 
 The visible headline and supporting text must use the selected Output Language and be instantly
-readable. body_lines are template content: code-like lines for code_reveal, short node labels for
+readable in the supplied delivery orientation and aspect ratio. body_lines are template content:
+code-like lines for code_reveal, short node labels for
 diagram_flow, or exactly the two compared statements for comparison_split. asset_query must be a
 literal, concise English search phrase only when the selected asset kind requires one. Prefer a
 concrete stock image, stock clip, source screenshot, GIF, or recognizable visual cutaway when it adds
@@ -630,11 +631,11 @@ regeneration only for a concrete failed requirement, and say exactly what to pre
 TARGET_IMAGE_GUIDANCE: dict[str, str] = {
     "openai:gpt-image-2": """
 Target guidance for GPT Image 2: use a concise natural-language prompt with the focal action early.
-Use a legal exact 16:9 size; built-in profiles use 2048x1152. Put reference paths only in
+Use the supplied legal exact dimensions and aspect ratio. Put reference paths only in
 reference_paths, not as textual filenames. GPT Image 2 already treats references as high fidelity.
 """,
     "gemini:gemini-3.1-flash-image": """
-Target guidance for Gemini 3.1 Flash Image: make the 16:9 composition explicit and use a 2K request.
+Target guidance for Gemini 3.1 Flash Image: make the supplied aspect ratio explicit and use a 2K request.
 The Interactions API returns JPEG, so set output_format to jpeg. Describe recurring traits near the
 subject mention. Put supported reference images in reference_paths.
 """,
@@ -660,7 +661,7 @@ palette, medium, lighting treatment, or composition. Do not request reference im
 official 50-step true-CFG path and higher native generation resolution.
 """,
     "deterministic:stick": """
-Target guidance for deterministic stick rendering: preserve the Visual Brief fields and simple 16:9
+Target guidance for deterministic stick rendering: preserve the Visual Brief fields and supplied
 layout. The textual prompt is provenance; the renderer maps known subjects/actions to crude shapes.
 """,
 }

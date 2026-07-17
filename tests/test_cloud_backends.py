@@ -18,6 +18,7 @@ from video_generator.backends.elevenlabs import ElevenLabsAlignmentBackend
 from video_generator.backends.openai import OpenAIStructuredTextBackend, OpenAIWebSearchBackend
 from video_generator.contracts import (
     AlignmentRequest,
+    ImageGenerationSettings,
     OutputLanguage,
     SearchRequest,
     StructuredTextRequest,
@@ -266,8 +267,16 @@ def test_curated_profiles_use_current_backends() -> None:
     assert BACKEND_DESCRIPTORS["gemini:search"].revision.endswith("any-search-tool")
 
 
+@pytest.mark.parametrize(
+    ("width", "height", "aspect_ratio"),
+    [(2048, 1152, "16:9"), (1152, 2048, "9:16")],
+)
 def test_gemini_image_uses_current_jpeg_response_format(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    width: int,
+    height: int,
+    aspect_ratio: str,
 ) -> None:
     http = StubHttpClient(
         {
@@ -287,7 +296,10 @@ def test_gemini_image_uses_current_jpeg_response_format(
             ],
         }
     )
-    monkeypatch.setattr("video_generator.backends.gemini.image_dimensions", lambda path: (1024, 576))
+    monkeypatch.setattr(
+        "video_generator.backends.gemini.image_dimensions",
+        lambda path: (width, height),
+    )
     backend = GeminiImageBackend(
         "test-key",
         workspace_root=tmp_path,
@@ -301,9 +313,10 @@ def test_gemini_image_uses_current_jpeg_response_format(
             shot_id="shot-001",
             target_backend_id="gemini:gemini-3.1-flash-image",
             prompt="A fox beside an amber lantern, no text.",
-            width=2048,
-            height=1152,
+            width=width,
+            height=height,
             quality="low",
+            settings=ImageGenerationSettings(aspect_ratio=aspect_ratio),
         ),
         tmp_path / "generated.jpg",
     )
@@ -311,7 +324,7 @@ def test_gemini_image_uses_current_jpeg_response_format(
     assert http.requests[0]["json_body"]["response_format"] == {
         "type": "image",
         "mime_type": "image/jpeg",
-        "aspect_ratio": "16:9",
+        "aspect_ratio": aspect_ratio,
         "image_size": "2K",
     }
     assert result.asset.image.mime_type == "image/jpeg"

@@ -43,6 +43,7 @@ from video_generator.contracts import (
     Quality,
     VisualShotMode,
     VideoStyle,
+    VideoOrientation,
 )
 from video_generator.errors import BackendError, ConfigurationError, MediaError
 from video_generator.executor import _canonicalize_host_owned_fields
@@ -590,6 +591,7 @@ def test_empty_stock_search_falls_through_to_generated_asset(
     engine.config = SimpleNamespace(
         remotion_asset_policy=RemotionAssetPolicy.LOCAL_ONLY,
         output_language=OutputLanguage.ENGLISH,
+        orientation=VideoOrientation.LANDSCAPE,
         remotion_allow_share_alike=False,
     )
     engine.environment = {}
@@ -796,6 +798,27 @@ def test_pexels_uses_english_locale_for_english_asset_queries() -> None:
     assert parse_qs(urlparse(http.url).query)["locale"] == ["en-US"]
     assert candidates[0].creator_name == "Fixture Creator"
     assert not ({"download_url", "source_page_url"} & candidates[0].selection_payload().keys())
+
+
+def test_pexels_requests_the_selected_portrait_orientation() -> None:
+    from video_generator.contracts import RemotionAssetRequest
+
+    http = _PexelsHttp()
+    request = RemotionAssetRequest(
+        asset_id="asset-001",
+        shot_id="shot-001",
+        kind="stock_image",
+        query="overloaded server warning lights",
+        generated_prompt="English fallback prompt.",
+    )
+
+    PexelsClient(http=http, api_key="fixture-key").search(  # type: ignore[arg-type]
+        request,
+        language=OutputLanguage.ENGLISH,
+        orientation=VideoOrientation.PORTRAIT,
+    )
+
+    assert parse_qs(urlparse(http.url).query)["orientation"] == ["portrait"]
 
 
 def test_materialized_asset_records_the_validated_response_mime(
@@ -1303,9 +1326,12 @@ def test_asset_resolver_never_launches_browser_for_offline_runs(
     or not all(item.ready for item in probe_remotion_runtime(PROJECT_ROOT)),
     reason="the eight-template render requires Node, FFmpeg, and the pinned Remotion browser",
 )
+@pytest.mark.parametrize(("width", "height"), [(1280, 720), (720, 1280)])
 def test_all_eight_templates_render_to_local_h264(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    width: int,
+    height: int,
 ) -> None:
     from video_generator import remotion_renderer
 
@@ -1321,7 +1347,7 @@ def test_all_eight_templates_render_to_local_h264(
             "-f",
             "lavfi",
             "-i",
-            "color=c=0x2878a8:s=1280x720",
+            f"color=c=0x2878a8:s={width}x{height}",
             "-frames:v",
             "1",
             str(image),
@@ -1397,16 +1423,16 @@ def test_all_eight_templates_render_to_local_h264(
                     rights=_rights(),
                     original=media,
                     normalized=media,
-                    width=1280,
-                    height=720,
+                    width=width,
+                    height=height,
                     transform="Generated test fixture without modification",
                     retrieved_at=datetime.now(timezone.utc),
                 )
             )
     edit_plan = RemotionEditPlan(
         title="Eight local templates",
-        width=1280,
-        height=720,
+        width=width,
+        height=height,
         fps=30,
         duration_seconds=4,
         duration_frames=120,
@@ -1445,7 +1471,8 @@ def test_all_eight_templates_render_to_local_h264(
     probe = tools.probe_json(output)
     video = next(stream for stream in probe["streams"] if stream.get("codec_type") == "video")
     assert video["codec_name"] == "h264"
-    assert int(video["width"]) == 1280
+    assert int(video["width"]) == width
+    assert int(video["height"]) == height
     manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert manifest_payload["labels"]["takeaway"] == "TÄRKEIN AJATUS"
     assert manifest_payload["captionsEnabled"] is True

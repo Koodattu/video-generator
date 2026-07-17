@@ -270,6 +270,11 @@ def run_summary(
         for stage in PUBLIC_STAGES
         if isinstance(stages.get(stage), dict) and stages[stage].get("status") == "complete"
     )
+    delivery_width = int(config.get("delivery_width") or 0)
+    delivery_height = int(config.get("delivery_height") or 0)
+    orientation = config.get("orientation")
+    if orientation not in {"landscape", "portrait"}:
+        orientation = "portrait" if delivery_height > delivery_width else "landscape"
     return {
         "run_id": run_id,
         "manifest_status": manifest.get("status"),
@@ -280,6 +285,9 @@ def run_summary(
         "parent_run_id": manifest.get("parent_run_id"),
         "profile": config.get("profile"),
         "quality": config.get("quality"),
+        "orientation": orientation,
+        "delivery_width": delivery_width,
+        "delivery_height": delivery_height,
         "output_language": config.get("output_language"),
         "duration_seconds": config.get("duration_seconds"),
         "idea_direction": brief.get("idea_direction") or "Surprise me",
@@ -520,6 +528,7 @@ def run_detail(project_root: Path, run_root: Path, supervisor: RunSupervisor) ->
         "content_mode": "fiction",
         "content_format": "narrative",
         "narration_pace": "standard",
+        "orientation": "landscape",
         "video_style": "still_image",
         "remotion_asset_policy": "stock_preferred",
         "remotion_allow_share_alike": False,

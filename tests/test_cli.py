@@ -12,6 +12,23 @@ def test_generate_is_end_to_end_by_default() -> None:
     )
 
     assert args.stop_after is None
+    assert args.orientation is None
+
+
+def test_generate_accepts_portrait_orientation_override() -> None:
+    args = build_parser().parse_args(
+        [
+            "generate",
+            "--config",
+            "config.toml",
+            "--brief",
+            "brief.toml",
+            "--orientation",
+            "portrait",
+        ]
+    )
+
+    assert args.orientation == "portrait"
 
 
 def test_runs_prune_is_dry_run_by_default() -> None:

@@ -153,6 +153,7 @@ def estimate_cost(
             image.backend_id,
             delivery_width=config.delivery_width,
             delivery_height=config.delivery_height,
+            orientation=config.orientation,
         )
         pixel_factor = max(
             1.0,

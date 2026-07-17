@@ -6,7 +6,7 @@ import shutil
 import pytest
 
 from video_generator.config import resolve_config
-from video_generator.contracts import Quality
+from video_generator.contracts import Quality, VideoOrientation
 from video_generator.errors import ConfigurationError
 from video_generator.preflight import _voice_checks, estimate_cost
 
@@ -26,6 +26,35 @@ def test_custom_style_id_is_supported(tmp_path: Path) -> None:
     config = resolve_config(tmp_path / "config.toml")
 
     assert config.style == "soft_watercolor"
+
+
+@pytest.mark.parametrize(
+    ("quality", "expected"),
+    [("draft", (720, 1280)), ("final", (1080, 1920))],
+)
+def test_portrait_orientation_resolves_vertical_delivery_dimensions(
+    tmp_path: Path,
+    quality: str,
+    expected: tuple[int, int],
+) -> None:
+    source = Path(__file__).resolve().parents[1] / "config.example.toml"
+    content = source.read_text(encoding="utf-8").replace(
+        'orientation = "landscape"',
+        'orientation = "portrait"',
+    ).replace(
+        'quality = "draft"',
+        f'quality = "{quality}"',
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname='fixture'\nversion='0.0.0'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "config.toml").write_text(content, encoding="utf-8")
+
+    config = resolve_config(tmp_path / "config.toml")
+
+    assert config.orientation is VideoOrientation.PORTRAIT
+    assert (config.delivery_width, config.delivery_height) == expected
 
 
 def test_elevenlabs_voice_id_falls_back_to_environment(tmp_path: Path) -> None:

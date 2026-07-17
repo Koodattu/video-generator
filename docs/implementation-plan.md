@@ -19,8 +19,8 @@ The selectable `remotion_explainer` branch is implemented without changing the d
   selection response. Python owns IDs, timing, frames, paths, downloads, rights policy, transitions,
   motion, generated-image requests, and rendering.
 
-Deliberately deferred are arbitrary model-generated React/components, OTIO interchange, portrait or
-square compositions, selector/highlight authoring for evidence screenshots, a general nonlinear editor,
+Deliberately deferred are arbitrary model-generated React/components, OTIO interchange, square
+compositions, selector/highlight authoring for evidence screenshots, a general nonlinear editor,
 and generative video clips. GIPHY is excluded because its ordinary API usage is a poor fit for durable
 local Run assets; the discontinued Tenor API is also excluded. Owned local GIF/video files and eligible
 Commons animation provide the supported animated-media paths.
@@ -105,7 +105,7 @@ Exit checks:
 
 - a 10–30-second fixture renders on the currently installed Windows FFmpeg;
 - Scene cuts, captions, narration, and music all derive from the same Timeline;
-- output is 16:9, 30 fps, `yuv420p`, fast-start MP4, matches the Narration Timeline rounded to the frame grid, and never exceeds the hard budget;
+- output uses the selected 16:9 or 9:16 frame, 30 fps, `yuv420p`, fast-start MP4, matches the Narration Timeline rounded to the frame grid, and never exceeds the hard budget;
 - caption text and time spans are identical across SRT, selectable MP4, and burned ASS variants;
 - narration remains intelligible and the mix does not clip.
 
@@ -142,7 +142,7 @@ Deliver:
 
 - GPT-5.6 Terra as the curated default, with model access verified by live Preflight;
 - Responses structured-output and bounded web-search adapters;
-- separately assigned GPT Image 2 prompt compiler with legal 16:9 generation dimensions and reference inputs;
+- separately assigned GPT Image 2 prompt compiler with legal orientation-aware generation dimensions and reference inputs;
 - cloud profile cost and usage accounting;
 - conformance fixtures shared with the Gemini path.
 

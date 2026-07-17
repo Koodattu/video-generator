@@ -11,6 +11,7 @@ from video_generator.contracts import (
     ScriptScene,
     StyleProfile,
     StoryOutline,
+    VideoOrientation,
     VisualBrief,
     VisualPlan,
 )
@@ -194,8 +195,63 @@ def test_qwen_image_uses_its_documented_native_generation_size() -> None:
     ) == (1024, 576)
 
 
-def test_non_qwen_image_request_still_requires_exact_widescreen_dimensions() -> None:
-    with pytest.raises(ValueError, match="16:9 aspect ratio"):
+@pytest.mark.parametrize(
+    ("backend_id", "expected"),
+    [
+        ("openai:gpt-image-2", (1152, 2048)),
+        ("gemini:gemini-3.1-flash-image", (1152, 2048)),
+        ("local:flux.2-klein-4b", (576, 1024)),
+        ("local:z-image-turbo", (576, 1024)),
+        ("local:ideogram-4-nf4", (576, 1024)),
+        ("local:qwen-image-2512-nf4", (928, 1664)),
+        ("deterministic:stick", (720, 1280)),
+    ],
+)
+def test_portrait_generation_dimensions_are_backend_native(
+    backend_id: str,
+    expected: tuple[int, int],
+) -> None:
+    assert image_generation_dimensions(
+        backend_id,
+        delivery_width=720,
+        delivery_height=1280,
+        orientation=VideoOrientation.PORTRAIT,
+    ) == expected
+
+
+def test_portrait_image_request_requires_matching_aspect_setting() -> None:
+    request = ImageRequest(
+        scene_id="scene-001",
+        target_backend_id="local:flux.2-klein-4b",
+        prompt="A clear vertical winter shelter diagram.",
+        width=576,
+        height=1024,
+        settings=ImageGenerationSettings(aspect_ratio="9:16"),
+    )
+
+    assert request.settings.aspect_ratio == "9:16"
+    qwen_request = ImageRequest(
+        scene_id="scene-001",
+        target_backend_id="local:qwen-image-2512-nf4",
+        prompt="A clear vertical winter shelter diagram.",
+        width=928,
+        height=1664,
+        settings=ImageGenerationSettings(aspect_ratio="9:16"),
+    )
+    assert (qwen_request.width, qwen_request.height) == (928, 1664)
+
+    with pytest.raises(ValueError, match="match settings.aspect_ratio"):
+        ImageRequest(
+            scene_id="scene-001",
+            target_backend_id="local:flux.2-klein-4b",
+            prompt="A clear vertical winter shelter diagram.",
+            width=576,
+            height=1024,
+        )
+
+
+def test_non_qwen_image_request_still_requires_the_selected_aspect_ratio() -> None:
+    with pytest.raises(ValueError, match="match settings.aspect_ratio"):
         ImageRequest(
             scene_id="scene-001",
             target_backend_id="local:flux.2-klein-4b",
@@ -276,6 +332,29 @@ def test_gemini_request_uses_host_owned_jpeg_format() -> None:
     assert request.settings.output_format == "jpeg"
     assert request.settings.image_size == "2K"
     assert request.settings.aspect_ratio == "16:9"
+
+
+def test_canonical_portrait_request_uses_host_owned_aspect_ratio() -> None:
+    compiled = ImageRequest(
+        scene_id="scene-001",
+        target_backend_id="gemini:gemini-3.1-flash-image",
+        prompt="A fox beside an amber lantern in a tall forest frame.",
+        width=2048,
+        height=1152,
+    )
+
+    request = WorkflowEngine._canonical_image_request(
+        compiled,
+        scene_id="scene-001",
+        target_backend_id="gemini:gemini-3.1-flash-image",
+        width=1152,
+        height=2048,
+        quality="low",
+        reference_paths=[],
+    )
+
+    assert (request.width, request.height) == (1152, 2048)
+    assert request.settings.aspect_ratio == "9:16"
 
 
 def test_image_prompt_language_validation_rejects_finnish() -> None:

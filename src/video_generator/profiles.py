@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from .contracts import BackendDescriptor, OutputLanguage, ProtocolName, TASK_IDS
+from .contracts import (
+    BackendDescriptor,
+    OutputLanguage,
+    ProtocolName,
+    TASK_IDS,
+    VideoOrientation,
+)
 from .costs import PRICING_SNAPSHOT
 
 
-PROFILE_VERSION = "2026-07-17.v12"
+PROFILE_VERSION = "2026-07-17.v13"
 HIGGS_TTS_BACKEND_ID = "local:higgs-tts-3-4b"
 
 BACKEND_SELECTION_TIERS: dict[str, str] = {
@@ -49,18 +55,22 @@ def image_generation_dimensions(
     *,
     delivery_width: int,
     delivery_height: int,
+    orientation: VideoOrientation = VideoOrientation.LANDSCAPE,
 ) -> tuple[int, int]:
+    def oriented(width: int, height: int) -> tuple[int, int]:
+        return (height, width) if orientation is VideoOrientation.PORTRAIT else (width, height)
+
     if backend_id == "local:qwen-image-2512-nf4":
-        return 1664, 928
+        return oriented(1664, 928)
     if backend_id in {
         "local:flux.2-klein-4b",
         "local:z-image-turbo",
         "local:ideogram-4-nf4",
     }:
-        return 1024, 576
+        return oriented(1024, 576)
     if backend_id == "deterministic:stick":
         return delivery_width, delivery_height
-    return 2048, 1152
+    return oriented(2048, 1152)
 
 
 def _all_languages() -> set[OutputLanguage]:

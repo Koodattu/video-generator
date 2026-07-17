@@ -37,6 +37,7 @@ from .contracts import (
     FactualRevisedScript,
     FactualReviewReport,
     ImageAsset,
+    ImageGenerationSettings,
     ImageRequest,
     MediaReference,
     MAX_CADENCED_SHOTS,
@@ -882,7 +883,7 @@ class WorkflowEngine:
                 "delivery": {
                     "width": self.config.delivery_width,
                     "height": self.config.delivery_height,
-                    "aspect_ratio": "16:9",
+                    "aspect_ratio": self.config.orientation.aspect_ratio,
                 },
             }
             if factual_visual_grounding is not None:
@@ -2863,6 +2864,7 @@ class WorkflowEngine:
         style_profile: dict[str, Any],
         character_identities: Sequence[dict[str, Any]],
         has_previous: bool,
+        aspect_ratio: Literal["16:9", "9:16"] = "16:9",
     ) -> VisualBriefContent:
         depiction_text = depiction.depiction.strip()
         character_ids = [
@@ -2905,7 +2907,8 @@ class WorkflowEngine:
             emotion="Neutral focused observation.",
             environment=str(style_profile.get("background") or "a sparse neutral setting"),
             composition=(
-                "One static high-contrast cognitive anchor centered in a clear 16:9 still frame."
+                "One static high-contrast cognitive anchor centered in a clear "
+                f"{aspect_ratio} still frame."
             ),
             must_show=[depiction_text],
             must_avoid=must_avoid,
@@ -2929,12 +2932,16 @@ class WorkflowEngine:
         visual_brief: Any,
         style_profile: Any,
         characters: Sequence[Any],
+        aspect_ratio: Literal["16:9", "9:16"] = "16:9",
     ) -> ImagePromptContent:
         def joined(values: Sequence[str]) -> str:
             return ", ".join(value.strip() for value in values if value.strip())
 
         parts = [
-            "Single still image in a clear 16:9 composition.",
+            (
+                "Single still image in a clear "
+                f"{aspect_ratio} composition."
+            ),
             f"Approved story moment: {visual_brief.story_moment.strip()}.",
             f"Visible subjects: {joined(visual_brief.subjects)}.",
             f"Approved visible action or static arrangement: {visual_brief.action.strip()}.",
@@ -4488,6 +4495,7 @@ class WorkflowEngine:
                             style_profile=style_data,
                             character_identities=characters,
                             has_previous=previous_visual is not None,
+                            aspect_ratio=self.config.orientation.aspect_ratio,
                         )
                     )
 
@@ -4512,6 +4520,7 @@ class WorkflowEngine:
                     style_profile=style_data,
                     character_identities=characters,
                     has_previous=previous_visual is not None,
+                    aspect_ratio=self.config.orientation.aspect_ratio,
                 )
                 validate_visual_content(content)
             else:
@@ -10028,7 +10037,9 @@ class WorkflowEngine:
             target_backend_id,
             delivery_width=self.config.delivery_width,
             delivery_height=self.config.delivery_height,
+            orientation=self.config.orientation,
         )
+        generation_aspect_ratio = self.config.orientation.aspect_ratio
         characters_by_id = {
             character.character_id: character for character in visual_plan.characters
         }
@@ -10071,6 +10082,7 @@ class WorkflowEngine:
                 },
                 "generation_width": generation_width,
                 "generation_height": generation_height,
+                "generation_settings": {"aspect_ratio": generation_aspect_ratio},
                 "image_quality": "low" if self.config.quality is Quality.DRAFT else "high",
                 "reference_paths": [],
             }
@@ -10107,6 +10119,7 @@ class WorkflowEngine:
                             characters_by_id[character_id]
                             for character_id in visual_brief.character_ids
                         ],
+                        aspect_ratio=generation_aspect_ratio,
                     )
                     item_usage = []
                 else:
@@ -10141,7 +10154,7 @@ class WorkflowEngine:
                     "height": generation_height,
                     "quality": item_input["image_quality"],
                     "reference_paths": item_input["reference_paths"],
-                    "settings": {},
+                    "settings": {"aspect_ratio": generation_aspect_ratio},
                 }
                 if isinstance(visual_plan, TimedVisualPlan):
                     request_data["shot_id"] = visual_id
@@ -10200,7 +10213,13 @@ class WorkflowEngine:
                     target_image_backend=target_backend_id,
                     invariant=self._validate_image_request_language,
                 )
-                image_request = request_model.model_validate(execution.artifact)
+                artifact_data = dict(execution.artifact)
+                artifact_settings = artifact_data.get("settings")
+                artifact_data["settings"] = {
+                    **(artifact_settings if isinstance(artifact_settings, dict) else {}),
+                    "aspect_ratio": generation_aspect_ratio,
+                }
+                image_request = request_model.model_validate(artifact_data)
                 image_request = self._canonical_image_request(
                     image_request,
                     scene_id=visual_brief.scene_id,
@@ -10253,7 +10272,10 @@ class WorkflowEngine:
         reference_paths: list[str],
         shot_id: str | None = None,
     ) -> ImageRequestLike:
-        settings = image_request.settings
+        aspect_ratio = "9:16" if height > width else "16:9"
+        settings = image_request.settings.model_copy(
+            update={"aspect_ratio": aspect_ratio}
+        )
         if target_backend_id == "local:flux.2-klein-4b":
             settings = settings.model_copy(
                 update={"inference_steps": 4, "guidance_scale": 1.0}
@@ -10286,7 +10308,6 @@ class WorkflowEngine:
             settings = settings.model_copy(
                 update={
                     "output_format": "jpeg",
-                    "aspect_ratio": "16:9",
                     "image_size": "2K" if max(width, height) >= 1600 else "1K",
                 }
             )
@@ -11257,6 +11278,12 @@ class WorkflowEngine:
             "content_mode": self.config.content_mode.value,
             "content_format": self.config.content_format.value,
             "output_language": self.config.output_language.value,
+            "delivery": {
+                "width": self.config.delivery_width,
+                "height": self.config.delivery_height,
+                "orientation": self.config.orientation.value,
+                "aspect_ratio": self.config.orientation.aspect_ratio,
+            },
             "brief_constraints": {
                 "tone": self.brief.tone,
                 "must_include": [
@@ -11373,6 +11400,7 @@ class WorkflowEngine:
                 "content_mode": self.config.content_mode.value,
                 "content_format": self.config.content_format.value,
                 "output_language": self.config.output_language.value,
+                "delivery": input_data["delivery"],
                 "brief_constraints": input_data["brief_constraints"],
             }
 
@@ -11658,7 +11686,8 @@ class WorkflowEngine:
                         ),
                     )
             generated_prompt = (
-                "Editorial 16:9 visual for a fast narrated explainer. "
+                f"Editorial {self.config.orientation.aspect_ratio} "
+                f"{self.config.orientation.value} visual for a fast narrated explainer. "
                 + (f"Requested subject: {shot.asset_query}. " if shot.asset_query else "")
                 + "One immediate focal subject, high contrast, clean composition, no written text, "
                 "no logos, no watermark, no interface chrome."
@@ -11697,6 +11726,7 @@ class WorkflowEngine:
             backend_id,
             delivery_width=self.config.delivery_width,
             delivery_height=self.config.delivery_height,
+            orientation=self.config.orientation,
         )
         image_request = ImageRequest(
             scene_id=scene_id,
@@ -11706,6 +11736,9 @@ class WorkflowEngine:
             width=generation_width,
             height=generation_height,
             quality="low" if self.config.quality is Quality.DRAFT else "high",
+            settings=ImageGenerationSettings(
+                aspect_ratio=self.config.orientation.aspect_ratio
+            ),
         )
         image_request = self._canonical_image_request(
             image_request,
@@ -11869,7 +11902,10 @@ class WorkflowEngine:
                 width=self.config.delivery_width,
                 height=self.config.delivery_height,
                 duration_seconds=0,
-                transform="Headless local Chromium screenshot followed by exact 16:9 PNG normalization",
+                transform=(
+                    "Headless local Chromium screenshot followed by exact "
+                    f"{self.config.delivery_width}x{self.config.delivery_height} PNG normalization"
+                ),
                 project_root=self.project_root,
             )
             return asset, [], warnings
@@ -11884,6 +11920,7 @@ class WorkflowEngine:
                 project_root=self.project_root,
                 policy=self.config.remotion_asset_policy,
                 language=self.config.output_language,
+                orientation=self.config.orientation,
                 allow_share_alike=self.config.remotion_allow_share_alike,
                 environment=self.environment,
             )
@@ -11927,6 +11964,12 @@ class WorkflowEngine:
                     "selection_strategy": "single-remotion-asset-v1",
                     "asset_request": request.model_dump(mode="json"),
                     "candidates": [candidate.selection_payload() for candidate in candidates],
+                    "delivery": {
+                        "width": self.config.delivery_width,
+                        "height": self.config.delivery_height,
+                        "orientation": self.config.orientation.value,
+                        "aspect_ratio": self.config.orientation.aspect_ratio,
+                    },
                 },
                 RemotionAssetChoice,
                 max_output_tokens=256,

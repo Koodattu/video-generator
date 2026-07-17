@@ -16,6 +16,7 @@ from .contracts import (
     PUBLIC_STAGES,
     Quality,
     ResolvedRunConfig,
+    VideoOrientation,
     VideoStyle,
 )
 from .errors import ConfigurationError, ErrorKind, VideoGeneratorError
@@ -261,6 +262,7 @@ def _command_generate(args: argparse.Namespace) -> int:
         "profile": args.profile,
         "output_language": args.language,
         "duration_seconds": args.duration_seconds,
+        "orientation": args.orientation,
     }
     if args.offline is not None:
         overrides["offline"] = args.offline
@@ -656,6 +658,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--profile", choices=sorted(name for name in PROFILES if name != "deterministic-test"))
     generate.add_argument("--language", choices=[item.value for item in OutputLanguage])
     generate.add_argument("--duration-seconds", type=float)
+    generate.add_argument("--orientation", choices=[item.value for item in VideoOrientation])
     generate.add_argument("--video-style", choices=[item.value for item in VideoStyle])
     generate.add_argument("--offline", action=argparse.BooleanOptionalAction, default=None)
     generate.add_argument("--stop-after", choices=PUBLIC_STAGES)

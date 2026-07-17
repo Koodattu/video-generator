@@ -81,7 +81,7 @@ Only research may iterate through tool calls, and it has hard query/source limit
 
 The intended user-controlled files are:
 
-- `config.toml`: Run Profile, Output Language, duration, quality, feature switches, Voice Profile references, and advanced task overrides;
+- `config.toml`: Run Profile, Output Language, duration, landscape/portrait orientation, quality, feature switches, Voice Profile references, and advanced task overrides;
 - `brief.toml`: editorial direction, optional anchor/question fields, and creative boundaries;
 - `local-llm.toml`: one audited local GGUF/runtime/context/speculation benchmark variant;
 - `.env`: credentials only.
@@ -199,10 +199,10 @@ Generative models are the intended production path. The deterministic stick rend
 
 The continuity target is recognizable semantics, not pixel identity. Signature traits, recurring props, color anchors, and relative relationships persist while poses and small drawing inconsistencies may vary. Where a Backend supports references, selected character sheets or prior images can be attached. Final-quality profiles may score each image against brief fulfillment, style, identity, composition, forbidden text/watermarks, and family-safety. All failed images are regenerated in at most one targeted batch, then those replacements are reviewed once more. They cannot trigger another regeneration; a remaining hard failure stops a strict Run.
 
-Generated images are normalized deterministically to the Delivery Format. For example, GPT Image 2
-generates at a legal 16:9 size such as 2048×1152 rather than invalid 1920×1080. Qwen-Image-2512 uses
-its documented 1664×928 landscape preset. The media layer then scales/crops either raw result to the
-exact delivery frame.
+Generated images are normalized deterministically to the selected Delivery Format. For example,
+GPT Image 2 generates at 2048×1152 for landscape or 1152×2048 for portrait rather than using an
+invalid API edge such as 1080. Qwen-Image-2512 uses its documented 1664×928 or 928×1664 preset. The
+media layer then scales/crops the raw result to the exact delivery frame.
 
 The Remotion branch uses eight audited templates rather than model-generated React:
 `kinetic_hook`, `headline_zoom`, `source_screenshot`, `code_reveal`, `diagram_flow`,
@@ -270,7 +270,7 @@ Preflight checks FFmpeg capabilities rather than assuming a version string is su
 Media QC verifies:
 
 - expected streams and codecs;
-- 16:9 resolution and 30 fps;
+- selected 16:9 or 9:16 resolution and 30 fps;
 - monotonically ordered Scene and caption timing;
 - duration equal to the Narration Timeline rounded to the frame grid and at or below the hard Duration Budget;
 - no missing/corrupt image or audio asset;
@@ -370,7 +370,7 @@ One reusable structured-task executor serves the text roles, and one static regi
 - arbitrary provider plugins or user-authored workflows;
 - multi-speaker dialogue or mid-Run language switching;
 - model-generated React/components, arbitrary transition graphs, or general timeline code generation;
-- portrait/square delivery or generative video-model clips;
+- square delivery or generative video-model clips;
 - DOM-selector/highlight authoring for evidence screenshots and arbitrary web-page automation;
 - concurrent local GPU models, multi-GPU scheduling, or VRAM bin-packing;
 - pixel-perfect recurring characters;

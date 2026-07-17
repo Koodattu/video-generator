@@ -103,7 +103,9 @@ Its hard limitations are the noncommercial license, gated download, CUDA/NF4 Win
 
 ### Qwen-Image caveat
 
-Qwen-Image-2512’s official “16:9” preset is `1664×928`, which is approximately 1.793:1—not exact 16:9. It would violate this repository’s aspect-ratio tolerance. Exact `1280×720` and `2048×1152` must be tested rather than assuming the documented preset is acceptable.
+Qwen-Image-2512’s official presets are `1664×928` for landscape and `928×1664` for portrait. They
+are approximate rather than mathematically exact ratios, so the Image Request contract treats those
+two documented Qwen sizes as explicit native exceptions before normalizing to delivery dimensions.
 
 Qwen-Image 2.0 has been announced, but as of this report the official project does not provide a corresponding downloadable local open-weight checkpoint. For local work, 2512 remains the relevant Qwen candidate.
 

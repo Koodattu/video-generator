@@ -10,7 +10,10 @@ output_language = "fi"
 # This is both the goal and hard limit. The accepted result is 90-100% of it.
 duration_seconds = 90
 
-# Draft: 1280x720. Final: 1920x1080. Both are 16:9 at 30 fps.
+# landscape is 16:9; portrait is 9:16. Choose this before starting a Run.
+orientation = "landscape"
+
+# Draft: 1280x720 or 720x1280. Final: 1920x1080 or 1080x1920, at 30 fps.
 quality = "draft"
 # Independent content axes. mythbuster requires factual mode.
 content_mode = "fiction"

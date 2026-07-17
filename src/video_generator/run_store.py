@@ -938,6 +938,7 @@ CONFIG_IMPACT: dict[str, str] = {
     "research_query_limit": "research",
     "research_source_limit": "research",
     "voice": "narration",
+    "orientation": "visual-plan",
     "video_style": "research",
     "style": "visual-plan",
     "style_description": "visual-plan",

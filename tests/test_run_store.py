@@ -8,6 +8,7 @@ from video_generator.contracts import (
     ContentFormat,
     CreativeBrief,
     NarrationPace,
+    VideoOrientation,
     VideoStyle,
     VisualShotMode,
 )
@@ -147,6 +148,20 @@ def test_claim_inventory_backend_change_invalidates_script_revision(resolved_con
     changed = resolved_config.model_copy(update={"task_bindings": bindings})
 
     assert earliest_config_impact(resolved_config, changed) == "script-revision"
+
+
+def test_orientation_change_invalidates_caption_layout_and_visuals(
+    resolved_config,
+) -> None:
+    changed = resolved_config.model_copy(
+        update={
+            "orientation": VideoOrientation.PORTRAIT,
+            "delivery_width": 720,
+            "delivery_height": 1280,
+        }
+    )
+
+    assert earliest_config_impact(resolved_config, changed) == "captions"
 
 
 def test_switching_to_or_from_higgs_invalidates_script_draft(resolved_config) -> None:
