@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from video_generator.contracts import ContentFormat, ContentMode, OutputLanguage
+from video_generator.contracts import ContentFormat, ContentMode, OutputLanguage, ProtocolName
+from video_generator.profiles import BACKEND_DESCRIPTORS
 from video_generator.prompting import (
     PROMPT_SET_VERSION,
     SHARED_RULES,
@@ -23,6 +24,38 @@ def test_image_prompt_compiler_always_uses_english() -> None:
     assert "Required ImageRequest prompt language: English" in prompt.instructions
     assert "Selected Output Language: fi" not in prompt.instructions
     assert "ImageRequest.negative_prompt entirely in English" in prompt.instructions
+
+
+def test_image_prompt_compiler_supports_every_local_image_backend() -> None:
+    expected_markers = {
+        "local:flux.2-klein-4b": "FLUX.2 Klein 4B",
+        "local:z-image-turbo": "Z-Image Turbo",
+        "local:ideogram-4-nf4": "Ideogram 4 NF4",
+        "local:qwen-image-2512-nf4": "Qwen-Image-2512 NF4",
+    }
+
+    for backend_id, marker in expected_markers.items():
+        prompt = PromptLibrary().get(
+            "image_prompt_compile",
+            language=OutputLanguage.ENGLISH,
+            target_image_backend=backend_id,
+        )
+        assert marker in prompt.instructions
+
+
+def test_image_prompt_compiler_supports_every_registered_image_backend() -> None:
+    image_backends = {
+        backend_id
+        for backend_id, descriptor in BACKEND_DESCRIPTORS.items()
+        if ProtocolName.IMAGE in descriptor.protocols
+    }
+
+    for backend_id in image_backends:
+        PromptLibrary().get(
+            "image_prompt_compile",
+            language=OutputLanguage.ENGLISH,
+            target_image_backend=backend_id,
+        )
 
 
 def test_ordinary_tasks_keep_the_run_language() -> None:

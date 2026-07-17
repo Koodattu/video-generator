@@ -207,6 +207,7 @@ class _RunnerProcess:
     health: dict[str, Any] = field(default_factory=dict)
     gpu_baseline: dict[str, Any] = field(default_factory=dict)
     container_name: str = ""
+    voice_scratch: Path | None = None
 
 
 class RunnerManager:
@@ -710,6 +711,7 @@ class RunnerManager:
         spec: RunnerSpec,
         *,
         container_name: str = "",
+        voice_scratch: Path | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         inherited_names = {
             "PATH",
@@ -761,6 +763,16 @@ class RunnerManager:
                         "VIDEO_GENERATOR_DOCKER_SERVER_REVISION": spec.docker.server_revision,
                     }
                 )
+                if spec.model_family == "higgs-docker":
+                    if voice_scratch is None:
+                        raise BackendError(
+                            "Higgs Docker runner is missing its managed voice scratch directory",
+                            kind=ErrorKind.NOT_READY,
+                            action=f"Rerun Setup for {spec.backend_id}.",
+                        )
+                    environment["VIDEO_GENERATOR_HIGGS_VOICE_SCRATCH"] = str(
+                        voice_scratch
+                    )
             return list(spec.command), environment
         wsl = shutil.which("wsl.exe") or shutil.which("wsl")
         if not wsl or not spec.wsl_distribution:
@@ -801,20 +813,50 @@ class RunnerManager:
         return command, environment
 
     def _start(self, spec: RunnerSpec) -> _RunnerProcess:
-        if not self._lease_held:
-            self.lease.acquire()
-            self._lease_held = True
         container_name = (
             f"video-generator-{runner_slug(spec.backend_id)}-{uuid.uuid4().hex[:12]}"
             if spec.platform == "docker"
             else ""
         )
-        command, environment = self._command(spec, container_name=container_name)
+        voice_scratch: Path | None = None
+        voice_scratch_created = False
+        try:
+            if spec.platform == "docker" and spec.model_family == "higgs-docker":
+                scratch_parent = (
+                    self.cache_root
+                    / "runtimes"
+                    / "local--higgs-tts-3-4b"
+                    / "voice-scratch"
+                )
+                scratch_parent.mkdir(parents=True, exist_ok=True)
+                resolved_parent = scratch_parent.resolve()
+                resolved_parent.relative_to(self.cache_root)
+                voice_scratch = resolved_parent / container_name
+                voice_scratch.mkdir()
+                voice_scratch_created = True
+                voice_scratch = voice_scratch.resolve()
+                if voice_scratch.parent != resolved_parent:
+                    raise BackendError(
+                        "Higgs Docker voice scratch escaped the managed runtime cache",
+                        kind=ErrorKind.NOT_READY,
+                    )
+            command, environment = self._command(
+                spec,
+                container_name=container_name,
+                voice_scratch=voice_scratch,
+            )
+        except BaseException:
+            if voice_scratch is not None and voice_scratch_created:
+                self._remove_managed_voice_scratch(voice_scratch, container_name)
+            raise
         logs = self.run_root / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         stderr_handle = (logs / f"runner-{runner_slug(spec.backend_id)}.log").open(
             "a", encoding="utf-8", errors="replace"
         )
+        if not self._lease_held:
+            self.lease.acquire()
+            self._lease_held = True
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         gpu_baseline: dict[str, Any] = {}
         if spec.requires_cuda or spec.model_family == "llama-server":
@@ -842,6 +884,8 @@ class RunnerManager:
             )
         except OSError as exc:
             stderr_handle.close()
+            if voice_scratch is not None:
+                self._remove_managed_voice_scratch(voice_scratch, container_name)
             raise BackendError(
                 f"could not start runner for {spec.backend_id}: {exc}", kind=ErrorKind.NOT_READY
             ) from exc
@@ -877,6 +921,7 @@ class RunnerManager:
             stderr_handle,
             gpu_baseline=gpu_baseline,
             container_name=container_name,
+            voice_scratch=voice_scratch,
         )
         self.current = running
         try:
@@ -994,6 +1039,31 @@ class RunnerManager:
         )
         return completed.returncode == 0
 
+    def _remove_managed_voice_scratch(
+        self,
+        scratch: Path,
+        container_name: str,
+    ) -> bool:
+        if not self._valid_managed_container_name(container_name):
+            return False
+        expected_parent = (
+            self.cache_root
+            / "runtimes"
+            / "local--higgs-tts-3-4b"
+            / "voice-scratch"
+        ).resolve()
+        try:
+            resolved = scratch.resolve()
+            resolved.relative_to(expected_parent)
+        except (OSError, ValueError):
+            return False
+        if resolved.parent != expected_parent or resolved.name != container_name:
+            return False
+        if not resolved.exists():
+            return True
+        shutil.rmtree(resolved)
+        return not resolved.exists()
+
     @classmethod
     def _remove_managed_container(cls, container_name: str) -> bool:
         if not cls._valid_managed_container_name(container_name):
@@ -1041,10 +1111,22 @@ class RunnerManager:
                 self._kill_process_tree(process)
         container_absent = True
         container_name = str(getattr(runner, "container_name", "") or "")
+        voice_scratch_absent = True
         if platform == "docker":
             container_absent = self._remove_managed_container(container_name)
             if not container_absent:
                 forced = True
+            voice_scratch = getattr(runner, "voice_scratch", None)
+            if isinstance(voice_scratch, Path):
+                voice_scratch_absent = bool(
+                    container_absent
+                    and self._remove_managed_voice_scratch(
+                        voice_scratch,
+                        container_name,
+                    )
+                )
+                if not voice_scratch_absent:
+                    forced = True
         requires_gpu_evidence = bool(
             getattr(runner.spec, "requires_cuda", False)
             or runner.spec.model_family == "llama-server"
@@ -1111,6 +1193,7 @@ class RunnerManager:
                     **lifecycle,
                     "container_name": container_name,
                     "container_absent": container_absent,
+                    "voice_scratch_absent": voice_scratch_absent,
                 }
             self.last_cleanup[runner.spec.backend_id] = lifecycle
             self._cleanup_sequence += 1

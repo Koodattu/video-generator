@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import ErrorKind, VideoGeneratorError
+from ..util import atomic_write_bytes, replace_path
 
 
 HIGGS_MODEL_ID = "bosonai/higgs-tts-3-4b"
 HIGGS_SAMPLE_RATE = 24000
+_REFERENCE_AUDIO_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}
 _SPEED_TOKENS = {
     "slow": "<|prosody:speed_slow|>",
     "standard": "",
@@ -79,6 +81,23 @@ class HiggsDockerWorker:
         self.server_revision = os.environ["VIDEO_GENERATOR_DOCKER_SERVER_REVISION"]
         self.port = int(os.environ.get("VIDEO_GENERATOR_DOCKER_INTERNAL_PORT", "8000"))
         self.model_path = paths.read_model(os.environ["VIDEO_GENERATOR_MODEL_PATH"])
+        self.voice_scratch = paths.read_runtime(
+            os.environ["VIDEO_GENERATOR_HIGGS_VOICE_SCRATCH"]
+        )
+        expected_scratch_parent = (
+            paths.runtime_root
+            / "local--higgs-tts-3-4b"
+            / "voice-scratch"
+        ).resolve()
+        if (
+            not self.voice_scratch.is_dir()
+            or self.voice_scratch.parent != expected_scratch_parent
+            or self.voice_scratch.name != self.container_name
+        ):
+            raise VideoGeneratorError(
+                "Higgs TTS voice scratch directory is not manager-owned",
+                kind=ErrorKind.NOT_READY,
+            )
         self.started_at = time.monotonic()
         self._closed = False
         try:
@@ -86,6 +105,7 @@ class HiggsDockerWorker:
             self._wait_until_healthy()
         except BaseException:
             self._remove_container(force=True)
+            self._remove_voice_scratch()
             raise
 
     def _run(
@@ -114,6 +134,7 @@ class HiggsDockerWorker:
     def _start_container(self) -> None:
         model_mount = f"type=bind,source={self.model_path},target=/models/higgs-tts-3-4b,readonly"
         run_mount = f"type=bind,source={self.paths.run_root},target=/run"
+        voice_mount = f"type=bind,source={self.voice_scratch},target=/voices,readonly"
         command = [
             "run",
             "--detach",
@@ -136,12 +157,12 @@ class HiggsDockerWorker:
             "ALL",
             "--tmpfs",
             "/tmp:rw,exec,nosuid,size=8g",
-            "--tmpfs",
-            "/voices:rw,noexec,nosuid,size=32m",
             "--mount",
             model_mount,
             "--mount",
             run_mount,
+            "--mount",
+            voice_mount,
             "--env",
             "HOME=/tmp/home",
             "--env",
@@ -215,8 +236,44 @@ class HiggsDockerWorker:
             "model_path": str(self.model_path),
             "model_id": HIGGS_MODEL_ID,
             "sample_rate": HIGGS_SAMPLE_RATE,
+            "voice_scratch": str(self.voice_scratch),
             "startup_elapsed_seconds": time.monotonic() - self.started_at,
         }
+
+    def _stage_reference(self, reference: Path) -> str:
+        if not reference.is_file():
+            raise ValueError("Higgs TTS reference audio must be a regular file")
+        suffix = reference.suffix.casefold()
+        if suffix not in _REFERENCE_AUDIO_SUFFIXES:
+            raise ValueError(f"unsupported Higgs TTS reference audio type: {suffix or '(none)'}")
+        reference_bytes = reference.read_bytes()
+        if not reference_bytes:
+            raise ValueError("Higgs TTS reference audio is empty")
+        if len(reference_bytes) > 10 * 1024 * 1024:
+            raise ValueError("Higgs TTS reference audio exceeds the 10 MiB API limit")
+        for child in self.voice_scratch.iterdir():
+            if child.is_symlink() or not child.is_file():
+                raise VideoGeneratorError(
+                    "Higgs TTS voice scratch contains an unexpected entry",
+                    kind=ErrorKind.NOT_READY,
+                )
+            child.unlink()
+        reference_digest = hashlib.sha256(reference_bytes).hexdigest()[:24]
+        filename = f"reference-{reference_digest}{suffix}"
+        staged = self.voice_scratch / filename
+        staging = self.voice_scratch.parent / f".{self.container_name}-{filename}.staging"
+        try:
+            atomic_write_bytes(staging, reference_bytes)
+            replace_path(staging, staged)
+        finally:
+            staging.unlink(missing_ok=True)
+        entries = list(self.voice_scratch.iterdir())
+        if entries != [staged] or staged.is_symlink() or not staged.is_file():
+            raise VideoGeneratorError(
+                "Higgs TTS could not isolate the selected reference audio",
+                kind=ErrorKind.NOT_READY,
+            )
+        return f"/voices/{filename}"
 
     def dispatch(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         if operation != "speech.synthesize":
@@ -225,8 +282,6 @@ class HiggsDockerWorker:
         if not voice.get("reference_audio") or not voice.get("reference_transcript"):
             raise ValueError("Higgs TTS requires an authorized reference audio file and exact transcript")
         reference = self.paths.read_private(str(voice["reference_audio"]))
-        if reference.stat().st_size > 10 * 1024 * 1024:
-            raise ValueError("Higgs TTS reference audio exceeds the 10 MiB API limit")
         transcript = self.paths.read_private(str(voice["reference_transcript"])).read_text(
             encoding="utf-8"
         ).strip()
@@ -234,10 +289,7 @@ class HiggsDockerWorker:
             raise ValueError("Higgs TTS reference transcript is empty")
         output = self.paths.output_run(str(payload["output_path"]))
         output_in_container = "/run/" + output.relative_to(self.paths.run_root).as_posix()
-        reference_digest = hashlib.sha256(reference.read_bytes()).hexdigest()[:24]
-        suffix = reference.suffix.lower() if reference.suffix else ".wav"
-        reference_in_container = f"/voices/reference-{reference_digest}{suffix}"
-        self._run(["cp", str(reference), f"{self.container_name}:{reference_in_container}"], timeout=120)
+        reference_in_container = self._stage_reference(reference)
         compiled_text, control_tokens = compile_higgs_text(
             str(payload["text"]),
             payload.get("delivery") if isinstance(payload.get("delivery"), dict) else None,
@@ -321,5 +373,32 @@ class HiggsDockerWorker:
         self._closed = absent
         return absent
 
+    def _remove_voice_scratch(self) -> bool:
+        if not self.voice_scratch.exists():
+            return True
+        expected_parent = (
+            self.paths.runtime_root
+            / "local--higgs-tts-3-4b"
+            / "voice-scratch"
+        ).resolve()
+        try:
+            resolved = self.voice_scratch.resolve()
+            resolved.relative_to(expected_parent)
+        except (OSError, ValueError):
+            return False
+        if resolved.parent != expected_parent or resolved.name != self.container_name:
+            return False
+        shutil.rmtree(resolved)
+        return not resolved.exists()
+
     def close(self) -> dict[str, Any]:
-        return {"container_absent": self._remove_container(force=False)}
+        container_absent = self._remove_container(force=False)
+        voice_scratch_absent = (
+            self._remove_voice_scratch()
+            if container_absent
+            else False
+        )
+        return {
+            "container_absent": container_absent,
+            "voice_scratch_absent": voice_scratch_absent,
+        }

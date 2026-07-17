@@ -26,6 +26,7 @@ MULTI_FORMAT_TASK_PROMPT_REVISIONS = {
     "review_constraints": "scope-aware-brief-and-remotion-plan-v2",
     "script_revision": "spoken-text-only-v1",
     "duration_repair": "spoken-text-only-v1",
+    "image_prompt_compile": "local-image-targets-v1",
     "remotion_direction": "brief-constraints-v1",
     "visual_review": "remotion-hard-failure-v1",
 }
@@ -626,6 +627,21 @@ subject mention. Put supported reference images in reference_paths.
     "local:flux.2-klein-4b": """
 Target guidance for FLUX.2 Klein 4B: use direct descriptive clauses, concrete spatial relationships,
 and a compact negative prompt. Use only four-step Klein-compatible settings exposed by the runner.
+""",
+    "local:z-image-turbo": """
+Target guidance for Z-Image Turbo: use a direct English visual description with the focal subject and
+spatial relationships first. Keep exclusions compact; the zero-guidance runner folds them into the
+positive prompt. Do not request reference images. Python owns the fixed nine-step Turbo settings.
+""",
+    "local:ideogram-4-nf4": """
+Target guidance for Ideogram 4 NF4: describe the scene and composition concretely in English. Keep
+negative constraints concise because the local runner compiles them into positive JSON constraints.
+Do not request reference images. Python owns the quality-specific sampler settings.
+""",
+    "local:qwen-image-2512-nf4": """
+Target guidance for Qwen-Image-2512 NF4: use a concrete English scene description with explicit
+subjects, actions, spatial relationships, lighting, and composition. Supply a concise native negative
+prompt and do not request reference images. Python owns the quality-specific steps and CFG setting.
 """,
     "deterministic:stick": """
 Target guidance for deterministic stick rendering: preserve the Visual Brief fields and simple 16:9

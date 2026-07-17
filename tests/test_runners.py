@@ -74,18 +74,92 @@ def test_docker_runner_command_receives_only_manager_owned_container_name(tmp_pa
         command=[sys.executable],
         environment={},
         docker=settings,
+        model_family="higgs-docker",
     )
+    voice_scratch = (
+        tmp_path
+        / ".cache"
+        / "runtimes"
+        / "local--higgs-tts-3-4b"
+        / "voice-scratch"
+        / "video-generator-local--higgs-tts-3-4b-a1b2c3d4"
+    )
+    voice_scratch.mkdir(parents=True)
 
     command, environment = manager._command(
         spec,
         container_name="video-generator-local--higgs-tts-3-4b-a1b2c3d4",
+        voice_scratch=voice_scratch,
     )
 
     assert command == [sys.executable]
     assert environment["VIDEO_GENERATOR_DOCKER_CONTAINER_NAME"].endswith("a1b2c3d4")
     assert environment["VIDEO_GENERATOR_DOCKER_IMAGE_REFERENCE"] == settings.image_reference
+    assert environment["VIDEO_GENERATOR_HIGGS_VOICE_SCRATCH"] == str(voice_scratch)
     with pytest.raises(BackendError, match="missing managed runtime settings"):
         manager._command(spec)
+
+
+def test_manager_removes_only_the_recorded_higgs_voice_scratch(tmp_path: Path) -> None:
+    manager = RunnerManager(project_root=tmp_path, run_root=tmp_path / "runs" / "fixture")
+    container_name = "video-generator-local--higgs-tts-3-4b-a1b2c3d4"
+    scratch_parent = (
+        tmp_path
+        / ".cache"
+        / "runtimes"
+        / "local--higgs-tts-3-4b"
+        / "voice-scratch"
+    )
+    scratch = scratch_parent / container_name
+    unrelated = scratch_parent / "video-generator-local--higgs-tts-3-4b-unrelated"
+    scratch.mkdir(parents=True)
+    unrelated.mkdir()
+    (scratch / "reference.wav").write_bytes(b"private")
+    (unrelated / "reference.wav").write_bytes(b"unrelated")
+
+    assert manager._remove_managed_voice_scratch(scratch, container_name)
+    assert not scratch.exists()
+    assert unrelated.is_dir()
+
+
+def test_higgs_scratch_collision_does_not_acquire_gpu_lease_or_delete_existing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    manager = RunnerManager(project_root=tmp_path, run_root=tmp_path / "runs" / "fixture")
+    calls = {"acquire": 0}
+    manager.lease = SimpleNamespace(
+        acquire=lambda: calls.__setitem__("acquire", calls["acquire"] + 1),
+        release=lambda: None,
+    )
+    monkeypatch.setattr(
+        "video_generator.runners.uuid.uuid4",
+        lambda: SimpleNamespace(hex="a1b2c3d4e5f6" + "0" * 20),
+    )
+    container_name = "video-generator-local--higgs-tts-3-4b-a1b2c3d4e5f6"
+    existing = (
+        tmp_path
+        / ".cache"
+        / "runtimes"
+        / "local--higgs-tts-3-4b"
+        / "voice-scratch"
+        / container_name
+    )
+    existing.mkdir(parents=True)
+    marker = existing / "do-not-delete.txt"
+    marker.write_text("existing", encoding="utf-8")
+    spec = SimpleNamespace(
+        backend_id="local:higgs-tts-3-4b",
+        platform="docker",
+        model_family="higgs-docker",
+    )
+
+    with pytest.raises(FileExistsError):
+        manager._start(spec)
+
+    assert calls["acquire"] == 0
+    assert not manager._lease_held
+    assert marker.read_text(encoding="utf-8") == "existing"
 
 
 def test_runner_setup_revision_covers_host_pins_worker_and_lock(monkeypatch) -> None:
