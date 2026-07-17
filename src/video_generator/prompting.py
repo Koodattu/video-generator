@@ -13,6 +13,7 @@ from .contracts import (
     VisualShotMode,
 )
 from .costs import frozen_pricing_catalog
+from .profiles import HIGGS_TTS_BACKEND_ID
 from .schema import restricted_json_schema
 from .task_models import task_output_models
 
@@ -30,6 +31,19 @@ MULTI_FORMAT_TASK_PROMPT_REVISIONS = {
     "remotion_direction": "brief-constraints-v1",
     "visual_review": "remotion-hard-failure-v1",
 }
+HIGGS_TTS_SCRIPT_TASKS = frozenset({"script_draft", "script_revision", "duration_repair"})
+HIGGS_TTS_SCRIPT_PROMPT_REVISION = "higgs-tts-v3-authoring-v1"
+HIGGS_TTS_SCRIPT_INSTRUCTIONS = """
+Higgs TTS 3 will synthesize this narration. Optimize the spoken words for that voice model: use
+clear punctuation and complete sentence boundaries to cue phrasing; spell out abbreviations and
+unfamiliar initialisms; write names, numbers, and foreign words in a readily pronounceable form; and
+avoid dense runs of names, numerals, abbreviations, or code-switching. Express emotion through natural
+wording and rhythm.
+
+Keep canonical narration as plain spoken text. Do not emit Higgs <|...|> control tokens, stage
+directions, bracketed delivery cues, or sound-effect markup. Python owns allowlisted delivery controls
+so narration, captions, word counts, and factual review all use the same words.
+""".strip()
 
 
 SHARED_RULES = """
@@ -669,10 +683,27 @@ def _uses_legacy_prompt_pack(config: ResolvedRunConfig | None) -> bool:
     )
 
 
+def _uses_higgs_tts(config: ResolvedRunConfig | None) -> bool:
+    return (
+        config is not None
+        and config.task_bindings.get("narration_synthesis") == HIGGS_TTS_BACKEND_ID
+    )
+
+
+def _with_higgs_tts_script_instructions(
+    task_id: str,
+    config: ResolvedRunConfig | None,
+    instructions: str,
+) -> str:
+    if _uses_higgs_tts(config) and task_id in HIGGS_TTS_SCRIPT_TASKS:
+        return instructions + "\n\n" + HIGGS_TTS_SCRIPT_INSTRUCTIONS
+    return instructions
+
+
 def _task_instructions(task_id: str, config: ResolvedRunConfig | None) -> str:
     instructions = TASK_INSTRUCTIONS[task_id].strip()
     if config is None or _uses_legacy_prompt_pack(config):
-        return instructions
+        return _with_higgs_tts_script_instructions(task_id, config, instructions)
     if task_id == "research" and config.content_mode is ContentMode.FACTUAL:
         instructions = FACTUAL_RESEARCH_INSTRUCTIONS.strip()
     if task_id == "factual_review" and config.content_mode is ContentMode.FACTUAL:
@@ -836,7 +867,7 @@ ID where a minimal edit belongs.
             "Never place a schema label or host value such as pause_after_seconds, scene_id, a word-"
             "count field, or a strategy field inside spoken_text."
         )
-    return instructions
+    return _with_higgs_tts_script_instructions(task_id, config, instructions)
 
 
 @dataclass(frozen=True)
@@ -917,6 +948,11 @@ def build_frozen_assets(config: ResolvedRunConfig | None = None) -> dict[str, An
                 + (
                     f":{MULTI_FORMAT_TASK_PROMPT_REVISIONS[task_id]}"
                     if not legacy_pack and task_id in MULTI_FORMAT_TASK_PROMPT_REVISIONS
+                    else ""
+                )
+                + (
+                    f":{HIGGS_TTS_SCRIPT_PROMPT_REVISION}"
+                    if _uses_higgs_tts(config) and task_id in HIGGS_TTS_SCRIPT_TASKS
                     else ""
                 )
             ),

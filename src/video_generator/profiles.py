@@ -7,9 +7,10 @@ from .costs import PRICING_SNAPSHOT
 
 
 PROFILE_VERSION = "2026-07-17.v12"
+HIGGS_TTS_BACKEND_ID = "local:higgs-tts-3-4b"
 
 BACKEND_SELECTION_TIERS: dict[str, str] = {
-    "local:higgs-tts-3-4b": "preferred",
+    HIGGS_TTS_BACKEND_ID: "preferred",
     "local:voxcpm2": "alternative",
     "local:omnivoice": "alternative",
     "local:moss-tts-v1.5": "legacy",
@@ -35,7 +36,7 @@ EXPECTED_LOCAL_MODEL_REVISIONS: dict[str, str] = {
     "local:omnivoice": "c5fdb5ccb189668d56333f77ba2629f4cd7535f4",
     "local:moss-tts-v1.5": "be7766a6735b98bd793f7c79fb720b4d0f5d13b8",
     "local:x-voice": "7f24fe778ddf7a47e25d87e5d5153599c1d4d5c2",
-    "local:higgs-tts-3-4b": "7556c17e05201fccd9c8cc120bc216dcc7b5d561",
+    HIGGS_TTS_BACKEND_ID: "7556c17e05201fccd9c8cc120bc216dcc7b5d561",
     "local:z-image-turbo": "f332072aa78be7aecdf3ee76d5c247082da564a6",
     "local:ideogram-4-nf4": "1874bc70267ba2c823a7239e1d70dd308c8d64dc",
     "local:qwen-image-2512-nf4": "25468b98e3276ca6700de15c6628e51b7de54a26",
@@ -300,8 +301,8 @@ BACKEND_DESCRIPTORS: dict[str, BackendDescriptor] = {
             "Its pinned native-Windows Stage1 weights prohibit commercial use."
         ),
     ),
-    "local:higgs-tts-3-4b": BackendDescriptor(
-        backend_id="local:higgs-tts-3-4b",
+    HIGGS_TTS_BACKEND_ID: BackendDescriptor(
+        backend_id=HIGGS_TTS_BACKEND_ID,
         provider="local",
         model_id="bosonai/higgs-tts-3-4b",
         revision="runner-manifest-v1",
@@ -593,7 +594,7 @@ PROFILES: dict[str, dict[str, str]] = {
     "local": _profile(
         search="ddgs:duckduckgo",
         text="local:llama-server",
-        speech="local:higgs-tts-3-4b",
+        speech=HIGGS_TTS_BACKEND_ID,
         alignment="local:faster-whisper-large-v3-turbo",
         image="local:flux.2-klein-4b",
         review="local:qwen3.6-27b-q4-vision",

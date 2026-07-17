@@ -3,6 +3,8 @@ from __future__ import annotations
 from video_generator.contracts import ContentFormat, ContentMode, OutputLanguage, ProtocolName
 from video_generator.profiles import BACKEND_DESCRIPTORS
 from video_generator.prompting import (
+    HIGGS_TTS_SCRIPT_PROMPT_REVISION,
+    HIGGS_TTS_SCRIPT_TASKS,
     PROMPT_SET_VERSION,
     SHARED_RULES,
     PromptLibrary,
@@ -85,9 +87,12 @@ def test_legacy_frozen_visual_plan_keeps_original_run_language() -> None:
     assert prompts.output_language("image_prompt_compile", OutputLanguage.FINNISH) is OutputLanguage.ENGLISH
 
 
-def test_default_config_keeps_the_legacy_prompt_and_schema_pack(resolved_config) -> None:
+def test_non_higgs_config_keeps_the_legacy_prompt_and_schema_pack(resolved_config) -> None:
     baseline = build_frozen_assets()
-    configured = build_frozen_assets(resolved_config)
+    bindings = dict(resolved_config.task_bindings)
+    bindings["narration_synthesis"] = "local:omnivoice"
+    config = resolved_config.model_copy(update={"task_bindings": bindings})
+    configured = build_frozen_assets(config)
 
     assert configured["prompt_set_version"] == baseline["prompt_set_version"]
     assert configured["workflow_policy_version"] == baseline["workflow_policy_version"]
@@ -95,6 +100,46 @@ def test_default_config_keeps_the_legacy_prompt_and_schema_pack(resolved_config)
     assert configured["schemas"] == baseline["schemas"]
     assert "claim_inventory" not in baseline["prompts"]
     assert "review_type" in baseline["schemas"]["factual_review"]["properties"]
+
+
+def test_higgs_tts_adds_guidance_only_to_spoken_text_authoring_tasks(
+    resolved_config,
+) -> None:
+    higgs_assets = build_frozen_assets(resolved_config)
+    bindings = dict(resolved_config.task_bindings)
+    bindings["narration_synthesis"] = "local:omnivoice"
+    non_higgs_assets = build_frozen_assets(
+        resolved_config.model_copy(update={"task_bindings": bindings})
+    )
+
+    for task_id, prompt in higgs_assets["prompts"].items():
+        has_higgs_guidance = "Higgs TTS 3 will synthesize this narration" in prompt[
+            "instructions"
+        ]
+        if task_id in HIGGS_TTS_SCRIPT_TASKS:
+            assert has_higgs_guidance
+            assert "Do not emit Higgs <|...|> control tokens" in prompt["instructions"]
+            assert prompt["version"].endswith(f":{HIGGS_TTS_SCRIPT_PROMPT_REVISION}")
+            assert prompt["instructions"] != non_higgs_assets["prompts"][task_id][
+                "instructions"
+            ]
+            assert prompt["version"] != non_higgs_assets["prompts"][task_id]["version"]
+        else:
+            assert not has_higgs_guidance
+
+    assert all(
+        "Higgs TTS 3 will synthesize this narration" not in prompt["instructions"]
+        for prompt in non_higgs_assets["prompts"].values()
+    )
+
+    explainer_assets = build_frozen_assets(
+        resolved_config.model_copy(update={"content_format": ContentFormat.EXPLAINER})
+    )
+    assert all(
+        "Higgs TTS 3 will synthesize this narration"
+        in explainer_assets["prompts"][task_id]["instructions"]
+        for task_id in HIGGS_TTS_SCRIPT_TASKS
+    )
 
 
 def test_craft_rules_remain_task_specific() -> None:

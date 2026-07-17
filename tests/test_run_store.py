@@ -149,6 +149,28 @@ def test_claim_inventory_backend_change_invalidates_script_revision(resolved_con
     assert earliest_config_impact(resolved_config, changed) == "script-revision"
 
 
+def test_switching_to_or_from_higgs_invalidates_script_draft(resolved_config) -> None:
+    bindings = dict(resolved_config.task_bindings)
+    bindings["narration_synthesis"] = "local:omnivoice"
+    changed = resolved_config.model_copy(update={"task_bindings": bindings})
+
+    assert earliest_config_impact(resolved_config, changed) == "script-draft"
+    assert earliest_config_impact(changed, resolved_config) == "script-draft"
+
+
+def test_switching_between_other_tts_backends_still_invalidates_narration(
+    resolved_config,
+) -> None:
+    old_bindings = dict(resolved_config.task_bindings)
+    old_bindings["narration_synthesis"] = "local:omnivoice"
+    new_bindings = dict(old_bindings)
+    new_bindings["narration_synthesis"] = "local:voxcpm2"
+    old = resolved_config.model_copy(update={"task_bindings": old_bindings})
+    new = resolved_config.model_copy(update={"task_bindings": new_bindings})
+
+    assert earliest_config_impact(old, new) == "narration"
+
+
 def test_legacy_fiction_run_loads_without_claim_inventory_binding(
     tmp_path: Path,
     resolved_config,

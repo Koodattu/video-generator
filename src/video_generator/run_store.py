@@ -22,6 +22,7 @@ from .contracts import (
     utc_now,
 )
 from .errors import CheckpointError, ErrorKind, VideoGeneratorError
+from .profiles import HIGGS_TTS_BACKEND_ID
 from .util import (
     atomic_write_json,
     hash_value,
@@ -1000,7 +1001,16 @@ def earliest_config_impact(old: ResolvedRunConfig, new: ResolvedRunConfig) -> st
     old_bindings = old_data.get("task_bindings", {})
     new_bindings = new_data.get("task_bindings", {})
     for task_id, stage in TASK_STAGE_IMPACT.items():
-        if old_bindings.get(task_id) != new_bindings.get(task_id):
+        old_backend = old_bindings.get(task_id)
+        new_backend = new_bindings.get(task_id)
+        if old_backend == new_backend:
+            continue
+        if task_id == "narration_synthesis" and HIGGS_TTS_BACKEND_ID in {
+            old_backend,
+            new_backend,
+        }:
+            stages.append("script-draft")
+        else:
             stages.append(stage)
     if not stages:
         return None

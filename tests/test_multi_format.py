@@ -62,6 +62,8 @@ def test_cadenced_mythbuster_scene_count_follows_editorial_arc_not_image_target(
 
 def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> None:
     delivery = resolve_narration_delivery(OutputLanguage.ENGLISH, NarrationPace.FAST)
+    bindings = dict(resolved_config.task_bindings)
+    bindings["narration_synthesis"] = "local:omnivoice"
     config = resolved_config.model_copy(
         update={
             "content_mode": ContentMode.FACTUAL,
@@ -69,6 +71,7 @@ def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> No
             "narration_pace": NarrationPace.FAST,
             "narration_delivery_spec": delivery,
             "visual_shot_mode": VisualShotMode.CADENCED,
+            "task_bindings": bindings,
         }
     )
 
