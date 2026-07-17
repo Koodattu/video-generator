@@ -976,7 +976,7 @@ function syncActiveTasks() {
       || (task === "visual_review" && quality !== "final")
       || (["music_brief", "music_generate"].includes(task) && !music)
       || (task === "caption_alignment" && !captions && !cadencedVisuals)
-      || (["remotion_direction", "remotion_asset_select"].includes(task) && !remotion)
+      || (["remotion_rhythm", "remotion_direction", "remotion_asset_select"].includes(task) && !remotion)
       || (["visual_plan", "image_prompt_compile"].includes(task) && remotion)
       || (task === "search" && (offline || !research));
     row.classList.toggle("is-inactive", inactive);

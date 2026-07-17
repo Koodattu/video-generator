@@ -703,12 +703,128 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
                     text += " " + _fixture_sentence(language, index + len(text.split()))
                 scene["spoken_text"] = " ".join(text.split()[:desired]).rstrip(".,;:") + "."
         return {"schema_version": 1, "script": script, "dispositions": []}
+    if task == "remotion_rhythm":
+        shots = list(data.get("canonical_shot_schedule", []))
+        outline_scenes = {
+            str(scene.get("scene_id", "")): scene
+            for scene in data.get("outline_scenes", [])
+        }
+        section_candidates = [
+            index
+            for index, shot in enumerate(shots)
+            if bool(shot.get("section_boundary_candidate"))
+            and 0 < index < len(shots) - 1
+        ]
+        section_index = (
+            min(section_candidates, key=lambda index: abs(index - len(shots) / 2))
+            if section_candidates
+            else -1
+        )
+        role_functions = {
+            "modern_hook": "hook",
+            "extreme_contrast": "contrast",
+            "question": "setup",
+            "misconception": "contrast",
+            "correction": "explanation",
+            "evidence": "evidence",
+            "human_tangent": "example",
+            "synthesis": "synthesis",
+            "landing": "landing",
+        }
+        evidence_index = next(
+            (
+                index
+                for index, shot in enumerate(shots)
+                if 0 < index < len(shots) - 1
+                and shot.get("evidence_available")
+                and outline_scenes.get(str(shot.get("scene_id", "")), {}).get(
+                    "arc_role"
+                )
+                == "evidence"
+            ),
+            -1,
+        )
+        total_duration = sum(
+            float(shot.get("duration_seconds", 0)) for shot in shots
+        )
+        breathing_candidates = [
+            index
+            for index in range(1, max(1, len(shots) - 1))
+            if index != evidence_index
+        ]
+        breathing_index = (
+            min(
+                breathing_candidates,
+                key=lambda index: abs(index - len(shots) * 0.65),
+            )
+            if total_duration >= 45
+            and len(shots) >= 8
+            and breathing_candidates
+            else -1
+        )
+        functions = []
+        for index, shot in enumerate(shots):
+            scene_id = str(shot.get("scene_id", ""))
+            scene = outline_scenes.get(scene_id, {})
+            function = role_functions.get(
+                str(scene.get("arc_role", "")),
+                "explanation",
+            )
+            if index == 0:
+                function = "hook"
+            elif index == len(shots) - 1:
+                function = "landing"
+            elif index == breathing_index:
+                function = "breathing_room"
+            elif (
+                len(functions) >= 3
+                and all(previous == function for previous in functions[-3:])
+            ):
+                function = "example" if function != "example" else "explanation"
+            functions.append(function)
+        high_budget = max(2, math.ceil(len(shots) * 0.4))
+        discretionary_highs = max(0, high_budget - 2)
+        beats = []
+        for index, (shot, function) in enumerate(zip(shots, functions, strict=True)):
+            evidence_required = index == evidence_index
+            if index in {0, len(shots) - 1}:
+                attention = "high"
+            elif function == "breathing_room":
+                attention = "low"
+            elif function in {"evidence", "contrast"} and discretionary_highs:
+                attention = "high"
+                discretionary_highs -= 1
+            else:
+                attention = "medium"
+            beats.append(
+                {
+                    "beat_id": f"beat-{index + 1:03d}",
+                    "shot_id": shot["shot_id"],
+                    "function": function,
+                    "attention": attention,
+                    "evidence_required": evidence_required,
+                    "section_start": index == section_index,
+                }
+            )
+        return {"schema_version": 1, "beats": beats}
     if task == "remotion_direction":
         language = OutputLanguage(data.get("output_language", request.output_language.value))
         factual = _is_factual_content(data)
         position = int(data.get("shot_position", 1))
         total = int(data.get("shot_count", position))
         source_options = data.get("source_options", [])
+        rhythm = data.get("editorial_rhythm") or {}
+        previous_template = str(
+            (data.get("previous_direction") or {}).get("template", "")
+        )
+        next_evidence_required = bool(data.get("next_evidence_required"))
+        excerpt = str(data.get("narration_excerpt") or "One concrete narrated point.")
+        excerpt_words = excerpt.split()
+        factual_labels = [
+            excerpt_words[0] if excerpt_words else "Point",
+            excerpt_words[-1] if excerpt_words else "Result",
+        ]
+        shot_duration = float(data.get("shot_duration_seconds", 0))
         if position == 1:
             template = "kinetic_hook"
             asset_kind = "none"
@@ -721,18 +837,36 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             asset_query = ""
             body_lines = []
             sfx = "click"
-        elif source_options and position % 4 == 0:
+        elif (
+            rhythm.get("evidence_required")
+            and source_options
+            and shot_duration >= 2.5
+        ):
             template = "source_screenshot"
             asset_kind = "source_screenshot"
             asset_query = ""
             body_lines = []
             sfx = "click"
-        elif position % 3 == 0 and not factual:
+        elif (
+            source_options
+            and position % 4 == 0
+            and shot_duration >= 2.5
+            and previous_template != "source_screenshot"
+            and not next_evidence_required
+        ):
+            template = "source_screenshot"
+            asset_kind = "source_screenshot"
+            asset_query = ""
+            body_lines = []
+            sfx = "click"
+        elif position % 3 == 0:
             template = "diagram_flow"
             asset_kind = "none"
             asset_query = ""
             body_lines = (
-                ["Syöte", "Muutos", "Tulos"]
+                factual_labels
+                if factual
+                else ["Syöte", "Muutos", "Tulos"]
                 if language is OutputLanguage.FINNISH
                 else ["Input", "Change", "Result"]
             )
@@ -743,7 +877,6 @@ def _fake_structured(request: StructuredTextRequest) -> dict[str, Any]:
             asset_query = "literal snowy path visual"
             body_lines = []
             sfx = "whoosh"
-        excerpt = str(data.get("narration_excerpt") or "One concrete narrated point.")
         headline = " ".join(excerpt.split()[:8]).rstrip(".,;:") or "One clear point"
         return {
             "template": template,

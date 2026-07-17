@@ -81,7 +81,7 @@ def test_multi_format_prompt_pack_selects_timed_contracts(resolved_config) -> No
     assert models["visual_plan"] is TimedVisualPlan
     assert models["image_prompt_compile"] is TimedImageRequest
     assert assets["prompt_set_version"] == MULTI_FORMAT_PROMPT_SET_VERSION
-    assert assets["workflow_policy_version"] == 41
+    assert assets["workflow_policy_version"] == 42
     assert assets["prompts"]["research"]["version"] == (
         f"{MULTI_FORMAT_PROMPT_SET_VERSION}:research"
     )
@@ -510,6 +510,62 @@ def test_shot_schedule_is_frame_aligned_and_keeps_parent_scene_ids() -> None:
         abs(round(shot["end_seconds"] * 30) - shot["end_seconds"] * 30) < 0.0001
         for shot in schedule
     )
+
+
+def test_shot_schedule_prefers_sentence_and_clause_boundaries() -> None:
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        fps=30,
+        shot_target_seconds=3,
+        shot_min_seconds=2,
+        shot_max_seconds=5,
+    )
+    text = "Alpha beta gamma. Delta epsilon zeta; Eta theta iota."
+    script = NarrationScript(
+        title="Fixture",
+        scenes=[
+            ScriptScene(
+                scene_id="scene-001",
+                spoken_text=text,
+                pause_after_seconds=0,
+            )
+        ],
+    )
+    media = MediaReference(path="fixture.wav", sha256="0" * 64, mime_type="audio/wav")
+    timeline = NarrationTimeline(
+        narration_audio=media,
+        duration_seconds=10,
+        delivery_duration_seconds=10,
+        fps=30,
+        scenes=[
+            TimelineScene(
+                scene_id="scene-001",
+                audio=media,
+                start_seconds=0,
+                speech_end_seconds=10,
+                end_seconds=10,
+            )
+        ],
+    )
+    words = [
+        WordTiming(text=word, start_seconds=index, end_seconds=index + 0.8)
+        for index, word in enumerate(text.split())
+    ]
+    narration = NarrationBundle(script=script, timeline=timeline, items=[])
+    captions = CaptionBundle(
+        enabled=False,
+        track=CaptionTrack(language=OutputLanguage.ENGLISH, words=words),
+        scene_words={"scene-001": words},
+    )
+
+    schedule = engine._build_shot_schedule(narration, captions)
+
+    assert [shot["end_seconds"] for shot in schedule] == [2.8, 5.8, 10.0]
+    assert [shot["narration_excerpt"] for shot in schedule] == [
+        "Alpha beta gamma.",
+        "Delta epsilon zeta;",
+        "Eta theta iota.",
+    ]
 
 
 def test_delivery_presets_are_quantitative() -> None:

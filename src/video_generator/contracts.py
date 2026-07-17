@@ -173,6 +173,7 @@ TASK_IDS: tuple[str, ...] = (
     "duration_repair",
     "caption_alignment",
     "visual_plan",
+    "remotion_rhythm",
     "remotion_direction",
     "remotion_asset_select",
     "image_prompt_compile",
@@ -223,6 +224,7 @@ TASK_PROTOCOL: dict[str, ProtocolName] = {
     "duration_repair": ProtocolName.STRUCTURED_TEXT,
     "caption_alignment": ProtocolName.ALIGNMENT,
     "visual_plan": ProtocolName.STRUCTURED_TEXT,
+    "remotion_rhythm": ProtocolName.STRUCTURED_TEXT,
     "remotion_direction": ProtocolName.STRUCTURED_TEXT,
     "remotion_asset_select": ProtocolName.STRUCTURED_TEXT,
     "image_prompt_compile": ProtocolName.STRUCTURED_TEXT,
@@ -1154,6 +1156,120 @@ class RemotionTransitionPreset(StrEnum):
     SECTION_WIPE = "section_wipe"
 
 
+class RemotionBeatFunction(StrEnum):
+    HOOK = "hook"
+    SETUP = "setup"
+    EXPLANATION = "explanation"
+    EVIDENCE = "evidence"
+    EXAMPLE = "example"
+    CONTRAST = "contrast"
+    COMIC_RELIEF = "comic_relief"
+    BREATHING_ROOM = "breathing_room"
+    TRANSITION = "transition"
+    SYNTHESIS = "synthesis"
+    LANDING = "landing"
+
+
+class RemotionAttentionLevel(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class RemotionRhythmBeat(ContractModel):
+    beat_id: Annotated[str, Field(pattern=r"^beat-\d{3,}$")]
+    shot_id: Annotated[str, Field(pattern=r"^shot-\d{3,}$")]
+    function: RemotionBeatFunction
+    attention: RemotionAttentionLevel
+    evidence_required: bool = False
+    section_start: bool = False
+
+
+class RemotionRhythmPlan(VersionedContract):
+    beats: Annotated[list[RemotionRhythmBeat], Field(min_length=2, max_length=MAX_CADENCED_SHOTS)]
+
+    @model_validator(mode="after")
+    def validate_beats(self) -> "RemotionRhythmPlan":
+        expected_beats = [f"beat-{index:03d}" for index in range(1, len(self.beats) + 1)]
+        if [beat.beat_id for beat in self.beats] != expected_beats:
+            raise ValueError("Remotion Beat IDs must be contiguous and ordered")
+        expected_shots = [f"shot-{index:03d}" for index in range(1, len(self.beats) + 1)]
+        if [beat.shot_id for beat in self.beats] != expected_shots:
+            raise ValueError("Remotion rhythm must cover contiguous ordered Shot IDs")
+        if self.beats[0].function is not RemotionBeatFunction.HOOK:
+            raise ValueError("the first Remotion Beat must be a hook")
+        if self.beats[-1].function is not RemotionBeatFunction.LANDING:
+            raise ValueError("the final Remotion Beat must be a landing")
+        if self.beats[0].section_start:
+            raise ValueError("the opening Remotion Beat cannot start a new section")
+        if any(
+            beat.attention is not RemotionAttentionLevel.HIGH
+            for beat in (self.beats[0], self.beats[-1])
+        ):
+            raise ValueError("the opening and final Remotion Beats must use high attention")
+        high_attention_budget = max(2, math.ceil(len(self.beats) * 0.4))
+        if (
+            sum(
+                beat.attention is RemotionAttentionLevel.HIGH
+                for beat in self.beats
+            )
+            > high_attention_budget
+        ):
+            raise ValueError("Remotion rhythm exceeds its high-attention budget")
+        for index in range(3, len(self.beats)):
+            functions = {
+                beat.function for beat in self.beats[index - 3 : index + 1]
+            }
+            if len(functions) == 1:
+                raise ValueError(
+                    "Remotion rhythm cannot repeat one editorial function across four Beats"
+                )
+        for beat in self.beats:
+            if (
+                beat.evidence_required
+                and beat.function is not RemotionBeatFunction.EVIDENCE
+            ):
+                raise ValueError(
+                    "evidence-required Remotion Beats must use the evidence function"
+                )
+        if any(
+            previous.evidence_required and current.evidence_required
+            for previous, current in zip(self.beats, self.beats[1:])
+        ):
+            raise ValueError("evidence-required Remotion Beats cannot be consecutive")
+        return self
+
+
+class RemotionQualityFinding(ContractModel):
+    code: Literal[
+        "readable_dwell",
+        "template_repetition",
+        "motion_repetition",
+        "rapid_cut_density",
+        "section_transition",
+        "visible_evidence",
+        "rhythm_balance",
+    ]
+    shot_ids: Annotated[
+        list[Annotated[str, Field(pattern=r"^shot-\d{3,}$")]],
+        Field(min_length=1, max_length=8),
+    ]
+    message: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class RemotionQualityReport(VersionedContract):
+    passed: bool
+    findings: Annotated[list[RemotionQualityFinding], Field(max_length=150)] = Field(
+        default_factory=list
+    )
+
+    @model_validator(mode="after")
+    def validate_result(self) -> "RemotionQualityReport":
+        if (self.passed and self.findings) or (not self.passed and not self.findings):
+            raise ValueError("Remotion quality pass state must match its findings")
+        return self
+
+
 class RemotionShotDirection(ContractModel):
     template: RemotionTemplate
     headline: Annotated[str, Field(min_length=1, max_length=120)]
@@ -1293,6 +1409,8 @@ class RemotionEditPlan(VersionedContract):
     duration_frames: PositiveInt
     words: list[AnchoredWord]
     shots: list[RemotionEditShot]
+    rhythm: RemotionRhythmPlan | None = None
+    quality_report: RemotionQualityReport | None = None
 
     @model_validator(mode="after")
     def validate_plan(self) -> "RemotionEditPlan":
@@ -1333,8 +1451,34 @@ class RemotionEditPlan(VersionedContract):
             raise ValueError("Remotion duration must equal the final Shot time")
         if abs(self.duration_frames / self.fps - self.duration_seconds) > 1 / self.fps + 0.002:
             raise ValueError("Remotion frame and second durations disagree")
-        if len(self.shots) > 1 and section_transitions != 1:
-            raise ValueError("Remotion plans require exactly one section_wipe transition")
+        if self.rhythm is None:
+            if len(self.shots) > 1 and section_transitions != 1:
+                raise ValueError("legacy Remotion plans require exactly one section_wipe transition")
+        else:
+            if [beat.shot_id for beat in self.rhythm.beats] != [
+                shot.shot_id for shot in self.shots
+            ]:
+                raise ValueError("Remotion rhythm must cover the edit plan Shots exactly")
+            expected_transitions = {
+                beat.shot_id for beat in self.rhythm.beats if beat.section_start
+            }
+            actual_transitions = {
+                shot.shot_id
+                for shot in self.shots
+                if shot.transition_in is RemotionTransitionPreset.SECTION_WIPE
+            }
+            if actual_transitions != expected_transitions:
+                raise ValueError("section_wipe transitions must match rhythm section starts")
+        if self.quality_report is not None:
+            if not self.quality_report.passed:
+                raise ValueError("a promoted Remotion plan cannot contain blocking quality findings")
+            known_shot_ids = {shot.shot_id for shot in self.shots}
+            if any(
+                shot_id not in known_shot_ids
+                for finding in self.quality_report.findings
+                for shot_id in finding.shot_ids
+            ):
+                raise ValueError("Remotion quality report references an unknown Shot")
         return self
 
 

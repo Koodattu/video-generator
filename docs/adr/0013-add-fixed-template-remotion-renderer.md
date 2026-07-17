@@ -19,11 +19,19 @@ research, evidence gates, narration, alignment, music, Run Bundles, and delivery
 planning, asset resolution, review, and visual rendering stages differ.
 
 Remotion uses eight fixed, repository-owned templates. The host derives Shot IDs, word anchors, times,
-frames, purpose, motion and transition presets, asset IDs, source linkage, generated-image requests,
-paths, and renderer settings. One strict `remotion_direction` call per Shot returns bounded visible copy,
+frames, motion presets, asset IDs, source linkage, generated-image requests, paths, and renderer
+settings. Shot allocation prefers legal sentence and clause boundaries within the configured duration
+bounds. One bounded `remotion_rhythm` call labels the supplied immutable schedule with editorial
+function, attention, eligible evidence need, and section starts. The host derives purpose and
+transitions from that result. One strict `remotion_direction` call per Shot returns bounded visible copy,
 a template, an asset kind/query, and an SFX preset. A second call is permitted only when multiple
 eligible media records remain and may return one supplied `candidate_id`. The model never emits React,
 URLs, file paths, rights metadata, or a whole-video edit plan.
+
+A deterministic policy gate rejects insufficient code/source dwell, excessive template or motion
+repetition, consecutive source screenshots, dense rapid cutaways, ungrounded visible-evidence Beats,
+oversaturated or flat rhythm, and transitions outside declared section starts. Dashboard edits pass
+through the same gate.
 
 Asset resolution is policy-driven: owned/authorized `media-library/` files, eligible Wikimedia Commons
 media, optional Pexels media, then the configured Image Backend. Offline mode permits only local files

@@ -205,7 +205,11 @@ def resolve_config(
     ) or BACKEND_DESCRIPTORS[bindings["narration_synthesis"]].supports_word_timing:
         active_tasks.discard("caption_alignment")
     if raw.video_style is VideoStyle.STILL_IMAGE:
-        active_tasks -= {"remotion_direction", "remotion_asset_select"}
+        active_tasks -= {
+            "remotion_rhythm",
+            "remotion_direction",
+            "remotion_asset_select",
+        }
     else:
         active_tasks -= {"visual_plan", "image_prompt_compile"}
     if raw.quality is Quality.DRAFT:
@@ -322,7 +326,11 @@ def active_task_ids(config: ResolvedRunConfig) -> set[str]:
     ) or speech.supports_word_timing:
         task_ids.discard("caption_alignment")
     if config.video_style is VideoStyle.STILL_IMAGE:
-        task_ids -= {"remotion_direction", "remotion_asset_select"}
+        task_ids -= {
+            "remotion_rhythm",
+            "remotion_direction",
+            "remotion_asset_select",
+        }
     else:
         task_ids -= {"visual_plan", "image_prompt_compile"}
     if config.quality is Quality.DRAFT:

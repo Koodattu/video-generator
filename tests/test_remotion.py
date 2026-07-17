@@ -445,7 +445,11 @@ def test_remotion_config_forces_cadence_and_swaps_small_tasks(tmp_path: Path) ->
     assert config.video_style is VideoStyle.REMOTION_EXPLAINER
     assert config.visual_shot_mode.value == "cadenced"
     assert config.remotion_asset_policy.value == "local_only"
-    assert {"remotion_direction", "remotion_asset_select"} <= tasks
+    assert {
+        "remotion_rhythm",
+        "remotion_direction",
+        "remotion_asset_select",
+    } <= tasks
     assert {"visual_plan", "image_prompt_compile"}.isdisjoint(tasks)
 
 
@@ -458,6 +462,10 @@ def test_remotion_llm_schemas_exclude_host_owned_operational_fields(resolved_con
     )
     schemas = build_frozen_assets(config)["schemas"]
 
+    assert set(schemas["remotion_rhythm"]["properties"]) == {
+        "schema_version",
+        "beats",
+    }
     assert set(schemas["remotion_direction"]["properties"]) == {
         "template",
         "headline",
@@ -471,6 +479,9 @@ def test_remotion_llm_schemas_exclude_host_owned_operational_fields(resolved_con
     instructions = build_frozen_assets(config)["prompts"]["visual_review"]["instructions"]
     assert "inspect all three supplied media inputs" in instructions
     assert "inspect only the first media input" not in instructions
+    assert build_frozen_assets(config)["prompts"]["remotion_rhythm"]["version"].endswith(
+        ":semantic-rhythm-v1"
+    )
     assert build_frozen_assets(config)["prompts"]["remotion_direction"]["version"].endswith(
         ":brief-constraints-v1"
     )

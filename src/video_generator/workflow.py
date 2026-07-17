@@ -55,9 +55,13 @@ from .contracts import (
     RemotionAssetKind,
     RemotionAssetRequest,
     RemotionAssetRequestSet,
+    RemotionAttentionLevel,
+    RemotionBeatFunction,
     RemotionEditPlan,
     RemotionEditShot,
     RemotionRenderPlan,
+    RemotionRhythmBeat,
+    RemotionRhythmPlan,
     RemotionShotDirection,
     RemotionTemplate,
     RemotionTransitionPreset,
@@ -133,6 +137,10 @@ from .remotion_renderer import (
     remotion_motion_for_template,
     render_remotion_video,
 )
+from .remotion_planning import (
+    assess_remotion_edit_plan_quality,
+    semantic_shot_end_frames,
+)
 from .run_store import RunStore
 from .schema import restricted_json_schema
 from .util import (
@@ -147,7 +155,7 @@ from .util import (
 
 
 INTERNAL_REVISION = "media-workflow-v9"
-MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v65"
+MULTI_FORMAT_INTERNAL_REVISION = "media-workflow-v67"
 
 HOST_LEXICAL_POLICY_PREFIX = "Host lexical support policy"
 HOST_SELF_CONTAINED_POLICY_PREFIX = "Host self-contained claim policy"
@@ -4073,13 +4081,30 @@ class WorkflowEngine:
                 )
             desired_count = max(1, round(frame_count / target_frames))
             shot_count = min(max(desired_count, minimum_count), maximum_count)
-            base_frames, remainder = divmod(frame_count, shot_count)
             words = captions.scene_words.get(timeline_scene.scene_id) or timeline_scene.words
             script_words = script_by_id[timeline_scene.scene_id].spoken_text.split()
+            if getattr(self, "workflow_policy_version", 42) >= 42:
+                shot_ends = semantic_shot_end_frames(
+                    scene_start_frame=scene_start_frame,
+                    scene_end_frame=scene_end_frame,
+                    shot_count=shot_count,
+                    minimum_frames=minimum_frames,
+                    maximum_frames=maximum_frames,
+                    scene_start_seconds=float(timeline_scene.start_seconds),
+                    words=words,
+                    fps=fps,
+                )
+            else:
+                base_frames, remainder = divmod(frame_count, shot_count)
+                shot_ends = []
+                legacy_cursor = scene_start_frame
+                for local_index in range(shot_count):
+                    legacy_cursor += base_frames + (
+                        1 if local_index < remainder else 0
+                    )
+                    shot_ends.append(legacy_cursor)
             cursor = scene_start_frame
-            for local_index in range(shot_count):
-                duration_frames = base_frames + (1 if local_index < remainder else 0)
-                end_frame = cursor + duration_frames
+            for local_index, end_frame in enumerate(shot_ends):
                 local_start = cursor / fps - timeline_scene.start_seconds
                 local_end = end_frame / fps - timeline_scene.start_seconds
                 excerpt_words = [
@@ -11241,6 +11266,168 @@ class WorkflowEngine:
                 )
         return usage
 
+    def _remotion_rhythm_plan(
+        self,
+        *,
+        schedule: list[dict[str, Any]],
+        outline: OutlineLike,
+        research: ResearchPack | FactualResearchPack,
+        factual_grounding: dict[str, Any] | None,
+        source_options: list[dict[str, str]],
+    ) -> tuple[RemotionRhythmPlan, list[UsageRecord]]:
+        allowed_source_ids = {option["source_id"] for option in source_options}
+        first_shot_by_scene: dict[str, str] = {}
+        for item in schedule:
+            first_shot_by_scene.setdefault(item["scene_id"], item["shot_id"])
+        rhythm_schedule = []
+        for index, item in enumerate(schedule):
+            grounded_source_ids = set(
+                self._scene_grounded_source_ids(
+                    research,
+                    factual_grounding,
+                    item["scene_id"],
+                )
+            )
+            rhythm_schedule.append(
+                {
+                    "shot_id": item["shot_id"],
+                    "scene_id": item["scene_id"],
+                    "narration_excerpt": item["narration_excerpt"],
+                    "duration_seconds": round(
+                        float(item["end_seconds"]) - float(item["start_seconds"]),
+                        6,
+                    ),
+                    "evidence_available": bool(
+                        grounded_source_ids & allowed_source_ids
+                    )
+                    and index not in {0, len(schedule) - 1}
+                    and (
+                        float(item["end_seconds"]) - float(item["start_seconds"])
+                        >= 2.5
+                    ),
+                    "section_boundary_candidate": (
+                        index not in {0, len(schedule) - 1}
+                        and first_shot_by_scene[item["scene_id"]] == item["shot_id"]
+                    ),
+                }
+            )
+        outline_scenes = [
+            {
+                key: value
+                for key, value in scene.model_dump(mode="json").items()
+                if key
+                in {
+                    "scene_id",
+                    "arc_role",
+                    "narrative_purpose",
+                    "purpose",
+                    "key_point",
+                    "evidence_ids",
+                    "visual_opportunity",
+                }
+            }
+            for scene in outline.scenes
+        ]
+        rhythm_input = {
+            "direction_strategy": "whole-remotion-rhythm-v1",
+            "canonical_shot_schedule": rhythm_schedule,
+            "outline_scenes": outline_scenes,
+            "content_mode": self.config.content_mode.value,
+            "content_format": self.config.content_format.value,
+            "output_language": self.config.output_language.value,
+        }
+        schedule_by_shot = {item["shot_id"]: item for item in rhythm_schedule}
+        eligible_evidence_scene_ids = {
+            scene["scene_id"]
+            for scene in outline_scenes
+            if scene.get("arc_role") == "evidence"
+            and any(
+                item["scene_id"] == scene["scene_id"] and item["evidence_available"]
+                for item in rhythm_schedule
+            )
+        }
+
+        def validate_rhythm(value: RemotionRhythmPlan) -> None:
+            self._require(
+                [beat.shot_id for beat in value.beats]
+                == [item["shot_id"] for item in rhythm_schedule],
+                "Remotion rhythm must preserve every canonical Shot ID and order",
+            )
+            if self.config.content_mode is ContentMode.FICTION:
+                self._require(
+                    not any(beat.evidence_required for beat in value.beats),
+                    "fiction Remotion rhythm cannot require factual visual evidence",
+                )
+            for beat in value.beats:
+                item = schedule_by_shot[beat.shot_id]
+                self._require(
+                    not beat.evidence_required or item["evidence_available"],
+                    f"{beat.shot_id} cannot require unavailable visual evidence",
+                )
+                self._require(
+                    not beat.section_start or item["section_boundary_candidate"],
+                    f"{beat.shot_id} is not an eligible section boundary",
+                )
+            section_beats = [beat for beat in value.beats if beat.section_start]
+            self._require(
+                len(section_beats) <= 2,
+                "Remotion rhythm may declare at most two section starts",
+            )
+            for previous, current in zip(section_beats, section_beats[1:]):
+                current_item = next(
+                    item
+                    for item in schedule
+                    if item["shot_id"] == current.shot_id
+                )
+                previous_item = next(
+                    item
+                    for item in schedule
+                    if item["shot_id"] == previous.shot_id
+                )
+                self._require(
+                    float(current_item["start_seconds"])
+                    - float(previous_item["start_seconds"])
+                    >= 10,
+                    "Remotion section starts must be separated by at least ten seconds",
+                )
+            if eligible_evidence_scene_ids:
+                self._require(
+                    any(
+                        beat.evidence_required
+                        and schedule_by_shot[beat.shot_id]["scene_id"]
+                        in eligible_evidence_scene_ids
+                        for beat in value.beats
+                    ),
+                    "an eligible evidence Scene needs one visible-evidence Beat",
+                )
+            total_duration = sum(
+                float(item["duration_seconds"]) for item in rhythm_schedule
+            )
+            if total_duration >= 45 and len(value.beats) >= 8:
+                self._require(
+                    any(
+                        beat.attention is RemotionAttentionLevel.LOW
+                        or beat.function is RemotionBeatFunction.BREATHING_ROOM
+                        for beat in value.beats[1:-1]
+                    ),
+                    "long-form Remotion rhythm needs a low-attention or breathing-room Beat",
+                )
+
+        return self._structured_item(
+            stage="visual-plan",
+            item_id="rhythm",
+            task_id="remotion_rhythm",
+            input_data=rhythm_input,
+            output_model=RemotionRhythmPlan,
+            invariant=validate_rhythm,
+            max_output_tokens=2500,
+            instruction_suffix=(
+                "Return only schema fields. Every supplied Shot must appear exactly once and in "
+                "order. Treat section_boundary_candidate and evidence_available as hard host-owned "
+                "limits; do not infer additional candidates."
+            ),
+        )
+
     def _remotion_edit_plan(
         self,
         *,
@@ -11260,6 +11447,7 @@ class WorkflowEngine:
         words = self._anchored_words(narration.timeline, captions)
         source_options = self._source_options(research)
         override_payload = self.store.frozen_assets.get("remotion_edit_plan_override")
+        rhythm_enabled = self.workflow_policy_version >= 42
         visual_constraints = self._remotion_visual_brief_constraints()
         constraint_reviewer_metadata = self._stage_metadata(
             stage="visual-plan",
@@ -11268,6 +11456,19 @@ class WorkflowEngine:
                 "review_strategy": "single-remotion-plan-constraint-v1",
                 "constraints": visual_constraints,
             },
+        )
+        rhythm_planner_metadata = (
+            self._stage_metadata(
+                stage="visual-plan",
+                task_id="remotion_rhythm",
+                input_data={
+                    "direction_strategy": "whole-remotion-rhythm-v1",
+                    "canonical_shot_schedule": schedule,
+                    "outline": outline.model_dump(mode="json"),
+                },
+            )
+            if rhythm_enabled
+            else None
         )
         input_data = {
             "script": narration.script.model_dump(mode="json"),
@@ -11311,6 +11512,18 @@ class WorkflowEngine:
             },
             "edit_plan_override": override_payload,
         }
+        if rhythm_planner_metadata is not None:
+            input_data["rhythm_planner"] = {
+                "strategy": "whole-remotion-rhythm-v1",
+                "backend_id": rhythm_planner_metadata["backend_id"],
+                "backend_revision": rhythm_planner_metadata["backend_revision"],
+                "prompt_version": rhythm_planner_metadata["prompt_version"],
+                "schema_hash": hash_value(
+                    restricted_json_schema(
+                        RemotionRhythmPlan.model_json_schema(mode="validation")
+                    )
+                ),
+            }
         metadata = self._stage_metadata(
             stage="visual-plan",
             task_id=None if override_payload is not None else "remotion_direction",
@@ -11321,19 +11534,22 @@ class WorkflowEngine:
                 backend_id="internal:remotion-editor",
                 backend_revision="remotion-editor-v1",
             )
-        metadata["schema_hash"] = hash_value(
-            {
-                "item": restricted_json_schema(
-                    RemotionShotDirection.model_json_schema(mode="validation")
-                ),
-                "visual_constraint": restricted_json_schema(
-                    BriefConstraintAssessment.model_json_schema(mode="validation")
-                ),
-                "aggregate": restricted_json_schema(
-                    RemotionEditPlan.model_json_schema(mode="validation")
-                ),
-            }
-        )
+        stage_schemas = {
+            "item": restricted_json_schema(
+                RemotionShotDirection.model_json_schema(mode="validation")
+            ),
+            "visual_constraint": restricted_json_schema(
+                BriefConstraintAssessment.model_json_schema(mode="validation")
+            ),
+            "aggregate": restricted_json_schema(
+                RemotionEditPlan.model_json_schema(mode="validation")
+            ),
+        }
+        if rhythm_enabled:
+            stage_schemas["rhythm"] = restricted_json_schema(
+                RemotionRhythmPlan.model_json_schema(mode="validation")
+            )
+        metadata["schema_hash"] = hash_value(stage_schemas)
         reusable = self.store.reusable_record("visual-plan", **metadata)
         if reusable:
             return self.store.load_artifact(reusable, RemotionEditPlan)
@@ -11355,10 +11571,32 @@ class WorkflowEngine:
                 "visual-plan", plan, usage=usage
             )
             return RemotionEditPlan.model_validate(promoted)
+        rhythm = None
+        rhythm_usage: list[UsageRecord] = []
+        if rhythm_enabled:
+            rhythm, rhythm_usage = self._remotion_rhythm_plan(
+                schedule=schedule,
+                outline=outline,
+                research=research,
+                factual_grounding=factual_grounding,
+                source_options=source_options,
+            )
+        rhythm_by_shot = (
+            {beat.shot_id: beat for beat in rhythm.beats}
+            if rhythm is not None
+            else {}
+        )
         edit_shots = []
-        usage: list[UsageRecord] = []
+        usage: list[UsageRecord] = list(rhythm_usage)
         previous_direction: RemotionShotDirection | None = None
+        recent_directions: list[RemotionShotDirection] = []
         for index, schedule_item in enumerate(schedule):
+            rhythm_beat = rhythm_by_shot.get(schedule_item["shot_id"])
+            next_rhythm_beat = (
+                rhythm.beats[index + 1]
+                if rhythm is not None and index + 1 < len(rhythm.beats)
+                else None
+            )
             first_word, last_word = self._shot_word_span(schedule_item, words)
             grounded_source_ids = set(
                 self._scene_grounded_source_ids(
@@ -11403,11 +11641,46 @@ class WorkflowEngine:
                 "delivery": input_data["delivery"],
                 "brief_constraints": input_data["brief_constraints"],
             }
+            if rhythm is not None and rhythm_beat is not None:
+                item_input.update(
+                    recent_directions=[
+                        direction.model_dump(mode="json")
+                        for direction in recent_directions[-2:]
+                    ],
+                    recent_motion_presets=[
+                        remotion_motion_for_template(direction.template).value
+                        for direction in recent_directions[-3:]
+                    ],
+                    editorial_rhythm=rhythm_beat.model_dump(mode="json"),
+                    previous_editorial_function=(
+                        rhythm.beats[index - 1].function.value if index > 0 else None
+                    ),
+                    next_editorial_function=(
+                        next_rhythm_beat.function.value
+                        if next_rhythm_beat is not None
+                        else None
+                    ),
+                    next_evidence_required=(
+                        next_rhythm_beat.evidence_required
+                        if next_rhythm_beat is not None
+                        else False
+                    ),
+                )
 
             def validate_direction(
                 direction: RemotionShotDirection,
                 *,
                 position: int = index,
+                beat: RemotionRhythmBeat | None = rhythm_beat,
+                following_evidence_required: bool = (
+                    next_rhythm_beat.evidence_required
+                    if next_rhythm_beat is not None
+                    else False
+                ),
+                shot_duration: float = (
+                    float(schedule_item["end_seconds"])
+                    - float(schedule_item["start_seconds"])
+                ),
             ) -> None:
                 if position == 0 and direction.template.value != "kinetic_hook":
                     raise BackendError(
@@ -11436,6 +11709,74 @@ class WorkflowEngine:
                 ):
                     raise BackendError(
                         "source screenshots require supplied factual sources",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                if (
+                    beat is not None
+                    and direction.template is RemotionTemplate.SOURCE_SCREENSHOT
+                    and previous_direction is not None
+                    and previous_direction.template
+                    is RemotionTemplate.SOURCE_SCREENSHOT
+                ):
+                    raise BackendError(
+                        "full-screen source screenshots cannot be consecutive",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                if (
+                    beat is not None
+                    and not beat.evidence_required
+                    and following_evidence_required
+                    and direction.template is RemotionTemplate.SOURCE_SCREENSHOT
+                ):
+                    raise BackendError(
+                        "reserve the next Shot for its required source evidence",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                if (
+                    beat is not None
+                    and len(recent_directions) >= 2
+                    and recent_directions[-1].template is direction.template
+                    and recent_directions[-2].template is direction.template
+                ):
+                    raise BackendError(
+                        "the same Remotion template cannot repeat across three Shots",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                candidate_motion = remotion_motion_for_template(direction.template)
+                if (
+                    beat is not None
+                    and len(recent_directions) >= 3
+                    and candidate_motion.value != "hold"
+                    and all(
+                        remotion_motion_for_template(previous.template)
+                        is candidate_motion
+                        for previous in recent_directions[-3:]
+                    )
+                ):
+                    raise BackendError(
+                        "the same Remotion motion cannot repeat across four Shots",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                if (
+                    beat is not None
+                    and direction.template
+                    in {
+                        RemotionTemplate.CODE_REVEAL,
+                        RemotionTemplate.SOURCE_SCREENSHOT,
+                    }
+                    and shot_duration < 2.5
+                ):
+                    raise BackendError(
+                        f"{direction.template.value} requires at least 2.5 seconds",
+                        kind=ErrorKind.INVALID_OUTPUT,
+                    )
+                if beat is not None and beat.evidence_required and (
+                    direction.template is not RemotionTemplate.SOURCE_SCREENSHOT
+                    or direction.asset_kind is not RemotionAssetKind.SOURCE_SCREENSHOT
+                    or not shot_source_options
+                ):
+                    raise BackendError(
+                        "this evidence-required Beat needs a supplied source screenshot",
                         kind=ErrorKind.INVALID_OUTPUT,
                     )
                 if self.config.content_mode is ContentMode.FACTUAL:
@@ -11470,6 +11811,17 @@ class WorkflowEngine:
                     "fit the current narration beat; use visual action, asset intent, or SFX rather "
                     "than forcing a visual-only requirement into visible copy."
                     + (
+                        " Treat editorial_rhythm as the Shot's assigned visual function and "
+                        "attention level. Avoid repeating either of the two recent templates. When "
+                        "evidence_required is true, use the supplied source_screenshot option. "
+                        "Never place source screenshots consecutively, and when "
+                        "next_evidence_required is true reserve that next Shot for the screenshot. "
+                        "Avoid extending recent_motion_presets into four identical non-hold "
+                        "motions; motion is derived from the selected template."
+                        if rhythm_beat is not None
+                        else ""
+                    )
+                    + (
                         " In factual mode, headline, supporting_text, and every body_lines entry "
                         "must each be one exact contiguous phrase from narration_excerpt; use "
                         "punctuation or capitalization changes only. This prevents new unaudited "
@@ -11485,14 +11837,22 @@ class WorkflowEngine:
                 RemotionEditShot(
                     **direction.model_dump(mode="python"),
                     purpose=(
-                        "Kuvita nykyinen kerronnan rytmi kiinteällä mallipohjalla."
-                        if self.config.output_language is OutputLanguage.FINNISH
-                        else "Illustrate the current narration beat with a fixed template."
+                        rhythm_beat.function.value
+                        if rhythm_beat is not None
+                        else (
+                            "Kuvita nykyinen kerronnan rytmi kiinteällä mallipohjalla."
+                            if self.config.output_language is OutputLanguage.FINNISH
+                            else "Illustrate the current narration beat with a fixed template."
+                        )
                     ),
                     motion=remotion_motion_for_template(direction.template),
                     transition_in=(
                         RemotionTransitionPreset.SECTION_WIPE
-                        if index == len(schedule) - 1
+                        if (
+                            rhythm_beat.section_start
+                            if rhythm_beat is not None
+                            else index == len(schedule) - 1
+                        )
                         else RemotionTransitionPreset.HARD_CUT
                     ),
                     shot_id=schedule_item["shot_id"],
@@ -11510,6 +11870,7 @@ class WorkflowEngine:
                 )
             )
             previous_direction = direction
+            recent_directions.append(direction)
             usage.extend(item_usage)
         frame_duration = float(schedule[-1]["end_seconds"])
         plan = RemotionEditPlan(
@@ -11521,7 +11882,26 @@ class WorkflowEngine:
             duration_frames=round(frame_duration * self.config.fps),
             words=words,
             shots=edit_shots,
+            rhythm=rhythm,
         )
+        if rhythm is not None:
+            quality_report = assess_remotion_edit_plan_quality(plan)
+            if not quality_report.passed:
+                detail = "; ".join(
+                    f"{finding.code} ({', '.join(finding.shot_ids)}): {finding.message}"
+                    for finding in quality_report.findings
+                )
+                raise BackendError(
+                    f"Remotion editorial quality validation failed: {detail}",
+                    kind=ErrorKind.INVALID_OUTPUT,
+                    action="Rerun from visual-plan or adjust the affected Shot in the dashboard.",
+                )
+            plan = RemotionEditPlan.model_validate(
+                {
+                    **plan.model_dump(mode="python"),
+                    "quality_report": quality_report,
+                }
+            )
         usage.extend(self._review_remotion_visual_constraints(plan, visual_constraints))
         promoted = self.store.complete_fanout_stage("visual-plan", plan, usage=usage)
         return RemotionEditPlan.model_validate(promoted)
@@ -11547,10 +11927,15 @@ class WorkflowEngine:
             len(plan.shots) == len(schedule),
             "edited plan cannot add or remove canonical Shots",
         )
-        purpose = (
+        legacy_purpose = (
             "Kuvita nykyinen kerronnan rytmi kiinteällä mallipohjalla."
             if self.config.output_language is OutputLanguage.FINNISH
             else "Illustrate the current narration beat with a fixed template."
+        )
+        rhythm_by_shot = (
+            {beat.shot_id: beat for beat in plan.rhythm.beats}
+            if plan.rhythm is not None
+            else {}
         )
         allowed_source_ids = {
             option["source_id"] for option in self._source_options(research)
@@ -11586,7 +11971,11 @@ class WorkflowEngine:
                 "end_seconds": schedule_item["end_seconds"],
                 "start_frame": round(float(schedule_item["start_seconds"]) * self.config.fps),
                 "end_frame": round(float(schedule_item["end_seconds"]) * self.config.fps),
-                "purpose": purpose,
+                "purpose": (
+                    rhythm_by_shot[shot.shot_id].function.value
+                    if shot.shot_id in rhythm_by_shot
+                    else legacy_purpose
+                ),
                 "source_screenshot_source_ids": [
                     source_id
                     for source_id in grounded_source_ids
@@ -11594,7 +11983,11 @@ class WorkflowEngine:
                 ],
                 "transition_in": (
                     RemotionTransitionPreset.SECTION_WIPE
-                    if index == len(schedule) - 1
+                    if (
+                        rhythm_by_shot[shot.shot_id].section_start
+                        if shot.shot_id in rhythm_by_shot
+                        else index == len(schedule) - 1
+                    )
                     else RemotionTransitionPreset.HARD_CUT
                 ),
             }
@@ -11617,6 +12010,16 @@ class WorkflowEngine:
                         ),
                         "factual edited on-screen text must remain a contiguous audited phrase",
                     )
+        if plan.rhythm is not None:
+            quality_report = assess_remotion_edit_plan_quality(plan)
+            self._require(
+                quality_report.passed,
+                "edited Remotion plan violates deterministic editorial quality rules",
+            )
+            self._require(
+                plan.quality_report == quality_report,
+                "edited Remotion plan must contain the current quality report",
+            )
 
     def _remotion_asset_requests(
         self,

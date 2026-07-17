@@ -567,6 +567,7 @@ def _text_tasks(backend_id: str) -> dict[str, str]:
             "factual_review",
             "duration_repair",
             "visual_plan",
+            "remotion_rhythm",
             "remotion_direction",
             "remotion_asset_select",
             "image_prompt_compile",

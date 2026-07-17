@@ -38,7 +38,7 @@ The durable artifact set is deliberately finite.
 | `TimedVisualPlan` | Resolved Style Profile and canonical, frame-aligned generated-image Shots linked to parent Scenes | visual planning |
 | `ImageRequest` / `TimedImageRequest` | Backend-specific compiled prompt and generation settings linked to one Scene or Shot | prompt compiler |
 | `VisualReviewReport` | Brief/style/identity scores and one targeted regeneration instruction | visual review |
-| `RemotionEditPlan` | Host-timed Shots using one of eight fixed templates, bounded visible copy, asset intent, motion, transition, and SFX presets | host allocator plus one small direction call per Shot |
+| `RemotionEditPlan` | Host-timed Shots, bounded rhythm, deterministic quality report, one of eight fixed templates, visible copy, asset intent, motion, transition, and SFX presets | host allocator plus one rhythm call and one small direction call per Shot |
 | `RemotionAssetRequestSet` | Host-owned asset IDs, kinds, English search queries or generated prompts, and evidence-linked source IDs | deterministic Remotion asset compiler |
 | `RemotionAssetBundle` / `AssetRights` | Resolved local media references, hashes, transformations, source/creator/license/attribution data, and review warnings | Remotion asset resolver |
 | `CaptionTrack` | Canonical words and monotonic time spans | timing normalization |
@@ -144,6 +144,7 @@ A Run Profile maps each fixed Workflow Task ID to exactly one compatible Backend
 | `duration_repair` | Structured Text | measured narration misses its accepted band |
 | `caption_alignment` | Alignment | captions or cadenced Shots need timing and TTS timing is insufficient |
 | `visual_plan` | Structured Text | `still_image` Runs |
+| `remotion_rhythm` | Structured Text | `remotion_explainer` Runs; called once for the canonical Shot schedule |
 | `remotion_direction` | Structured Text | `remotion_explainer` Runs; called separately for each Shot |
 | `remotion_asset_select` | Structured Text | binding required for `remotion_explainer`; called only when more than one eligible candidate exists |
 | `image_prompt_compile` | Structured Text | `still_image` Runs; output is bound to the selected Image Backend |
@@ -155,7 +156,13 @@ A Run Profile maps each fixed Workflow Task ID to exactly one compatible Backend
 `image_prompt_compile` is a real, separately selectable Workflow Task rather than hidden string concatenation. It receives provider-neutral visual artifacts plus a bounded descriptor for the target Image Backend and emits a validated Image Request for that Backend. Its own Backend/model, instructions, and output hash are persisted. A deterministic compiler Backend may implement the same task for simple/test renderers.
 
 The Remotion task boundary is deliberately smaller. The host first creates canonical IDs, word anchors,
-times, frame ranges, and a bounded narration excerpt. `remotion_direction` receives one Shot at a time
+times, frame ranges, and bounded narration excerpts, preferring sentence and clause boundaries that fit
+the configured Shot bounds. `remotion_rhythm` receives that immutable schedule once and returns only an
+ordered Beat function, attention level, evidence flag, and eligible section-start flag per supplied
+Shot. It cannot change IDs, timing, copy, templates, assets, or rights. The contract limits high
+attention, rejects four repeated functions and consecutive evidence requirements, and reserves
+readable source evidence for eligible interior Shots. `remotion_direction` then
+receives one Shot and its assigned Beat at a time
 and returns only `template`, `headline`, `supporting_text`, `body_lines`, `asset_kind`, `asset_query`,
 and `sfx`. The host derives purpose, motion, transition, generated-image prompt, asset/source IDs, URLs,
 paths, licenses, and renderer settings. The raw seven-field response is preserved, then a deterministic
@@ -169,6 +176,10 @@ one supplied `candidate_id`; no model may create a URL or rights claim.
 Visual-only Brief requirements are then assessed individually against the complete assembled plan;
 promotion fails when a `must_include` or `avoid` rule remains unresolved. The same aggregate gate runs
 for immutable dashboard edit overrides.
+Deterministic plan-quality validation also enforces readable code/source dwell, nonconsecutive source
+screenshots, bounded repetition and rapid-cut density, scene-grounded evidence when a Beat requires it,
+an intentional low-attention or breathing Beat in longer plans, and section transitions that match the
+frozen rhythm plan.
 Evidence sources are offered as screenshot options only when their exact host or parent domain appears
 in the frozen `remotion_source_screenshot_hosts` trust allowlist. The resolver checks that policy again
 before launching the restricted capture browser, which applies the same policy to every redirect,

@@ -19,7 +19,7 @@ from .task_models import task_output_models
 
 
 PROMPT_SET_VERSION = "2026-07-12.v14"
-MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-16.v54"
+MULTI_FORMAT_PROMPT_SET_VERSION = "2026-07-17.v55"
 MULTI_FORMAT_TASK_PROMPT_REVISIONS = {
     "script_draft": "spoken-text-only-v1",
     "review_story": "spoken-script-scope-and-resolution-v1",
@@ -28,6 +28,7 @@ MULTI_FORMAT_TASK_PROMPT_REVISIONS = {
     "script_revision": "spoken-text-only-v1",
     "duration_repair": "spoken-text-only-v1",
     "image_prompt_compile": "local-image-targets-v3",
+    "remotion_rhythm": "semantic-rhythm-v1",
     "remotion_direction": "brief-constraints-v1",
     "visual_review": "remotion-hard-failure-v1",
 }
@@ -310,6 +311,32 @@ elaborate shading. For another style_id, translate its style_description into an
 reusable Style Profile without importing Scene content. style_description may refine the selected
 style but never override safety, no-text, identity continuity, legibility, or the supplied composition.
 """,
+    "remotion_rhythm": """
+Assign editorial rhythm to the complete supplied canonical Remotion Shot schedule. Return exactly one
+Beat for every supplied Shot, preserving the supplied Shot IDs and order. Beat IDs must be contiguous
+from beat-001. The first Beat is hook and the final Beat is landing.
+
+Choose the narrow editorial function that best describes what the current narration needs visually:
+setup, explanation, evidence, example, contrast, comic_relief, breathing_room, transition, or
+synthesis. Use attention=high sparingly for the hook, a decisive reversal, important evidence, or the
+landing; use low for deliberate breathing room. Mark evidence_required only when the Shot explicitly
+offers evidence_available=true. At least one eligible Beat in an evidence Outline Scene should carry
+the evidence when it improves comprehension.
+
+Mark section_start only on a supplied section_boundary_candidate, never on the opening or final Beat.
+Use at most two section starts and reserve them for genuine changes in explanatory phase, not ordinary
+Shot cuts.
+
+Use high attention for both the hook and landing, then keep total high attention within forty percent
+of the plan, with a minimum budget of two Beats. Never repeat one editorial function for four
+consecutive Beats, never mark consecutive Beats as evidence_required, and use evidence_required only
+with the evidence function. For a plan of at least 45 seconds and eight Beats, include an intentional
+low-attention or breathing_room Beat between the endpoints.
+
+Do not choose templates, copy, assets, queries, sound effects, motion, transitions, timings, word
+anchors, Scene IDs, URLs, paths, rights, or renderer settings. Python owns all operational fields and
+will reject any change to the canonical schedule.
+""",
     "remotion_direction": """
 Direct exactly one supplied narration Shot using one allowlisted Remotion template. Return only the
 small creative decision fields in the schema. Python owns the Shot and Scene IDs, word anchors,
@@ -331,7 +358,8 @@ Use kinetic_hook only for an opening jolt, conclusion only for the landing, sour
 when supplied factual source options directly support the current narration, code_reveal for genuine
 technical or pseudo-code steps, diagram_flow for a process, comparison_split for a real contrast, and
 meme_cutaway as a brief reaction beat rather than the factual evidence itself. Keep the current
-narration literal, fast to parse, and distinct from adjacent Shots.
+narration literal, fast to parse, and distinct from adjacent Shots. Never select source_screenshot
+immediately before or after another source_screenshot.
 """,
     "remotion_asset_select": """
 Choose exactly one supplied candidate ID for one fixed asset request. Judge only semantic fit,
@@ -844,6 +872,7 @@ ID where a minimal edit belongs.
         "factual_review",
         "duration_repair",
         "visual_plan",
+        "remotion_rhythm",
         "remotion_direction",
     }
     if task_id in context_tasks:
@@ -967,7 +996,7 @@ def build_frozen_assets(config: ResolvedRunConfig | None = None) -> dict[str, An
     }
     assets: dict[str, Any] = {
         "prompt_set_version": prompt_set_version,
-        "workflow_policy_version": 2 if legacy_pack else 41,
+        "workflow_policy_version": 2 if legacy_pack else 42,
         "prompts": prompts,
         "image_targets": TARGET_IMAGE_GUIDANCE,
         "schemas": schemas,

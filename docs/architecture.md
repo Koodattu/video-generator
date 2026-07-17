@@ -53,7 +53,8 @@ flowchart TD
     T1 -- No --> U1["Deterministic still Render Plan"]
     T3 --> U1
     RB -- remotion_explainer --> RA["Host allocates word-anchored Shots"]
-    RA --> RD["One small LLM direction call per Shot"]
+    RA --> RH["One bounded whole-video rhythm pass"]
+    RH --> RD["One small LLM direction call per Shot"]
     RD --> RC["Host compiles asset requests"]
     RC --> RS["Resolve owned, stock, screenshot, or generated assets"]
     RS --> AP{"Manual asset approval enabled?"}
@@ -126,7 +127,7 @@ The runner manager should batch adjacent calls, while accepting bounded reloads 
 1. keep the selected LLM resident for research reduction, ideation, selection, outline, writing, and the three reviews;
 2. release it, load TTS, and synthesize all Scenes;
 3. only when duration misses: release TTS, reload the `duration_repair` LLM, then reload TTS for the changed Scenes;
-4. after the final Narration Timeline, load the assigned text Backend(s): `visual_plan` and `image_prompt_compile` for still-image Runs, or the per-Shot `remotion_direction` and optional `remotion_asset_select` tasks for Remotion Runs, plus optional `music_brief`; group only tasks that actually share a model;
+4. after the final Narration Timeline, load the assigned text Backend(s): `visual_plan` and `image_prompt_compile` for still-image Runs, or the once-per-plan `remotion_rhythm`, per-Shot `remotion_direction`, and optional `remotion_asset_select` tasks for Remotion Runs, plus optional `music_brief`; group only tasks that actually share a model;
 5. load alignment only if captions need it;
 6. load the image model for all required Scene/Shot images, including Remotion requests that could not be satisfied from approved local or network media;
 7. for Remotion Runs with the approval gate enabled, stop after asset resolution until the Dashboard creates a hash-bound approval child Run;
@@ -207,7 +208,12 @@ media layer then scales/crops the raw result to the exact delivery frame.
 The Remotion branch uses eight audited templates rather than model-generated React:
 `kinetic_hook`, `headline_zoom`, `source_screenshot`, `code_reveal`, `diagram_flow`,
 `comparison_split`, `meme_cutaway`, and `conclusion`. The host allocates immutable Shot IDs, word
-anchors, times, frames, transition and motion presets, asset IDs, and file paths. One strict
+anchors, times, frames, transition and motion presets, asset IDs, and file paths. It prefers legal
+sentence and clause boundaries over equal-duration cuts, then runs one strict `remotion_rhythm` pass
+that labels every supplied Shot with an editorial function, attention level, evidence need, and
+eligible section start without changing the schedule. The contract caps high-attention Beats, breaks
+long runs of one editorial function, keeps evidence screenshots nonconsecutive and readable, and
+requires an intentional low-attention or breathing Beat in longer plans. One strict
 `remotion_direction` call per Shot returns only visible copy, a template, an asset kind/query, and a
 sound-effect preset. A deterministic canonicalizer then maps that flat portable response to the selected
 component's actual field set: it owns first/final placement, clears non-rendered fields, bounds text, and
@@ -215,6 +221,9 @@ downgrades an unusable template without asking the model to repair host-solvable
 not fabricate creative content, and the strict render contract still rejects malformed values. Visible
 factual copy must be a contiguous phrase already present in the evidence-reviewed narration. A
 candidate-selection call, when needed, may return only one supplied `candidate_id`.
+Before promotion, deterministic editorial checks reject insufficient code/source dwell, consecutive
+source screenshots, excessive template or motion repetition, dense rapid cutaways, ungrounded evidence
+Beats, flat long-form rhythm, and section wipes that do not match the rhythm plan.
 
 Asset resolution tries owned/authorized `media-library/` files, then allowlisted Wikimedia Commons
 media, then Pexels when configured, and finally the selected Image Backend. Offline mode forces the
@@ -261,7 +270,7 @@ The Music Backend declares its observed duration limit. The media layer trims, f
 The deterministic Render Plan contains no model decisions. In the original branch, FFmpeg holds each
 normalized image for its Scene or Shot interval and applies hard cuts. In the Remotion branch, the
 pinned local TypeScript composition renders fixed components to PNG frames with host-owned timing,
-hard cuts, and exactly one section-wipe transition for a multi-Shot plan. FFmpeg then encodes or muxes
+hard cuts, and up to two rhythm-selected section-wipe transitions. FFmpeg then encodes or muxes
 the visual stream with master narration, optional Music Bed, and selectable captions. Both branches
 write H.264/AAC MP4 with `yuv420p`, 30 fps, and fast-start metadata.
 

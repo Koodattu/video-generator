@@ -254,11 +254,17 @@ the selected delivery dimensions.
 
 For important recurring characters, final-quality profiles may create or select a reference image before the Scene batch when the Backend supports references. This is an optimization for recognizable traits, not a promise of pixel-perfect continuity.
 
-### Remotion direction and asset selection
+### Remotion rhythm, direction and asset selection
 
 The `remotion_explainer` branch does not ask a model for an edit-decision list, timeline JSON, React,
-download instructions, or rights metadata. The host first allocates a frame-aligned Shot from canonical
-word timings and supplies one narration excerpt plus a bounded menu of templates, asset kinds, and SFX.
+download instructions, or rights metadata. The host first allocates frame-aligned Shots from canonical
+word timings, preferring sentence and clause boundaries within the configured duration bounds. One
+`remotion_rhythm` request labels the immutable whole-video schedule with editorial function, attention,
+eligible evidence need, and genuine section starts. It cannot alter the schedule or select renderer
+content. Host validation caps high-attention density, rejects four identical consecutive functions and
+consecutive evidence requirements, and requires a low-attention or breathing Beat in longer plans.
+Each subsequent direction call receives its assigned Beat, recent template/motion history, one
+narration excerpt, and a bounded menu of templates, asset kinds, and SFX.
 One `remotion_direction` request returns exactly:
 
 ```text
@@ -279,13 +285,19 @@ body/media-dependent template when its required creative input is absent. It nev
 copy or an asset query. The raw provider response remains recorded beside the canonical aggregate, so
 the transformation is auditable and does not require another LLM repair call.
 
-The host also derives the Shot's purpose, motion preset, hard-cut/section-wipe placement,
+The host derives the Shot's purpose and section-wipe placement from the validated rhythm plan, while
+motion remains template-derived. It also owns the
 generated-image prompt, IDs, timing, frames, and paths. Visible factual copy must come verbatim from the
 current narration excerpt; a non-contiguous headline is replaced with a bounded exact excerpt, optional
 copy is cleared, and an incompatible body template is downgraded. This ensures factual on-screen claims
 cannot bypass the completed evidence gate. The model may express an asset search query in English
 because the configured media services and image models perform better with English retrieval/prompting;
 Finnish narration and captions remain canonical.
+
+Before the plan is promoted, deterministic policy checks enforce readable dwell for code and source
+screenshots, nonconsecutive source screenshots, bounded template/motion repetition, rapid-cut density,
+scene-grounded visible evidence, long-form breathing room, and section wipes that occur only on
+declared section starts. Dashboard edits rerun the same checks.
 
 Explicit visual-only `must_include` and `avoid` rules are reviewed once more against the complete
 assembled edit plan before it is promoted, including dashboard-authored overrides. A trailing explicit

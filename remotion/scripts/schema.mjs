@@ -113,7 +113,7 @@ export const renderManifestSchema = z.object({
   if (value.shots[0]?.transitionIn !== "hard_cut") {
     context.addIssue({code: "custom", message: "the first Shot must use a hard cut"});
   }
-  if (value.shots.length > 1 && sectionTransitions.length !== 1) {
-    context.addIssue({code: "custom", message: "multi-Shot manifests require one section_wipe"});
+  if (sectionTransitions.length > 2) {
+    context.addIssue({code: "custom", message: "manifests allow at most two section_wipe transitions"});
   }
 });

@@ -44,6 +44,7 @@ TASK_LAST_USE_STAGE: dict[str, str] = {
     "duration_repair": "narration",
     "caption_alignment": "captions",
     "visual_plan": "visual-plan",
+    "remotion_rhythm": "visual-plan",
     "remotion_direction": "visual-plan",
     "remotion_asset_select": "images",
     "image_prompt_compile": "image-prompt-compile",

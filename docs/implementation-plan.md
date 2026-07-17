@@ -8,16 +8,19 @@ full bilingual profile and 60–90-second quality acceptance criteria remain del
 The selectable `remotion_explainer` branch is implemented without changing the default
 `still_image` behavior:
 
-- V1: eight fixed audited components, host-owned word/frame timing, hard cuts plus one deterministic
-  section wipe, code/headline/diagram/comparison/meme/source templates, kinetic word captions, local
+- V1: eight fixed audited components, host-owned word/frame timing, hard cuts plus bounded
+  rhythm-selected section wipes, code/headline/diagram/comparison/meme/source templates, kinetic word captions, local
   Remotion rendering, FFmpeg mux/QC, and deterministic SFX;
 - V2: owned media-library lookup, evidence-linked browser screenshots, allowlisted Commons/Pexels
   retrieval, normalized GIF/video assets, license/attribution records and credits, composed proxy
   inspection, one targeted generated-image repair, a proportional Dashboard timeline, immutable
   per-Shot edits, and an optional hash-bound manual asset-approval child Run;
-- LLM scope: one strict direction response per Shot and, only when useful, one single-ID candidate
-  selection response. Python owns IDs, timing, frames, paths, downloads, rights policy, transitions,
-  motion, generated-image requests, and rendering.
+- editorial rhythm: punctuation-aware host Shot allocation, one bounded whole-video rhythm response,
+  deterministic attention/function balance plus dwell/repetition/rapid-cut/evidence/section-transition
+  checks, and the same checks for Dashboard edits;
+- LLM scope: one strict rhythm response per plan, one strict direction response per Shot and, only when
+  useful, one single-ID candidate selection response. Python owns IDs, timing, frames, paths,
+  downloads, rights policy, transition compilation, motion, generated-image requests, and rendering.
 
 Deliberately deferred are arbitrary model-generated React/components, OTIO interchange, square
 compositions, selector/highlight authoring for evidence screenshots, a general nonlinear editor,

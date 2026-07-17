@@ -293,6 +293,7 @@ def _next_incomplete_stage(store: RunStore) -> str | None:
 
 def _completed_call_counts(store: RunStore) -> dict[str, int]:
     narration = store.completed_item_ids("narration")
+    visual_plan = store.completed_item_ids("visual-plan")
     visual_review = store.completed_item_ids("visual-review")
     music_brief = store.completed_item_ids("music-brief")
     music_brief_stage = store.stage_record("music-brief")
@@ -309,6 +310,7 @@ def _completed_call_counts(store: RunStore) -> dict[str, int]:
         ),
         "duration_repair": int("duration-repair-script" in narration),
         "caption_alignment": len(store.completed_item_ids("captions")),
+        "remotion_rhythm": int("rhythm" in visual_plan),
         "image_prompt_compile": len(store.completed_item_ids("image-prompt-compile")),
         "image_generate": len(store.completed_item_ids("images"))
         + sum(1 for item_id in visual_review if item_id.endswith("-regeneration")),

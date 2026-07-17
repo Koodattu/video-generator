@@ -94,6 +94,7 @@ elevenlabs_voice_id = ""
 # research = "local:llama-server"
 # script_draft = "openai:gpt-5.6-terra"
 # image_prompt_compile = "local:llama-server"
+# remotion_rhythm = "local:llama-server"             # One bounded whole-video rhythm pass.
 # remotion_direction = "local:llama-server"          # One small creative decision per Shot.
 # remotion_asset_select = "local:llama-server"       # One supplied candidate_id only.
 # image_generate = "local:flux.2-klein-4b"

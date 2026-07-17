@@ -242,6 +242,9 @@ class RunStore:
                 if fallback:
                     migrated["claim_inventory"] = fallback
             legacy_remotion_fallbacks = {
+                "remotion_rhythm": migrated.get("remotion_direction")
+                or migrated.get("visual_plan")
+                or migrated.get("script_revision"),
                 "remotion_direction": migrated.get("visual_plan")
                 or migrated.get("script_revision"),
                 "remotion_asset_select": migrated.get("image_prompt_compile")
@@ -982,6 +985,7 @@ TASK_STAGE_IMPACT: dict[str, str] = {
     "duration_repair": "narration",
     "caption_alignment": "captions",
     "visual_plan": "visual-plan",
+    "remotion_rhythm": "visual-plan",
     "remotion_direction": "visual-plan",
     "remotion_asset_select": "images",
     "image_prompt_compile": "image-prompt-compile",

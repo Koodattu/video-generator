@@ -420,11 +420,19 @@ remotion_source_screenshot_hosts = [] # explicit trusted parent hosts; empty dis
 
 The Remotion renderer uses a deterministic eight-template library: `kinetic_hook`, `headline_zoom`,
 `source_screenshot`, `code_reveal`, `diagram_flow`, `comparison_split`, `meme_cutaway`, and
-`conclusion`. The local LLM directs one Shot at a time through a strict small schema. Python—not the
+`conclusion`. Python first chooses legal sentence/clause cut points, and one bounded whole-video rhythm
+pass assigns an editorial function, attention level, eligible evidence need, and real section starts to
+the immutable schedule. The local LLM then directs one Shot at a time through a strict small schema.
+Python—not the
 model—owns Shot/Scene IDs, word anchors, time/frame conversion, asset IDs, URLs, downloads, paths,
 license interpretation, renderer settings, and final assembly. A second small call may choose only one
 supplied `candidate_id`; it cannot invent a URL or license. This is intentionally not model-generated
 React or a giant timeline JSON response.
+
+Before asset resolution, deterministic checks reject too-short code/source Shots, excessive
+template/motion repetition, consecutive source screenshots, dense rapid cutaways, ungrounded evidence
+requirements, oversaturated attention, flat long-form rhythm, and section wipes outside the rhythm
+plan. Dashboard Shot edits rerun those checks before creating a child Run.
 
 Remotion asset resolution is policy-driven and ordered:
 

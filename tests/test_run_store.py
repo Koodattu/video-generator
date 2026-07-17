@@ -150,6 +150,14 @@ def test_claim_inventory_backend_change_invalidates_script_revision(resolved_con
     assert earliest_config_impact(resolved_config, changed) == "script-revision"
 
 
+def test_remotion_rhythm_backend_change_invalidates_visual_plan(resolved_config) -> None:
+    bindings = dict(resolved_config.task_bindings)
+    bindings["remotion_rhythm"] = "deterministic:structured"
+    changed = resolved_config.model_copy(update={"task_bindings": bindings})
+
+    assert earliest_config_impact(resolved_config, changed) == "visual-plan"
+
+
 def test_orientation_change_invalidates_caption_layout_and_visuals(
     resolved_config,
 ) -> None:
@@ -238,6 +246,7 @@ def test_legacy_run_loads_without_remotion_task_bindings(
         frozen_assets=build_frozen_assets(config),
     )
     stored_config = read_json(store.config_path)
+    del stored_config["task_bindings"]["remotion_rhythm"]
     del stored_config["task_bindings"]["remotion_direction"]
     del stored_config["task_bindings"]["remotion_asset_select"]
     atomic_write_json(store.config_path, stored_config)
@@ -247,6 +256,9 @@ def test_legacy_run_loads_without_remotion_task_bindings(
 
     reopened = RunStore.open(store.root)
 
+    assert reopened.config.task_bindings["remotion_rhythm"] == (
+        reopened.config.task_bindings["visual_plan"]
+    )
     assert reopened.config.task_bindings["remotion_direction"] == (
         reopened.config.task_bindings["visual_plan"]
     )
@@ -254,5 +266,6 @@ def test_legacy_run_loads_without_remotion_task_bindings(
         reopened.config.task_bindings["image_prompt_compile"]
     )
     persisted = read_json(reopened.config_path)["task_bindings"]
+    assert "remotion_rhythm" not in persisted
     assert "remotion_direction" not in persisted
     assert "remotion_asset_select" not in persisted

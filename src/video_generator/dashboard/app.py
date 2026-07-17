@@ -56,6 +56,7 @@ from ..profiles import (
 )
 from ..prompting import build_frozen_assets
 from ..provenance import build_runtime_snapshot, verify_runtime_snapshot
+from ..remotion_planning import assess_remotion_edit_plan_quality
 from ..remotion_renderer import remotion_motion_for_template
 from ..run_store import RunStore
 from ..util import hash_value
@@ -80,6 +81,7 @@ TASK_GROUPS: dict[str, tuple[str, ...]] = {
     "Voice": ("narration_synthesis", "caption_alignment"),
     "Visuals": (
         "visual_plan",
+        "remotion_rhythm",
         "remotion_direction",
         "remotion_asset_select",
         "image_prompt_compile",
@@ -614,8 +616,25 @@ def create_dashboard_app(
                     {
                         **plan.model_dump(mode="python"),
                         "shots": edited_shots,
+                        "quality_report": None,
                     }
                 )
+                if edited_plan.rhythm is not None:
+                    quality_report = assess_remotion_edit_plan_quality(edited_plan)
+                    if not quality_report.passed:
+                        finding = quality_report.findings[0]
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"The edit violates {finding.code}: {finding.message}"
+                            ),
+                        )
+                    edited_plan = RemotionEditPlan.model_validate(
+                        {
+                            **edited_plan.model_dump(mode="python"),
+                            "quality_report": quality_report,
+                        }
+                    )
                 if (
                     edited_shot.asset_kind is RemotionAssetKind.SOURCE_SCREENSHOT
                     and not source_screenshot_eligible
