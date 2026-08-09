@@ -24,6 +24,8 @@ QWEN_IMAGE_NF4_SKIP_MODULES = [
     "txt_in",
     "norm_out",
     "proj_out",
+    "img_mod",
+    "txt_mod",
 ]
 
 

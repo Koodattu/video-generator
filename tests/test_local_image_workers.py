@@ -299,6 +299,8 @@ def test_qwen_image_uses_nf4_offload_and_true_cfg(
         "txt_in",
         "norm_out",
         "proj_out",
+        "img_mod",
+        "txt_mod",
     ]
     assert calls["offload"] is True
     generate = calls["generate"]
@@ -312,6 +314,8 @@ def test_qwen_image_uses_nf4_offload_and_true_cfg(
         "txt_in",
         "norm_out",
         "proj_out",
+        "img_mod",
+        "txt_mod",
     ]
 
 

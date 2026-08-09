@@ -165,7 +165,8 @@ above the official planning claim. Do not run it concurrently with another GPU m
 
 `Qwen/Qwen-Image-2512` is loaded through selective on-the-fly NF4 quantization of the transformer and
 text encoder plus CPU offload. The small `time_text_embed`, `img_in`, `txt_in`, `norm_out`, and
-`proj_out` boundary modules remain in their original precision. The adapter uses the model's
+`proj_out` boundary modules and the per-block `img_mod` and `txt_mod` modulation layers remain in
+their original precision. The adapter uses the model's
 documented 50-step path at 1664×928 or 928×1664, passes native negative conditioning with
 `true_cfg_scale = 4.0`, and does not advertise reference-image editing. Full BF16 is not a 24 GB
 configuration. Python removes negative-prompt clauses that conflict with approved positive visual or
